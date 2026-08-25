@@ -129,6 +129,37 @@ export function resolveStuckTimeoutMs(
 // Active task/heartbeat injections keyed by `${taskName}@${agentName}`.
 const taskInflightMap = new Map<string, TaskInflightEntry>()
 
+// Session -> ms-epoch of the last time a scheduled task on it cleanly
+// finished (pane returned to idle after injection). Consumed by
+// reauth-healer.ts as a sanity check before a main-agent force-restart on a
+// "dead OAuth token" reading -- a session that just completed an LLM-backed
+// task cannot simultaneously have a dead token (see
+// docs/reauth-sanity-check-dev-spec.md, 2026-08-25 false-restart incident).
+const lastTaskCompletedAtMs = new Map<string, number>()
+
+/**
+ * Milliseconds-epoch timestamp of the last time a scheduled task on this
+ * session cleanly finished (pane returned to idle after injection) -- NOT
+ * when it merely fired, and NOT when it was evicted via maxTrackMs (that is
+ * the "never went idle, probably stuck" path, the opposite of liveness
+ * evidence). null if unknown/never observed since process start.
+ */
+export function getLastTaskCompletedAt(session: string): number | null {
+  return lastTaskCompletedAtMs.get(session) ?? null
+}
+
+/**
+ * True when a pane state constitutes genuine "task finished successfully"
+ * evidence -- idle only. Deliberately excludes the maxTrackMs-eviction
+ * 'clear' path in decideTaskTimeout() (a task that never went idle within
+ * the tracking window, i.e. probably stuck/abandoned -- the opposite of
+ * liveness proof). Exported so this distinction is unit-testable without
+ * tmux I/O or the full sweep loop.
+ */
+export function isTaskCompletionEvidence(paneState: PaneState | null): boolean {
+  return paneState === 'idle'
+}
+
 export type TaskTimeoutDecision = 'clear' | 'alert' | 'hold'
 
 // Pure: decide what the watchdog should do for a single in-flight entry this
@@ -1103,6 +1134,14 @@ export function startScheduleRunner(): NodeJS.Timeout {
     for (const [key, entry] of taskInflightMap) {
       const pane = capturePane(entry.session, entry.host)
       const state = pane != null ? detectPaneState(pane) : null
+      // Genuine completion evidence -- deliberately separate from the
+      // decideTaskTimeout() 'clear' decision below, which ALSO fires on
+      // maxTrackMs eviction (a task that never went idle, i.e. probably
+      // stuck/abandoned -- the opposite of liveness proof). Recorded before
+      // the decision so a stuck-then-evicted entry never touches this map.
+      if (isTaskCompletionEvidence(state)) {
+        lastTaskCompletedAtMs.set(entry.session, now)
+      }
       const decision = decideTaskTimeout(entry, state, now, {
         graceMs: TASK_FIRE_GRACE_MS,
         timeoutMs: entry.timeoutMs,
