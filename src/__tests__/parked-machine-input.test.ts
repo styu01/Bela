@@ -66,6 +66,22 @@ const PARKED_HUMAN_DRAFT = [
 
 const IDLE = ['', SEP, '❯ ', SEP, FOOTER].join('\n')
 
+// 2026-08-25/26 incident (Kanban c4aef78c): the box shows a SCROLLED,
+// mid-block fragment of a scheduled-task delivery -- the true opening line
+// ("SCHEDULED TASK NOTICE...") has scrolled out of the TUI's bounded
+// input-box view, same mechanism as the machineOrigin scroll issue card
+// d8c16050 fixed, but here affecting the scheduledTaskBlock/softRemedy
+// classification instead. Mirrors the real captured sample from
+// dashboard.log (15:00-15:05, 2026-08-25).
+const PARKED_SCHEDULED_SCROLLED_FRAGMENT = [
+  '',
+  SEP,
+  '❯ agent-progi -p 2>/dev/null | tail -15` (és ugyanezt agent-okoska-ra is).',
+  '  Ha a kimenetben "session limit" ... </scheduled-task>',
+  SEP,
+  FOOTER,
+].join('\n')
+
 describe('parkedScheduledTaskInput', () => {
   it('detects a parked scheduler wrapper block', () => {
     expect(parkedScheduledTaskInput(PARKED_SCHEDULED_MULTIROW)).toBe(true)
@@ -119,5 +135,21 @@ describe('parkedMainInputHasRemedy', () => {
 
   it('a multi-row human draft has no remedy either -- but the carve-out never restarts it (machineOrigin=false)', () => {
     expect(parkedMainInputHasRemedy(PARKED_HUMAN_DRAFT)).toBe(false)
+  })
+
+  // 2026-08-25/26 incident (Kanban c4aef78c): reproduces the exact false
+  // hard-restart, then confirms the fix (extraScheduledTaskEvidence param).
+  it('BUG REPRODUCTION: a scrolled scheduled-task fragment has NO remedy via the prefix check alone', () => {
+    expect(parkedScheduledTaskInput(PARKED_SCHEDULED_SCROLLED_FRAGMENT)).toBe(false)
+    expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_SCROLLED_FRAGMENT)).toBe(false)
+  })
+
+  it('FIX: extraScheduledTaskEvidence (sent-text-registry fallback) restores the clear-scheduled remedy', () => {
+    expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_SCROLLED_FRAGMENT, true)).toBe(true)
+  })
+
+  it('the extra-evidence param defaults to false -- every pre-existing call site is unaffected', () => {
+    expect(parkedMainInputHasRemedy(PARKED_SCHEDULED_MULTIROW)).toBe(true) // unaffected, prefix already matches
+    expect(parkedMainInputHasRemedy(PARKED_INTERAGENT, false)).toBe(false) // explicit false, same as before
   })
 })

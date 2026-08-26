@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   recordSentText,
   isKnownRecentInjection,
+  isKnownRecentScheduledTaskInjection,
   SENT_TEXT_TTL_MS,
   _resetSentTextRegistryForTests,
 } from '../web/sent-text-registry.js'
@@ -64,5 +65,54 @@ describe('sent-text-registry', () => {
     recordSentText('bela-channels', 'second message body')
     expect(isKnownRecentInjection('bela-channels', 'first message body')).toBe(false)
     expect(isKnownRecentInjection('bela-channels', 'second message body')).toBe(true)
+  })
+})
+
+// 2026-08-25/26 incident (Kanban c4aef78c): a scrolled-into-view fragment of
+// a long scheduled-task prompt correctly matched machineOrigin (via
+// isKnownRecentInjection above), but pane-state.ts's parkedScheduledTaskInput()
+// -- prefix-anchored to that SAME scrolled fragment -- missed it, so the soft
+// recovery's scheduledTaskBlock fact came back false and the hard-restart
+// busy-guard's softRemedy came back false too. isKnownRecentScheduledTaskInjection
+// closes that gap by checking the prefix against the FULL originally-sent
+// text (which always has its true opening line), not the visible fragment.
+describe('isKnownRecentScheduledTaskInjection', () => {
+  beforeEach(() => {
+    _resetSentTextRegistryForTests()
+  })
+
+  it('true for a scrolled fragment of a SCHEDULED TASK NOTICE delivery', () => {
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next <scheduled-task source="...">... agent-progi -p 2>/dev/null | tail -15` (és ugyanezt)')
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'agent-progi -p 2>/dev/null | tail -15` (és ugyanezt')).toBe(true)
+  })
+
+  it('true for a scrolled fragment of a bare <scheduled-task> delivery', () => {
+    recordSentText('bela-channels', '<scheduled-task source="dream-engine">some long instruction body here that scrolls out of view</scheduled-task>')
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'that scrolls out of view</scheduled-task>')).toBe(true)
+  })
+
+  it('false when the fragment matches a recorded send that is NOT a scheduled-task delivery (e.g. inter-agent notice)', () => {
+    recordSentText('agent-progi', 'TEAM MEMBER NOTICE -- the next <trusted-peer source="agent:bela"> ... some long body that scrolls')
+    // isKnownRecentInjection would say true here (it IS a known recent send);
+    // this function must stay false -- it is not a scheduled-task delivery,
+    // so the scheduled-task-specific clear-only remedy must not apply to it.
+    expect(isKnownRecentInjection('agent-progi', 'some long body that scrolls')).toBe(true)
+    expect(isKnownRecentScheduledTaskInjection('agent-progi', 'some long body that scrolls')).toBe(false)
+  })
+
+  it('false when nothing has been recorded for the session', () => {
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'anything')).toBe(false)
+  })
+
+  it('false for an unrelated fragment even when a scheduled-task send is on record', () => {
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next <scheduled-task source="...">')
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'a completely unrelated human draft')).toBe(false)
+  })
+
+  it('expires after SENT_TEXT_TTL_MS, same as isKnownRecentInjection', () => {
+    const t0 = 1_000_000
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next fragment', t0)
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'the next fragment', t0 + SENT_TEXT_TTL_MS - 1)).toBe(true)
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'the next fragment', t0 + SENT_TEXT_TTL_MS + 1)).toBe(false)
   })
 })

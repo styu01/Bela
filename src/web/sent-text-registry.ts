@@ -22,6 +22,8 @@
 // straightforward unit testing against captured pane fixtures. This module
 // holds mutable, time-based state instead, so it stays separate.
 
+import { SCHEDULED_TASK_ORIGIN_PREFIXES } from '../pane-state.js'
+
 export interface SentTextEntry {
   text: string
   sentAt: number
@@ -72,6 +74,38 @@ export function isKnownRecentInjection(session: string, visibleFragment: string,
   const flat = normalise(visibleFragment)
   if (flat.length === 0) return false
   return entry.text.includes(flat)
+}
+
+/**
+ * Like isKnownRecentInjection(), but ALSO confirms the full originally-sent
+ * text was specifically a scheduled-task delivery (not just any machine-
+ * origin send, e.g. an inter-agent notice). The full sent text always
+ * contains its true opening line -- unlike the visible pane fragment, which
+ * can be a scrolled-into-view LATER portion of a long injected block -- so
+ * the prefix check reliably works here even when pane-state.ts's
+ * parkedScheduledTaskInput() (anchored to that same scrolled fragment)
+ * misses it.
+ *
+ * Root cause this fixes (2026-08-25/26, Kanban c4aef78c): a multi-row
+ * scheduled-task prompt got stuck with the input box showing a mid-block
+ * fragment, not its "SCHEDULED TASK NOTICE" opening line. machineOrigin
+ * correctly came back true via isKnownRecentInjection() (card d8c16050/
+ * d417788), but parkedScheduledTaskInput() -- prefix-anchored to that same
+ * scrolled fragment -- came back false, so decideStuckInputAction() fell
+ * through to the generic 'hold' branch instead of the safe 'clear-scheduled'
+ * remedy. softRemedy became false, and the busy-guard's deadlock carve-out
+ * (machineOrigin && !softRemedy, see applyStuckRestartBusyGuard) then
+ * allowed a full hard-restart for what was actually a routine, safely
+ * clearable scheduled-task tick.
+ */
+export function isKnownRecentScheduledTaskInjection(session: string, visibleFragment: string, now: number = Date.now()): boolean {
+  const entry = registry.get(session)
+  if (entry == null) return false
+  if (now - entry.sentAt > SENT_TEXT_TTL_MS) return false
+  const flat = normalise(visibleFragment)
+  if (flat.length === 0) return false
+  if (!entry.text.includes(flat)) return false
+  return SCHEDULED_TASK_ORIGIN_PREFIXES.some((rx) => rx.test(entry.text))
 }
 
 // Test-only: clears all recorded state so unit tests don't leak entries

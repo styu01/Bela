@@ -40,7 +40,7 @@ import {
   type StuckInputActionFacts,
 } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
-import { isKnownRecentInjection } from './sent-text-registry.js'
+import { isKnownRecentInjection, isKnownRecentScheduledTaskInjection } from './sent-text-registry.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
@@ -327,7 +327,13 @@ export async function recoverStuckInputForSession(
       truncatedPreamble: shouldClearTruncatedPreamble(pane),
       allowPlainReinject,
       hasPlainText: allowPlainReinject && parkedInputText(pane) != null,
-      scheduledTaskBlock: parkedScheduledTaskInput(pane),
+      // OR'd with the sent-text-registry fallback (Kanban c4aef78c,
+      // 2026-08-26): the prefix check above only sees whatever is CURRENTLY
+      // VISIBLE in the box, which can be a scrolled-into-view later fragment
+      // of a long scheduled-task injection, not its true opening line. Same
+      // fix shape as the machineOrigin fallback (card d8c16050/d417788).
+      scheduledTaskBlock: parkedScheduledTaskInput(pane)
+        || isKnownRecentScheduledTaskInjection(session, parkedInputText(pane) ?? ''),
     }
     const action = decideStuckInputAction(facts)
     await performStuckInputAction(session, action, pane, block, sig, attempt)
@@ -1096,7 +1102,16 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   const machineOriginByRegistry = !machineOriginByPrefix && parkedFragment != null
     && isKnownRecentInjection(MAIN_CHANNELS_SESSION, parkedFragment)
   const machineOrigin = machineOriginByPrefix || machineOriginByRegistry
-  const softRemedy = parkedView != null && parkedMainInputHasRemedy(parkedView)
+  // Same registry fallback as machineOriginByRegistry above, applied to the
+  // scheduledTaskBlock fact inside parkedMainInputHasRemedy (Kanban c4aef78c,
+  // 2026-08-26) -- otherwise a scrolled scheduled-task fragment reads as
+  // machineOrigin=true (registry catches it) but softRemedy=false (the
+  // prefix-only scheduledTaskBlock check does not), and the busy-guard below
+  // treats that combination as "unrecoverable", hard-restarting a session
+  // that had a perfectly safe clear-only remedy available.
+  const scheduledTaskByRegistry = parkedFragment != null
+    && isKnownRecentScheduledTaskInjection(MAIN_CHANNELS_SESSION, parkedFragment)
+  const softRemedy = parkedView != null && parkedMainInputHasRemedy(parkedView, scheduledTaskByRegistry)
   // TEMPORARY diagnostic (card TBD, approved by Istvan 2026-08-18): the
   // 'typing'+machineOrigin:false carve-out has been observed firing almost
   // every tick since 2026-08-17 22:10, which the existing log line does not
@@ -1146,7 +1161,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   ), { machineOrigin, softRemedy })
   if (action === 'skip' && shouldDeferKeepaliveRespawn(paneState)) {
     logger.info(
-      { paneState, attempts: state.attempts, machineOrigin, softRemedy },
+      { paneState, attempts: state.attempts, machineOrigin, softRemedy, scheduledTaskByRegistry },
       paneState === 'busy'
         ? 'Stuck-input restart deferred -- main pane is busy (working, not wedged)'
         : 'Stuck-input restart deferred -- parked input still recoverable or possibly a human draft',
