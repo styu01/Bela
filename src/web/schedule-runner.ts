@@ -20,9 +20,12 @@ import {
   insertPendingTaskRetryIfNew,
   markPendingTaskRetryAlert,
   clearPendingTaskRetryAlert,
+  markPendingTaskRetryOwnerAlert,
+  clearPendingTaskRetryOwnerAlert,
   markScheduledTaskKanbanWaiting,
+  createAgentMessage,
 } from '../db.js'
-import { toPendingRetryView, classifyTelegramSendError, type PendingRetryView } from '../pending-retries.js'
+import { toPendingRetryView, classifyTelegramSendError, OWNER_ESCALATION_EXTRA_MS, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
   wrapScheduledTask,
@@ -91,7 +94,14 @@ export interface TaskInflightEntry {
   session: string
   host: string | null
   injectedAt: number
+  // Stage 1: inter-agent notice sent to BÉLA (was, until 2026-08-29, a
+  // direct Telegram alert -- see docs/scheduler-escalation-dev-spec.md).
   alerted: boolean
+  // Stage 2: direct-to-owner (Telegram) escalation, only after BÉLA has had
+  // OWNER_ESCALATION_EXTRA_MS since the stage-1 notice to react. In-memory
+  // only, same as `alerted` -- does not survive a dashboard restart (an
+  // accepted, pre-existing limitation of this map, not a new one).
+  ownerAlerted: boolean
   // Per-task stuck threshold, resolved at injection time from the task config
   // (see resolveStuckTimeoutMs). Captured on the entry rather than looked up
   // during the sweep so an edit to the schedule mid-run cannot move the
@@ -160,14 +170,21 @@ export function isTaskCompletionEvidence(paneState: PaneState | null): boolean {
   return paneState === 'idle'
 }
 
-export type TaskTimeoutDecision = 'clear' | 'alert' | 'hold'
+export type TaskTimeoutDecision = 'clear' | 'alert' | 'escalate' | 'hold'
 
 // Pure: decide what the watchdog should do for a single in-flight entry this
 // tick. Exported so it can be unit-tested without tmux I/O.
 //
-// clear -- remove the entry (session idle = task done, or entry too stale)
-// alert -- send a one-shot Telegram alert (session busy past timeout threshold)
-// hold  -- no action this tick
+// clear    -- remove the entry (session idle = task done, or entry too stale)
+// alert    -- stage 1: one-shot inter-agent notice to BÉLA (session busy past
+//             timeout threshold)
+// escalate -- stage 2: one-shot direct-to-owner Telegram alert, only once
+//             BÉLA has already been notified (alert fired) AND a further
+//             OWNER_ESCALATION_EXTRA_MS has elapsed since injection with the
+//             session still busy. Keyed off `injectedAt`, not off the
+//             stage-1 send succeeding -- see docs/scheduler-escalation-dev-spec.md
+//             for why this must not chain on stage 1's success.
+// hold     -- no action this tick
 //
 // Rationale for non-busy states returning 'hold' instead of 'clear':
 //   - null (capture failed): no signal, conservative.
@@ -176,18 +193,29 @@ export type TaskTimeoutDecision = 'clear' | 'alert' | 'hold'
 //   - 'typing': post-send resubmit loop is already active.
 // Clearing on these states would drop the entry before the 300s timeout can
 // fire, producing false-negative coverage for genuinely stuck tasks.
+//
+// Known limitation, not addressed here: opts.ownerExtraMs added on top of a
+// task configured with a stuckAfterMinutes already close to maxTrackMs can
+// push the escalate threshold past maxTrackMs, in which case the entry is
+// evicted ('clear') before escalate is ever reached. Accepted -- a task
+// legitimately configured to run for hours AND stuck long enough to hit
+// that ceiling is an extreme edge case outside this card's scope.
 export function decideTaskTimeout(
-  entry: Pick<TaskInflightEntry, 'injectedAt' | 'alerted'>,
+  entry: Pick<TaskInflightEntry, 'injectedAt' | 'alerted' | 'ownerAlerted'>,
   paneState: PaneState | null,
   now: number,
-  opts: { graceMs: number; timeoutMs: number; maxTrackMs: number },
+  opts: { graceMs: number; timeoutMs: number; maxTrackMs: number; ownerExtraMs: number },
 ): TaskTimeoutDecision {
   const elapsed = now - entry.injectedAt
   if (elapsed >= opts.maxTrackMs) return 'clear'
   if (paneState === 'idle') return 'clear'
-  if (entry.alerted) return 'hold'
   if (elapsed < opts.graceMs) return 'hold'
-  if (paneState === 'busy' && elapsed >= opts.timeoutMs) return 'alert'
+  if (paneState !== 'busy') return 'hold'
+  if (!entry.alerted) {
+    if (elapsed >= opts.timeoutMs) return 'alert'
+    return 'hold'
+  }
+  if (!entry.ownerAlerted && elapsed >= opts.timeoutMs + opts.ownerExtraMs) return 'escalate'
   return 'hold'
 }
 
@@ -754,6 +782,7 @@ async function attemptFireTask(
       host,
       injectedAt: now,
       alerted: false,
+      ownerAlerted: false,
       timeoutMs: resolveStuckTimeoutMs(task),
     })
 
@@ -924,11 +953,75 @@ function sendCatchUpSummary(
   })()
 }
 
-function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
-  // Stamp first. If another tick raced us, markPendingTaskRetryAlert
-  // returns false (the WHERE alert_sent_at IS NULL guards it) and we
-  // skip the send entirely.
+// Build the pending-retry alert body shared by stage 1 (BÉLA, inter-agent)
+// and stage 2 (owner, Telegram) -- the substance (which task, why stuck,
+// how long) is identical, only the delivery channel differs.
+function pendingRetryAlertText(view: PendingRetryView, prefix: string, ageMinutes: number, firstAttempt: string): string {
+  // A retry stuck on a dead required MCP names the server(s): the operator's
+  // fix is restarting an MCP, not freeing up a busy session.
+  const mcpMissing = view.lastReason?.startsWith('mcp-missing')
+    ? view.lastReason.slice('mcp-missing:'.length) || 'ismeretlen'
+    : null
+  // A first-run-gated session (fresh install: mappa-trust dialog / belépés-
+  // választó) needs the operator to know the ACTUAL blocker: the fix is a
+  // one-time login/consent on the agent session, not waiting for a busy
+  // session to free up.
+  const firstRunStuck = view.lastReason === 'first-run'
+  return (mcpMissing
+    ? [
+        `${prefix} A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: a szükséges MCP szerver(ek) nem futnak a cél-sessionben: ${mcpMissing}.`,
+        `Első próbálkozás: ${firstAttempt} (${ageMinutes} perce).`,
+        'Amint az MCP szerver újra elérhető, a feladat magától lefut; a dashboard /Ütemezések oldalán visszavonható.',
+      ]
+    : firstRunStuck
+    ? [
+        `${prefix} A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: az agent session a Claude Code első-indítási képernyőjén áll (mappa-jóváhagyás vagy belépés szükséges).`,
+        `Első próbálkozás: ${firstAttempt} (${ageMinutes} perce).`,
+        `A rendszer a jóváhagyás-dialogokat magától továbblépteti; ha belépés kell: tmux attach -t agent-${view.agentName}, majd válaszd ki a belépési módot. Utána a feladat magától lefut.`,
+      ]
+    : [
+        `${prefix} A(z) "${view.taskName}" (${view.agentName}) ütemezett feladat ${ageMinutes} perce várakozik.`,
+        `Első próbálkozás: ${firstAttempt}.`,
+        'A rendszer tovább próbálkozik; a dashboard /Ütemezések oldalán visszavonható.',
+      ]).join('\n')
+}
+
+// Stage 1: inter-agent notice to BÉLA once a pending retry crosses
+// ALERT_THRESHOLD_MS. Until 2026-08-29 this went straight to the operator's
+// Telegram (see sendPendingRetryAlert below, now the stage-2 escalation) --
+// see docs/scheduler-escalation-dev-spec.md for why that was too eager (three
+// tasks that all resolved themselves within the hour on 2026-08-29 each fired
+// a direct alert for nothing).
+function sendPendingRetryBelaNotice(view: PendingRetryView, nowMs: number): void {
+  // Stamp first, same claim-before-send guard as the Telegram path: if
+  // another tick raced us, markPendingTaskRetryAlert returns false (the
+  // WHERE alert_sent_at IS NULL guards it) and we skip the send entirely.
   const claimed = markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs)
+  if (!claimed) return
+
+  const ageMinutes = Math.floor(view.ageMs / 60000)
+  const firstAttempt = new Date(view.firstAttempt).toLocaleString('hu-HU')
+  const text = pendingRetryAlertText(view, '[scheduler]', ageMinutes, firstAttempt) +
+    '\nHa nem oldodik meg, Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.'
+  try {
+    createAgentMessage('system', MAIN_AGENT_ID, text)
+    logger.info({ task: view.taskName, agent: view.agentName, ageMinutes }, 'Pending-retry BÉLA notice sent')
+  } catch (err) {
+    // A failed DB insert here does not block stage-2 escalation -- see
+    // sendTaskInflightBelaNotice for the same rationale on the other path.
+    logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry BÉLA notice failed, clearing stamp for retry')
+    clearPendingTaskRetryAlert(view.taskName, view.agentName)
+  }
+}
+
+// Stage 2: direct-to-owner Telegram alert, only once BÉLA has already been
+// notified (stage 1 above) and OWNER_ESCALATION_EXTRA_MS has additionally
+// elapsed with the row still pending.
+function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
+  // Stamp first. If another tick raced us, markPendingTaskRetryOwnerAlert
+  // returns false (the WHERE owner_alert_sent_at IS NULL guards it) and we
+  // skip the send entirely.
+  const claimed = markPendingTaskRetryOwnerAlert(view.taskName, view.agentName, nowMs)
   if (!claimed) return
 
   // Validate the delivery config BEFORE building/sending. A missing token
@@ -952,33 +1045,8 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
 
   const ageMinutes = Math.floor(view.ageMs / 60000)
   const firstAttempt = new Date(view.firstAttempt).toLocaleString('hu-HU')
-  // A retry stuck on a dead required MCP names the server(s): the operator's
-  // fix is restarting an MCP, not freeing up a busy session.
-  const mcpMissing = view.lastReason?.startsWith('mcp-missing')
-    ? view.lastReason.slice('mcp-missing:'.length) || 'ismeretlen'
-    : null
-  // A first-run-gated session (fresh install: mappa-trust dialog / belépés-
-  // választó) needs the operator to know the ACTUAL blocker: the fix is a
-  // one-time login/consent on the agent session, not waiting for a busy
-  // session to free up.
-  const firstRunStuck = view.lastReason === 'first-run'
-  const text = (mcpMissing
-    ? [
-        `[${BOT_NAME} scheduler] A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: a szükséges MCP szerver(ek) nem futnak a cél-sessionben: ${mcpMissing}.`,
-        `Első próbálkozás: ${firstAttempt} (${ageMinutes} perce).`,
-        'Amint az MCP szerver újra elérhető, a feladat magától lefut; a dashboard /Ütemezések oldalán visszavonható.',
-      ]
-    : firstRunStuck
-    ? [
-        `[${BOT_NAME} scheduler] A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: az agent session a Claude Code első-indítási képernyőjén áll (mappa-jóváhagyás vagy belépés szükséges).`,
-        `Első próbálkozás: ${firstAttempt} (${ageMinutes} perce).`,
-        `A rendszer a jóváhagyás-dialogokat magától továbblépteti; ha belépés kell: tmux attach -t agent-${view.agentName}, majd válaszd ki a belépési módot. Utána a feladat magától lefut.`,
-      ]
-    : [
-        `[${BOT_NAME} scheduler] A(z) "${view.taskName}" (${view.agentName}) ütemezett feladat ${ageMinutes} perce várakozik.`,
-        `Első próbálkozás: ${firstAttempt}.`,
-        'A rendszer tovább próbálkozik; a dashboard /Ütemezések oldalán visszavonható.',
-      ]).join('\n')
+  const text = pendingRetryAlertText(view, `[${BOT_NAME} scheduler]`, ageMinutes, firstAttempt) +
+    '\nBÉLA mar ertesitve volt errol, de nem oldodott meg.'
   ;(async () => {
     try {
       await sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
@@ -992,7 +1060,7 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
       const kind = classifyTelegramSendError(err instanceof Error ? err.message : String(err))
       if (kind === 'transient') {
         logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (transient), clearing stamp for retry')
-        clearPendingTaskRetryAlert(view.taskName, view.agentName)
+        clearPendingTaskRetryOwnerAlert(view.taskName, view.agentName)
       } else {
         logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (permanent), stamp kept to avoid 60s spin')
       }
@@ -1000,10 +1068,47 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
   })()
 }
 
-// One-shot Telegram alert when a fired task/heartbeat has been continuously
-// busy past TASK_FIRE_TIMEOUT_MS. Follows the same token-resolution and
-// ALLOWED_CHAT_ID path as sendPendingRetryAlert: this is a system-level
-// scheduler alert, not a per-agent channel notification.
+// Stage 1: one-shot inter-agent notice to BÉLA when a fired task/heartbeat
+// has been continuously busy past TASK_FIRE_TIMEOUT_MS. Until 2026-08-29
+// this went straight to the operator's Telegram (see sendTaskTimeoutAlert
+// below, now the stage-2 escalation) -- three tasks that all resolved
+// themselves within the hour (2026-08-29 08:44 report) each fired a direct
+// Telegram alert for nothing. See docs/scheduler-escalation-dev-spec.md.
+//
+// Moves the matching kanban card to 'waiting' here (stage 1), not in the
+// stage-2 escalation -- the board should reflect a stuck task as soon as
+// BÉLA is told, independent of whether it later escalates to the operator.
+function sendTaskInflightBelaNotice(entry: TaskInflightEntry, elapsedMs: number): void {
+  const ageMinutes = Math.floor(elapsedMs / 60000)
+
+  const movedCardId = markScheduledTaskKanbanWaiting(entry.taskName)
+  if (movedCardId) {
+    logger.info({ task: entry.taskName, agent: entry.agentName, cardId: movedCardId }, 'task-timeout: matching kanban card moved to waiting')
+  }
+
+  const thresholdMinutes = Math.round(entry.timeoutMs / 60000)
+  const text = [
+    `[scheduler] A(z) "${entry.taskName}" (${entry.agentName}) ütemezett feladat ${ageMinutes} perce fut -- lehetséges beakadás (küszöb: ${thresholdMinutes} perc).`,
+    'Ha jogosan fut ennél tovább, allitsd a task-config.json "stuckAfterMinutes" mezojet.',
+    'Ellenőrizd az ágenst; ha nem oldódik meg, Istvan direkt Telegram-értesítést kap ha ez tovabb tart.',
+  ].join('\n')
+  try {
+    createAgentMessage('system', MAIN_AGENT_ID, text)
+    logger.info({ task: entry.taskName, agent: entry.agentName, ageMinutes }, 'task-timeout BÉLA notice sent')
+  } catch (err) {
+    // A failed DB insert here does not block stage-2 escalation -- that
+    // check is independent (keyed off injectedAt, not off this call
+    // succeeding), so a broken bela-notice path can never silently
+    // suppress the final Telegram escalation.
+    logger.warn({ err, task: entry.taskName, agent: entry.agentName }, 'task-timeout BÉLA notice failed')
+  }
+}
+
+// Stage 2: one-shot direct-to-owner Telegram alert, only once BÉLA has
+// already been notified (stage 1 above) and OWNER_ESCALATION_EXTRA_MS has
+// additionally elapsed with the session still busy. Follows the same
+// token-resolution and ALLOWED_CHAT_ID path as sendPendingRetryAlert: this
+// is a system-level scheduler alert, not a per-agent channel notification.
 function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number): void {
   const ageMinutes = Math.floor(elapsedMs / 60000)
   const token = resolveSchedulerAlertToken()
@@ -1015,20 +1120,13 @@ function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number): void
     logger.warn({ task: entry.taskName, agent: entry.agentName }, 'task-timeout alert suppressed: empty ALLOWED_CHAT_ID (config error)')
     return
   }
-  // If there is an active kanban card whose title matches the task name, move it
-  // to 'waiting' so the board reflects the stuck state. No-op when no matching
-  // card exists (the task was never on the board, or has already been archived).
-  const movedCardId = markScheduledTaskKanbanWaiting(entry.taskName)
-  if (movedCardId) {
-    logger.info({ task: entry.taskName, agent: entry.agentName, cardId: movedCardId }, 'task-timeout: matching kanban card moved to waiting')
-  }
 
   // Naming the threshold turns "possible hang" into something the operator can
   // judge: a long-running analysis task that legitimately needs more time is
   // then one config line away, instead of a recurring 3am mystery.
   const thresholdMinutes = Math.round(entry.timeoutMs / 60000)
   const text = [
-    `[${BOT_NAME} scheduler] A(z) "${entry.taskName}" (${entry.agentName}) ütemezett feladat ${ageMinutes} perce fut -- lehetséges beakadás.`,
+    `[${BOT_NAME} scheduler] A(z) "${entry.taskName}" (${entry.agentName}) ütemezett feladat ${ageMinutes} perce fut -- lehetséges beakadás. BÉLA mar ertesitve volt, de nem oldodott meg.`,
     `A riasztási küszöb ennél a feladatnál ${thresholdMinutes} perc; ha ez a feladat jogosan fut ennél tovább, allitsd a task-config.json "stuckAfterMinutes" mezojet.`,
     'Az ágensben megtekintheted; a dashboard /Ütemezések oldalán visszavonható ha kell.',
   ].join('\n')
@@ -1146,12 +1244,16 @@ export function startScheduleRunner(): NodeJS.Timeout {
         graceMs: TASK_FIRE_GRACE_MS,
         timeoutMs: entry.timeoutMs,
         maxTrackMs: TASK_FIRE_MAX_TRACK_MS,
+        ownerExtraMs: OWNER_ESCALATION_EXTRA_MS,
       })
       if (decision === 'clear') {
         taskInflightMap.delete(key)
       } else if (decision === 'alert') {
-        sendTaskTimeoutAlert(entry, now - entry.injectedAt)
+        sendTaskInflightBelaNotice(entry, now - entry.injectedAt)
         entry.alerted = true
+      } else if (decision === 'escalate') {
+        sendTaskTimeoutAlert(entry, now - entry.injectedAt)
+        entry.ownerAlerted = true
       }
     }
 
@@ -1206,7 +1308,8 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // do not alert.
       const reason = result === 'mcp-missing' ? mcpMissingReason(row.task_name, row.agent_name) : result
       const stillPresent = updatePendingTaskRetry(row.task_name, row.agent_name, now, reason)
-      if (stillPresent && view.alertDue) sendPendingRetryAlert(view, now)
+      if (stillPresent && view.alertDue) sendPendingRetryBelaNotice(view, now)
+      if (stillPresent && view.ownerAlertDue) sendPendingRetryAlert(view, now)
     }
 
     // Fire in injection-priority order, not directory order: with several

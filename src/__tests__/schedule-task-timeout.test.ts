@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { decideTaskTimeout, resolveStuckTimeoutMs, TASK_FIRE_GRACE_MS, TASK_FIRE_TIMEOUT_MS, isTaskCompletionEvidence } from '../web/schedule-runner.js'
 import type { TaskInflightEntry } from '../web/schedule-runner.js'
+import { OWNER_ESCALATION_EXTRA_MS } from '../pending-retries.js'
 
 // Tests for the post-fire timeout watchdog.
 //
@@ -18,11 +19,14 @@ import type { TaskInflightEntry } from '../web/schedule-runner.js'
 const GRACE = TASK_FIRE_GRACE_MS   // 30_000
 const TIMEOUT = TASK_FIRE_TIMEOUT_MS // 300_000
 const MAX_TRACK = 6 * 60 * 60_000   // 6 hours
+const OWNER_EXTRA = OWNER_ESCALATION_EXTRA_MS // 75 minutes, shared with the pending-retry escalation
 
-const BASE_OPTS = { graceMs: GRACE, timeoutMs: TIMEOUT, maxTrackMs: MAX_TRACK }
+const BASE_OPTS = { graceMs: GRACE, timeoutMs: TIMEOUT, maxTrackMs: MAX_TRACK, ownerExtraMs: OWNER_EXTRA }
 
-function makeEntry(overrides: Partial<Pick<TaskInflightEntry, 'injectedAt' | 'alerted'>> = {}): Pick<TaskInflightEntry, 'injectedAt' | 'alerted'> {
-  return { injectedAt: 0, alerted: false, ...overrides }
+type EntryFields = Pick<TaskInflightEntry, 'injectedAt' | 'alerted' | 'ownerAlerted'>
+
+function makeEntry(overrides: Partial<EntryFields> = {}): EntryFields {
+  return { injectedAt: 0, alerted: false, ownerAlerted: false, ...overrides }
 }
 
 // --- Grace period ---
@@ -98,6 +102,57 @@ describe('decideTaskTimeout: one-shot alert flag', () => {
     const entry = makeEntry({ injectedAt: 0, alerted: true })
     const now = TIMEOUT + 60_000
     expect(decideTaskTimeout(entry, 'idle', now, BASE_OPTS)).toBe('clear')
+  })
+})
+
+// --- Stage-2 escalation (2026-08-29, docs/scheduler-escalation-dev-spec.md) ---
+//
+// alert (stage 1, BÉLA notice) must fire and be acknowledged (entry.alerted
+// = true) before escalate (stage 2, direct Telegram to the owner) can ever
+// fire -- and escalate needs its OWN, LATER threshold (timeoutMs +
+// ownerExtraMs), not just "alerted && busy".
+describe('decideTaskTimeout: stage-2 owner escalation', () => {
+  it('holds after stage-1 alert until the owner threshold is also crossed', () => {
+    const entry = makeEntry({ injectedAt: 0, alerted: true })
+    const now = TIMEOUT + OWNER_EXTRA - 1
+    expect(decideTaskTimeout(entry, 'busy', now, BASE_OPTS)).toBe('hold')
+  })
+
+  it('escalates once timeoutMs + ownerExtraMs has elapsed and stage 1 already fired', () => {
+    const entry = makeEntry({ injectedAt: 0, alerted: true })
+    const now = TIMEOUT + OWNER_EXTRA + 1
+    expect(decideTaskTimeout(entry, 'busy', now, BASE_OPTS)).toBe('escalate')
+  })
+
+  it('does NOT escalate if stage 1 (alerted) never fired, even past the owner threshold', () => {
+    // Should not happen in the real sweep (alert always fires first at the
+    // earlier threshold), but the decision function must not skip stage 1 on
+    // its own -- escalate requires alerted=true explicitly.
+    const entry = makeEntry({ injectedAt: 0, alerted: false })
+    const now = TIMEOUT + OWNER_EXTRA + 1
+    expect(decideTaskTimeout(entry, 'busy', now, BASE_OPTS)).toBe('alert')
+  })
+
+  it('holds once already escalated (one-shot, no repeat owner alerts)', () => {
+    const entry = makeEntry({ injectedAt: 0, alerted: true, ownerAlerted: true })
+    const now = TIMEOUT + OWNER_EXTRA + 60_000
+    expect(decideTaskTimeout(entry, 'busy', now, BASE_OPTS)).toBe('hold')
+  })
+
+  it('still clears when idle even after escalation', () => {
+    const entry = makeEntry({ injectedAt: 0, alerted: true, ownerAlerted: true })
+    const now = TIMEOUT + OWNER_EXTRA + 60_000
+    expect(decideTaskTimeout(entry, 'idle', now, BASE_OPTS)).toBe('clear')
+  })
+
+  it('maxTrackMs eviction still wins over escalate for a task configured near the ceiling', () => {
+    // Known, accepted limitation (see decideTaskTimeout's doc comment):
+    // clear (maxTrackMs) is checked before alert/escalate, so a task whose
+    // timeoutMs + ownerExtraMs together exceed maxTrackMs never escalates.
+    const entry = makeEntry({ injectedAt: 0, alerted: true })
+    const nearCeilingOpts = { graceMs: GRACE, timeoutMs: MAX_TRACK - 1000, maxTrackMs: MAX_TRACK, ownerExtraMs: OWNER_EXTRA }
+    const now = MAX_TRACK + 1
+    expect(decideTaskTimeout(entry, 'busy', now, nearCeilingOpts)).toBe('clear')
   })
 })
 
@@ -199,7 +254,7 @@ describe('resolveStuckTimeoutMs: the threshold is per task', () => {
 
   it('the resolved budget actually drives the decision', () => {
     const at6min = 6 * MIN
-    const opts = { graceMs: GRACE, maxTrackMs: MAX_TRACK }
+    const opts = { graceMs: GRACE, maxTrackMs: MAX_TRACK, ownerExtraMs: OWNER_EXTRA }
     // Default budget: 6 minutes of continuous busy is a hang.
     expect(decideTaskTimeout(makeEntry(), 'busy', at6min, { ...opts, timeoutMs: resolveStuckTimeoutMs({}) })).toBe('alert')
     // 20-minute budget: the same 6 minutes is just work in progress.
