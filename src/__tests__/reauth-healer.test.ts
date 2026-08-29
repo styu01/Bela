@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { decideReauthAction, NO_REAUTH_STATE, type ReauthHealerState } from '../web/reauth-healer.js'
 
 const T = { threshold: 3, cooldownMs: 30 * 60 * 1000, recentTaskLivenessWindowMs: 20 * 60 * 1000 }
@@ -239,5 +241,24 @@ describe('decideReauthAction: recent-task sanity check (main agent only)', () =>
     }), T)
     expect(d.restartMain).toBe(true)
     expect(d.escalate).toBe(true)
+  })
+})
+
+// 2026-08-29 (kanban 98a2b3ea): the escalation delivery mechanism itself was
+// silently failing (notify.sh via execFile -- BÉLA's own dead OAuth token
+// was correctly detected on every probe, but every escalation attempt to
+// notify Istvan failed with an unexplained exit code 1, and he only found
+// out by trying to message BÉLA and getting no reply). Fixed by switching
+// to the same direct-fetch Telegram delivery schedule-runner.ts's own
+// alerts already use successfully. This is a source-scan guard, not a
+// runtime one, because sendNotify() is a private fire-and-forget function
+// with no return value to assert on -- if this reverted back to shelling
+// out through notify.sh, the test below would turn red.
+describe('fix-revert guard: reauth-healer escalation no longer shells out to notify.sh', () => {
+  it('sendNotify uses sendTelegramMessage, not execFile(.../notify.sh)', () => {
+    const src = readFileSync(join(__dirname, '../web/reauth-healer.ts'), 'utf-8')
+    expect(src).toMatch(/sendTelegramMessage\(token, ALLOWED_CHAT_ID, msg\)/)
+    expect(src).not.toMatch(/NOTIFY_SCRIPT/)
+    expect(src).not.toMatch(/notify\.sh/)
   })
 })

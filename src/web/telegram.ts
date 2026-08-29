@@ -109,6 +109,23 @@ export async function refreshMarveenBotUsername(): Promise<void> {
   } catch { /* offline; cache stays stale */ }
 }
 
+/**
+ * Resolve the main bot's TELEGRAM_BOT_TOKEN: the project .env first, then
+ * the fleet's shared Telegram channel .env -- the same fallback order
+ * scripts/notify.sh uses. Extracted here (2026-08-29, kanban 98a2b3ea) from
+ * schedule-runner.ts's private resolveSchedulerAlertToken so every
+ * system-level Telegram alert path (scheduler pending-retry/task-timeout,
+ * reauth-healer escalation) resolves the token identically instead of each
+ * keeping its own copy -- see docs/reauth-notify-execfile-fix-dev-spec.md.
+ */
+export function resolveTelegramBotToken(): string | undefined {
+  const envContent = readFileOr(join(PROJECT_ROOT, '.env'), '')
+  const token = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)?.[1]?.trim()
+  if (token) return token
+  const channelEnv = readFileOr(join(homedir(), '.claude', 'channels', 'telegram', '.env'), '')
+  return channelEnv.match(/TELEGRAM_BOT_TOKEN=(.+)/)?.[1]?.trim()
+}
+
 export async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<void> {
   // Test-run marking happens HERE too, not only in notifyChannel: this path
   // reads its token from .env FILES (schedule-runner alerts), so blanking

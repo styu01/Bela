@@ -50,7 +50,7 @@ import {
   clearStaleParkedInput,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { sendTelegramMessage } from './telegram.js'
+import { sendTelegramMessage, resolveTelegramBotToken } from './telegram.js'
 import { runCommandTask } from './command-task.js'
 import { paneShowsContextSaturation, detectsFirstRunGate, detectPaneState, type PaneState } from '../pane-state.js'
 
@@ -899,17 +899,10 @@ export async function runScheduledTaskNow(
 // exactly-one stamp per delivery attempt, at-least-once delivery with a
 // 60s retry cadence until success.
 // Bot token for the system-level scheduler alerts (pending-retry, task-timeout,
-// catch-up summary). Since the channels migration the token lives in the
-// telegram plugin's env, not marveen/.env (2026-07-08: every scheduler alert
-// was silently suppressed on such hosts), so both locations are tried -- same
-// fallback order as scripts/notify.sh.
-function resolveSchedulerAlertToken(): string | undefined {
-  const envContent = readFileOr(join(PROJECT_ROOT, '.env'), '')
-  const token = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)?.[1]?.trim()
-  if (token) return token
-  const channelEnv = readFileOr(join(homedir(), '.claude', 'channels', 'telegram', '.env'), '')
-  return channelEnv.match(/TELEGRAM_BOT_TOKEN=(.+)/)?.[1]?.trim()
-}
+// catch-up summary): resolveTelegramBotToken() (telegram.ts), extracted from
+// here 2026-08-29 so reauth-healer.ts's escalation resolves the token
+// identically instead of keeping its own copy -- see
+// docs/reauth-notify-execfile-fix-dev-spec.md.
 
 // One line about what the scheduler missed while it was down: which tasks it
 // caught up, and which were too stale to be worth running. Sent once per tick
@@ -921,7 +914,7 @@ function sendCatchUpSummary(
   stale: Array<{ task: string; ageMs: number }>,
   gapMs: number,
 ): void {
-  const token = resolveSchedulerAlertToken()
+  const token = resolveTelegramBotToken()
   if (!token) {
     logger.warn('catch-up summary suppressed: no TELEGRAM_BOT_TOKEN (config error)')
     return
@@ -1033,7 +1026,7 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
   // the stamp in place (it acts as the throttle) and log once so the
   // operator sees the config gap without the spin. The scheduled task
   // itself keeps retrying regardless -- only this alert is suppressed.
-  const token = resolveSchedulerAlertToken()
+  const token = resolveTelegramBotToken()
   if (!token) {
     logger.warn({ task: view.taskName, agent: view.agentName }, 'Pending-retry alert suppressed: no TELEGRAM_BOT_TOKEN (config error, stamp kept to avoid 60s spin)')
     return
@@ -1111,7 +1104,7 @@ function sendTaskInflightBelaNotice(entry: TaskInflightEntry, elapsedMs: number)
 // is a system-level scheduler alert, not a per-agent channel notification.
 function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number): void {
   const ageMinutes = Math.floor(elapsedMs / 60000)
-  const token = resolveSchedulerAlertToken()
+  const token = resolveTelegramBotToken()
   if (!token) {
     logger.warn({ task: entry.taskName, agent: entry.agentName }, 'task-timeout alert suppressed: no TELEGRAM_BOT_TOKEN (config error)')
     return

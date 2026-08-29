@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, PROJECT_ROOT, RESPAWN_ENABLED, APP_TZ } from '../config.js'
+import { MAIN_AGENT_ID, RESPAWN_ENABLED, APP_TZ, ALLOWED_CHAT_ID } from '../config.js'
 import { resolveFromPath } from '../platform.js'
 import { listAgentNames } from './agent-config.js'
 import { isAgentRunning, capturePane, startAgentProcess } from './agent-process.js'
@@ -10,6 +9,7 @@ import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectReauthNeeded } from './reauth-detect.js'
 import { getLastTaskCompletedAt } from './schedule-runner.js'
+import { sendTelegramMessage, resolveTelegramBotToken } from './telegram.js'
 import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
 
 // Autonomous re-auth healer (Adam stability-fix #1, scoped 2026-06-03).
@@ -22,8 +22,9 @@ import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
 // human browser authorize step, and a restart yields another unauthenticated
 // session (cf. issue #248). So this loop is, honestly: autonomous DETECTION +
 // best-effort /login (which recovers only the rare transient/refreshable case)
-// + LOUD escalation to the owner via notify.sh (plugin-independent Bot API, so
-// it reaches the owner even when the channel plugin is also wedged).
+// + LOUD escalation to the owner via a direct Telegram Bot API call
+// (plugin-independent, so it reaches the owner even when the channel plugin
+// is also wedged).
 //
 // Scope (Marveen-approved): sub-agents get best-effort /login send-keys +
 // escalate; the MAIN agent (always-on channels session) is escalate-ONLY -- we
@@ -31,7 +32,6 @@ import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
 // only (RESPAWN_ENABLED), like the other recovery loops.
 
 const TMUX = resolveFromPath('tmux')
-const NOTIFY_SCRIPT = join(PROJECT_ROOT, 'scripts', 'notify.sh')
 
 const PROBE_INTERVAL_MS = 3 * 60 * 1000 // 3 min
 const INITIAL_DELAY_MS = 90_000         // after boot-grace, offset from other watchers
@@ -99,7 +99,7 @@ export interface ReauthHealerDecision {
   sendKeys: boolean   // best-effort autonomous /login (sub-agents only)
   restartAgent: boolean // first-run-gate heal: restart the sub-agent (re-seeds the onboarding flag)
   restartMain: boolean // GAP 1 landed: a dead-token main respawn now legitimately fixes it (main only)
-  escalate: boolean   // notify.sh alert to the owner
+  escalate: boolean   // direct Telegram alert to the owner
   next: ReauthHealerState
 }
 
@@ -202,7 +202,7 @@ async function sendBestEffortLogin(session: string): Promise<void> {
 // /login, and nobody does that at 03:00 -- but the healer used to re-alert
 // every 30 minutes all night (2026-07-09: spock+scotty alerted until morning).
 // Inside the window the PROBE keeps running and the state stays accurate;
-// ONLY the notify.sh escalation is held back. The first sweep after 06:00
+// ONLY the Telegram escalation is held back. The first sweep after 06:00
 // sends ONE summary naming the agents that are STILL dead at that moment
 // (suppressed intermediates are dropped, healed agents are dropped silently),
 // and the normal 30-min re-alert cadence resumes from that summary.
@@ -293,9 +293,39 @@ export function flushQuietSummary(
   for (const e of stillDead) stampAlert(e.session)
 }
 
+// 2026-08-29 (kanban 98a2b3ea): this used to shell out via execFile to the
+// project's Bash owner-notify script. BÉLA's own OAuth token died 15:35-17:34
+// that day; the healer correctly detected it on every ~3-min probe and
+// correctly tried to escalate every time, but EVERY invocation of that
+// script failed with exit code 1 -- Istvan never got the Telegram alert,
+// only noticed once he tried to message BÉLA and got no reply. Reproduction
+// attempts (a standalone bash run and a 1:1 execFile call, both under the
+// dashboard's exact restricted systemd environment) did NOT reproduce the
+// failure, so the precise root cause inside that bash/execFile path is still
+// unconfirmed -- see docs/reauth-notify-execfile-fix-dev-spec.md for what
+// was tried and ruled out (env vars, no-TTY, single non-concurrent calls).
+// Rather than keep chasing an elusive, non-reproducible shell-subprocess
+// failure, this switches to the SAME direct-fetch Telegram delivery
+// schedule-runner.ts's alerts already use successfully (sendTelegramMessage,
+// resolveTelegramBotToken) -- one fewer process boundary (no bash, no curl,
+// no separate script's own sender-detection via `tmux display-message`,
+// which the dashboard process cannot meaningfully answer anyway since it is
+// not itself a tmux client) to fail in an unexplained way. Any FUTURE
+// delivery failure now surfaces the real HTTP status + response body
+// (sendTelegramMessage throws `Telegram API <status>: <body>`), not just a
+// bare exit code.
 function sendNotify(msg: string): void {
-  execFile('/bin/bash', [NOTIFY_SCRIPT, msg], { timeout: 10_000 }, (err) => {
-    if (err) logger.warn({ err }, 'reauth-healer: notify.sh escalation failed')
+  const token = resolveTelegramBotToken()
+  if (!token) {
+    logger.warn('reauth-healer: escalation suppressed -- no TELEGRAM_BOT_TOKEN (config error)')
+    return
+  }
+  if (!ALLOWED_CHAT_ID.trim()) {
+    logger.warn('reauth-healer: escalation suppressed -- empty ALLOWED_CHAT_ID (config error)')
+    return
+  }
+  sendTelegramMessage(token, ALLOWED_CHAT_ID, msg).catch((err) => {
+    logger.warn({ err }, 'reauth-healer: Telegram escalation failed')
   })
 }
 
