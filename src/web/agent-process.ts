@@ -476,6 +476,47 @@ function writeJsonAtomic(path: string, value: unknown): void {
   renameSync(tmp, path)
 }
 
+// CORTEXMCP904 (2026-09-08): the names of MCP servers the agent's OWN project
+// (its cwd's .mcp.json, "project" scope) already defines. Claude Code
+// resolves `local` scope (.claude.json, what this file writes) BEFORE
+// `project` scope (.mcp.json) -- so a shared-config entry that happens to
+// share a name with the agent's own project-scoped server would silently
+// SHADOW it once copied into the isolated .claude.json, credentials and all.
+// Reads the file fresh each call rather than caching: .mcp.json can change
+// between provisioning runs, and this only runs at spawn/reconcile time, not
+// on any hot path.
+function projectScopedServerNames(cwd: string): Set<string> {
+  try {
+    const mcpJsonPath = join(cwd, '.mcp.json')
+    if (!existsSync(mcpJsonPath)) return new Set()
+    const parsed = JSON.parse(readFileSync(mcpJsonPath, 'utf-8')) as Record<string, unknown>
+    if (!isPlainObject(parsed.mcpServers)) return new Set()
+    return new Set(Object.keys(parsed.mcpServers))
+  } catch {
+    return new Set() // missing/unparseable .mcp.json must not block the normal gap-fill
+  }
+}
+
+// Drop any shared-config-sourced mcpServers key from a FRESH .claude.json
+// seed that collides with the agent's own project-scoped .mcp.json entry of
+// the same name -- see projectScopedServerNames above. Called once, right
+// after the first-provision seed copy, before it is ever written to disk.
+function stripProjectScopedCollisions(seed: Record<string, unknown>, cwd: string, name: string): void {
+  if (!isPlainObject(seed.mcpServers)) return
+  const projectScoped = projectScopedServerNames(cwd)
+  if (projectScoped.size === 0) return
+  const dropped: string[] = []
+  for (const key of Object.keys(seed.mcpServers)) {
+    if (projectScoped.has(key)) {
+      delete seed.mcpServers[key]
+      dropped.push(key)
+    }
+  }
+  if (dropped.length > 0) {
+    logger.info({ name, dropped }, 'isolated-config: skipped seeding MCP server(s) already defined in this agent\'s own .mcp.json (would have shadowed project scope)')
+  }
+}
+
 // Fill mcpServers gaps in an ALREADY provisioned isolated .claude.json from the
 // shared ~/.claude.json.
 //
@@ -494,32 +535,83 @@ function writeJsonAtomic(path: string, value: unknown): void {
 //   - a server removed from the shared config is left in place,
 //   - a non-object mcpServers on either side means we do not touch it at all,
 //     because we cannot merge what we do not understand.
+//   - a shared entry whose name collides with the agent's OWN project-scoped
+//     .mcp.json entry (CORTEXMCP904) is skipped, not copied -- copying it
+//     would shadow the project-scoped definition at Claude Code's `local`
+//     scope, which resolves before `project` scope.
 // Returns true if the caller should persist `cur`.
 function reconcileMcpServers(
   cur: Record<string, unknown>,
   sharedDot: string,
   name: string,
+  cwd: string,
 ): boolean {
-  if (!existsSync(sharedDot)) return false
-  let shared: Record<string, unknown>
-  try { shared = JSON.parse(readFileSync(sharedDot, 'utf-8')) as Record<string, unknown> }
-  catch { return false } // unparseable shared config -> leave the isolated one alone
-  if (!isPlainObject(shared.mcpServers)) return false
   // An existing but non-object mcpServers is not ours to repair.
   if ('mcpServers' in cur && !isPlainObject(cur.mcpServers)) {
     logger.warn({ name }, 'isolated-config: mcpServers is not an object, skipping reconcile')
     return false
   }
   const own = isPlainObject(cur.mcpServers) ? cur.mcpServers : {}
-  const added: string[] = []
-  for (const [key, def] of Object.entries(shared.mcpServers)) {
-    if (key in own) continue
-    own[key] = def
-    added.push(key)
+  const projectScoped = projectScopedServerNames(cwd)
+  let changed = false
+
+  // MIGRATION (2026-09-08 Codex review round 2): this removal-pass runs
+  // BEFORE the shared-config read on purpose, and does NOT bail out early if
+  // the shared file is missing/corrupt. Removing an existing shadow only
+  // needs `cur` (this agent's own isolated config) and its OWN project-scoped
+  // .mcp.json -- it never needed the shared config at all. The original
+  // ordering had this AFTER an `if (!existsSync(sharedDot)) return false` /
+  // parse-failure early-out, which meant an agent stayed shadowed forever if
+  // it happened to run reconcile while ~/.claude.json was transiently
+  // missing or corrupt -- exactly the moment a fix like this is most likely
+  // to be needed. A run of THIS function before the shadow-guard existed (or
+  // one where .mcp.json was created/edited AFTER the collision was already
+  // copied in) can have left an already-shadowing entry sitting in `own`.
+  // Project scope is the intended source of truth for a name it defines, so
+  // remove the stale local-scope copy and let Claude Code fall through to
+  // project scope, exactly as it would have if the copy had never happened.
+  const removedShadow: string[] = []
+  for (const key of Object.keys(own)) {
+    if (projectScoped.has(key)) {
+      delete own[key]
+      removedShadow.push(key)
+      changed = true
+    }
   }
-  if (added.length === 0) return false
+  if (removedShadow.length > 0) {
+    logger.info({ name, removedShadow }, 'isolated-config: removed EXISTING MCP server(s) that shadow this agent\'s own .mcp.json (migration -- these were copied in before the shadow-guard existed)')
+  }
+
+  // Gap-fill from the shared config -- THIS part genuinely needs it, so only
+  // this half is skipped (not the whole function) when it's unavailable.
+  let shared: Record<string, unknown> | null = null
+  if (existsSync(sharedDot)) {
+    try { shared = JSON.parse(readFileSync(sharedDot, 'utf-8')) as Record<string, unknown> }
+    catch { shared = null } // unparseable shared config -> just skip the gap-fill half
+  }
+  if (shared && isPlainObject(shared.mcpServers)) {
+    const added: string[] = []
+    const skippedShadow: string[] = []
+    for (const [key, def] of Object.entries(shared.mcpServers)) {
+      if (key in own) continue
+      if (projectScoped.has(key)) {
+        skippedShadow.push(key)
+        continue
+      }
+      own[key] = def
+      added.push(key)
+      changed = true
+    }
+    if (skippedShadow.length > 0) {
+      logger.info({ name, skippedShadow }, 'isolated-config: skipped MCP server(s) already defined in this agent\'s own .mcp.json (would have shadowed project scope)')
+    }
+    if (added.length > 0) {
+      logger.info({ name, added }, 'isolated-config: added missing MCP servers from the shared config')
+    }
+  }
+
+  if (!changed) return false
   cur.mcpServers = own
-  logger.info({ name, added }, 'isolated-config: added missing MCP servers from the shared config')
   return true
 }
 
@@ -698,6 +790,7 @@ function provisionIsolatedConfigDir(
           try { seed = JSON.parse(readFileSync(sharedDot, 'utf-8')) as Record<string, unknown> } catch { /* keep minimal */ }
         }
         seed.hasCompletedOnboarding = true
+        stripProjectScopedCollisions(seed, cwd, name)
         writeJsonAtomic(dotClaude, seed)
       } else {
         try {
@@ -707,7 +800,7 @@ function provisionIsolatedConfigDir(
             cur.hasCompletedOnboarding = true
             dirty = true
           }
-          if (reconcileMcpServers(cur, sharedDot, name)) dirty = true
+          if (reconcileMcpServers(cur, sharedDot, name, cwd)) dirty = true
           if (dirty) writeJsonAtomic(dotClaude, cur)
         } catch { /* unparseable -> leave for Claude Code to recreate */ }
       }

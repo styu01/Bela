@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, chmodSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, chmodSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -32,6 +32,9 @@ function readIsolated(): Record<string, unknown> {
 }
 function servers(): Record<string, unknown> {
   return (readIsolated().mcpServers ?? {}) as Record<string, unknown>
+}
+function writeProjectMcp(servers: Record<string, unknown>): void {
+  writeFileSync(join(SANDBOX, 'agents', AGENT, '.mcp.json'), JSON.stringify({ mcpServers: servers }, null, 2))
 }
 
 beforeEach(() => {
@@ -159,5 +162,133 @@ describe('isolated config dir: mcpServers reconcile', () => {
     const stray = readdirSync(join(SANDBOX, 'agents', AGENT, '.claude-config'))
       .filter((f) => f.includes('.tmp-'))
     expect(stray).toEqual([])
+  })
+})
+
+// CORTEXMCP904 (2026-09-08): the reconcile above is additive from the SHARED
+// side only -- it never checked whether the agent's own project-scoped
+// .mcp.json already defines a server under the same name. Claude Code
+// resolves `local` scope (.claude.json, what this test suite writes) BEFORE
+// `project` scope (.mcp.json), so copying a same-named shared entry into the
+// isolated .claude.json would silently SHADOW the agent's own project-scoped
+// definition -- credentials and all. Upstream measured a 12h outage from
+// exactly this on two agents whose shared config happened to define a server
+// name that collided with their own .mcp.json.
+describe('isolated config dir: mcpServers reconcile does not shadow project-scoped (.mcp.json) servers', () => {
+  it('does not copy a shared server whose name collides with the agent\'s own .mcp.json (reconcile path)', () => {
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect(Object.keys(servers())).toEqual(['gmail'])
+
+    // The agent's own project defines `google-drive` itself (project scope).
+    writeProjectMcp({ 'google-drive': { command: 'npx', args: ['agent-owns-this'] } })
+    // The shared config ALSO gets a `google-drive` entry with a different
+    // definition, plus a genuinely new, non-colliding server.
+    writeShared({
+      gmail: { command: 'npx', args: ['gmail-mcp'] },
+      'google-drive': { command: 'npx', args: ['SHARED-would-shadow'] },
+      slack: { command: 'npx', args: ['slack-mcp'] },
+    })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+
+    // The colliding name is NOT copied into the isolated .claude.json at all
+    // -- it stays absent there, so Claude Code's project-scope resolution
+    // (which reads .mcp.json directly) is what actually answers for it.
+    expect('google-drive' in servers()).toBe(false)
+    // The unrelated gap-fill still works: a non-colliding new server arrives.
+    expect(servers().slack).toEqual({ command: 'npx', args: ['slack-mcp'] })
+    expect(Object.keys(servers()).sort()).toEqual(['gmail', 'slack'])
+  })
+
+  it('does not seed a shared server whose name collides with the agent\'s own .mcp.json (first-provision path)', () => {
+    // .mcp.json already exists BEFORE the isolated dir is ever provisioned.
+    writeProjectMcp({ gmail: { command: 'npx', args: ['agent-owns-this'] } })
+    writeShared({
+      gmail: { command: 'npx', args: ['SHARED-would-shadow'] },
+      'google-drive': { command: 'npx', args: ['gdrive-mcp'] },
+    })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+
+    expect('gmail' in servers()).toBe(false)
+    expect(servers()['google-drive']).toEqual({ command: 'npx', args: ['gdrive-mcp'] })
+    expect(Object.keys(servers())).toEqual(['google-drive'])
+  })
+
+  it('a missing/unparseable .mcp.json does not block the normal gap-fill', () => {
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    // No .mcp.json written at all (the common case -- most agents have none).
+    writeShared({ gmail: { command: 'npx', args: ['gmail-mcp'] }, extra: { command: 'x' } })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect(Object.keys(servers()).sort()).toEqual(['extra', 'gmail'])
+
+    // An unparseable .mcp.json must not throw or block the reconcile either.
+    writeFileSync(join(SANDBOX, 'agents', AGENT, '.mcp.json'), '{not valid json')
+    writeShared({ gmail: { command: 'npx', args: ['gmail-mcp'] }, extra: { command: 'x' }, more: { command: 'y' } })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect(Object.keys(servers()).sort()).toEqual(['extra', 'gmail', 'more'])
+  })
+
+  // MIGRATION (2026-09-08 Codex review): the two tests above only prove a
+  // NEW collision is never copied in. They do NOT prove an agent that was
+  // ALREADY shadowed (provisioned before this fix existed, or whose .mcp.json
+  // was created/edited AFTER the collision was already copied in) gets fixed.
+  // The whole point of the guard is that project scope should win for a name
+  // it defines -- so an existing local-scope copy has to be actively removed
+  // on the next reconcile, not just left in place because "it's not a NEW
+  // add". This is the exact scenario Codex's review asked to be covered.
+  it('MIGRATES an agent that was already shadowed before .mcp.json existed -- the stale local copy is removed on the next reconcile', () => {
+    // Provision BEFORE the agent's own .mcp.json exists: `cortex` copies in
+    // from the shared config normally (nothing to collide with yet).
+    writeShared({ gmail: { command: 'npx', args: ['gmail-mcp'] }, cortex: { command: 'npx', args: ['SHARED-cortex'] } })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect(servers().cortex).toEqual({ command: 'npx', args: ['SHARED-cortex'] })
+
+    // NOW the agent gains its own project-scoped .mcp.json defining `cortex`
+    // itself -- exactly as if the project was set up, or the file was added,
+    // some time after the agent was already provisioned.
+    writeProjectMcp({ cortex: { command: 'npx', args: ['agent-owns-this'] } })
+
+    // Next reconcile (e.g. the agent restarts) must REMOVE the stale
+    // shared-sourced local copy so Claude Code's project-scope resolution
+    // (which reads .mcp.json directly) becomes the one that actually answers
+    // for `cortex`, instead of the shadow persisting forever.
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect('cortex' in servers()).toBe(false)
+    // Unrelated, non-colliding entries are untouched.
+    expect(servers().gmail).toEqual({ command: 'npx', args: ['gmail-mcp'] })
+    expect(Object.keys(servers())).toEqual(['gmail'])
+  })
+
+  // MIGRATION, round 2 (2026-09-08 Codex review): the removal-pass above
+  // must NOT depend on the shared ~/.claude.json being readable -- removing
+  // an EXISTING shadow only needs the isolated config + the agent's own
+  // .mcp.json. An earlier version of this fix bailed out of the whole
+  // function (via an early `if (!existsSync(sharedDot)) return false` /
+  // parse-failure return) before the removal-pass ever ran, so an agent
+  // stayed shadowed forever if reconcile happened to run while the shared
+  // config was transiently missing or corrupt.
+  it('MIGRATES an already-shadowed agent even when the shared ~/.claude.json is MISSING', () => {
+    writeShared({ gmail: { command: 'npx', args: ['gmail-mcp'] }, cortex: { command: 'npx', args: ['SHARED-cortex'] } })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect(servers().cortex).toBeDefined()
+
+    writeProjectMcp({ cortex: { command: 'npx', args: ['agent-owns-this'] } })
+    unlinkSync(sharedDotClaude()) // shared config gone entirely
+
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect('cortex' in servers()).toBe(false)
+    expect(servers().gmail).toEqual({ command: 'npx', args: ['gmail-mcp'] })
+  })
+
+  it('MIGRATES an already-shadowed agent even when the shared ~/.claude.json is CORRUPT/unparseable', () => {
+    writeShared({ gmail: { command: 'npx', args: ['gmail-mcp'] }, cortex: { command: 'npx', args: ['SHARED-cortex'] } })
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect(servers().cortex).toBeDefined()
+
+    writeProjectMcp({ cortex: { command: 'npx', args: ['agent-owns-this'] } })
+    writeFileSync(sharedDotClaude(), '{not valid json at all')
+
+    ensureIsolatedChannelConfigDir(AGENT, 'telegram')
+    expect('cortex' in servers()).toBe(false)
+    expect(servers().gmail).toEqual({ command: 'npx', args: ['gmail-mcp'] })
   })
 })

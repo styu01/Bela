@@ -6,7 +6,12 @@
 #
 #   repo/   -> extract under the project root (this repo)
 #     store/claudeclaw.db (+ -shm/-wal; WAL-checkpointed before copy)
-#     store/.dashboard-token   (dashboard bearer)
+#     store/*  (every top-level FILE/SYMLINK except the DB files above and
+#       provably-not-state items -- rotating logs, PID/lock files, .bak-*
+#       snapshots, pane-capture debug dumps: DENYLIST)
+#     store/agent-taskstate/**  (per-agent PreCompact task-state; ALLOWLISTED
+#       directory -- see the comment at the store/ block below for why
+#       directories use the opposite default from files)
 #     .env                     (project root secrets)
 #     scheduled-tasks.json     (legacy, if present)
 #     assets/meetings/**       (meeting transcripts/memos)
@@ -16,9 +21,16 @@
 #   home/   -> extract under $HOME
 #     .claude/skills/**            (the self-built skill library)
 #     .claude/scheduled-tasks/**   (file-based scheduled tasks: SKILL.md + config)
+#     .claude/projects/<encoded-REPO_ROOT>/memory/**  (file-based hot/warm/cold memories)
 #     .claude/channels/*/.env      (MAIN orchestrator channel token)
 #     .claude/channels/*/access.json, invites.json, approved/**  (pairing state)
 #     Library/LaunchAgents/com.<MAIN_AGENT_ID>.*.plist (launchd jobs)
+#
+# store/projects/, store/reference-docs/, store/references/ (client/business
+# content -- projects/ alone often 100MB+) and store/backups/ (a nested
+# backup-of-something-else) are DELIBERATELY excluded -- directories are
+# allowlist-only here (see below), so a size/scope decision to include one of
+# these is an explicit, separate addition to STORE_STATE_DIRS, never silent.
 #
 # Output: backups/claudeclaw-YYYYmmdd-HHMMSS.tar.gz
 # Retention: keeps the most recent 14 archives, prunes the rest.
@@ -30,6 +42,17 @@
 
 set -euo pipefail
 
+# 2026-09-08 Codex review: the archive now carries MANY more credentials than
+# before (the expanded store/ coverage below). Under the default 022 umask
+# every file this script creates -- staging copies, the manifest, the .tar.gz
+# itself -- would land group/world-readable regardless of the source file's
+# own mode, a local secret leak on any multi-user box. umask 077 covers every
+# file/dir created from here on; the explicit chmod calls below are
+# defense-in-depth for BACKUP_DIR and ARCHIVE specifically (a pre-existing,
+# looser-permissioned backups/ directory from before this fix would otherwise
+# keep its old mode forever, umask only affects NEW creation).
+umask 077
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR="${REPO_ROOT}/backups"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -37,6 +60,7 @@ ARCHIVE="${BACKUP_DIR}/claudeclaw-${STAMP}.tar.gz"
 KEEP=14
 
 mkdir -p "${BACKUP_DIR}"
+chmod 700 "${BACKUP_DIR}"
 cd "${REPO_ROOT}"
 
 # Checkpoint WAL into the main DB file so the snapshot is self-contained.
@@ -64,6 +88,51 @@ add_if() {
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-shm
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-wal
+# store/ coverage (2026-09-08, DENYLIST for files, ALLOWLIST for directories
+# -- 2026-09-08 Codex review round 1 found a positive-name whitelist itself
+# unfixable: an explicit list was already missing real, runtime-read
+# state/credential files [vault-bindings.json, egress-allowlist.json,
+# .github-fleet-token, .gdocs-oauth*.json, costops-config.json,
+# outgoing-copy-gate-rules.json, watchdog-userbot state, ...] THE FIRST TIME
+# it was written -- a positive list can only ever cover what its author
+# already knew to name.
+#
+# Round 2 (Codex): a denylist covering ALL top-level entries (files AND
+# directories alike) has the opposite failure mode -- ANY future or
+# unnoticed directory at store/ top-level (a model/ML cache, a venv, a
+# browser profile, a generated export dump) gets swept in WHOLESALE by
+# default, risking a multi-GB archive, a slow run, or a full disk. A FIFO,
+# socket, or device special file (also unfiltered by a bare `find -mindepth
+# 1 -maxdepth 1`) could additionally hang `cp -pR` outright. So the two
+# entry kinds now get opposite defaults:
+#   - regular files + symlinks: DENYLIST (auto-included unless explicitly
+#     excluded below) -- these are what state/credential files actually are,
+#     and a stray large *file* is comparatively rare and easy to add to the
+#     denylist if one ever shows up.
+#   - directories: ALLOWLIST ONLY (nothing is swept in unless explicitly
+#     named) -- a new directory must be a deliberate decision, never a
+#     silent default. store/agent-taskstate/ is state, added explicitly.
+if [[ -d store ]]; then
+  find store -mindepth 1 -maxdepth 1 \( -type f -o -type l \) \
+    ! -name claudeclaw.db ! -name 'claudeclaw.db-*' \
+    ! -name .dashboard-token ! -name config-overrides.json \
+    ! -name '*.log' ! -name '*.log.*' \
+    ! -name '*.pid' ! -name '*.lock' \
+    ! -name '*.bak-*' \
+    ! -name 'context-guard-last-pane-*.txt' \
+    ! -name usage-history.jsonl \
+    -print >> "${REPOLIST}"
+  # Explicit directory allowlist. store/projects/, store/reference-docs/, and
+  # store/references/ (client/business content, real but potentially large --
+  # a separate size/scope decision, not folded in silently here) and
+  # store/backups/ (a nested backup-of-something-else) are DELIBERATELY not
+  # in this list.
+  STORE_STATE_DIRS=(agent-taskstate)
+  for _d in "${STORE_STATE_DIRS[@]}"; do
+    add_if "${REPOLIST}" "${REPO_ROOT}" "store/${_d}"
+  done
+  unset _d
+fi
 add_if "${REPOLIST}" "${REPO_ROOT}" store/.dashboard-token
 add_if "${REPOLIST}" "${REPO_ROOT}" store/config-overrides.json
 add_if "${REPOLIST}" "${REPO_ROOT}" .env
@@ -80,6 +149,13 @@ fi
 # home/ group (relative to $HOME)
 add_if "${HOMELIST}" "${HOME}" .claude/skills
 add_if "${HOMELIST}" "${HOME}" .claude/scheduled-tasks
+# File-based memories (2026-09-08): the whole point of the hot/warm/cold
+# memory system is that it survives a compact/restart -- an old backup that
+# does not carry it defeats that. Claude Code names this dir by replacing
+# every "/" in the project path with "-" (e.g. /home/kisss/marveen ->
+# -home-kisss-marveen); derived here rather than hardcoded so this keeps
+# working under any install path, not just this one.
+add_if "${HOMELIST}" "${HOME}" ".claude/projects/${REPO_ROOT//\//-}/memory"
 # MAIN orchestrator channel tokens + pairing state, per provider. bot.pid and
 # inbox/ are runtime/transient and intentionally excluded.
 if [[ -d "${HOME}/.claude/channels" ]]; then
@@ -151,7 +227,55 @@ stage_group "${HOMELIST}" "${HOME}" home
 # stay clean (no leading "./").
 ( cd "${STAGE}" && tar -czf "${ARCHIVE}" MANIFEST.txt \
     $( [[ -d repo ]] && echo repo ) $( [[ -d home ]] && echo home ) )
+# Explicit chmod, not just umask: umask only governs the mode a NEW file is
+# CREATED with, so this is defense-in-depth against anything that could set a
+# looser mode after creation (an inherited ACL, an unusual tar build, a
+# future edit that creates ARCHIVE some other way) -- the archive now carries
+# many more credentials than before, this must never be group/world-readable.
+chmod 600 "${ARCHIVE}"
 echo "backup: wrote ${ARCHIVE} ($(wc -c < "${ARCHIVE}" | awk '{print $1}') bytes)"
+
+# --- Self-verify: re-read the WRITTEN archive and confirm it holds EXACTLY
+# the path set that was staged, instead of trusting tar's exit code alone (or
+# just a file count -- 2026-09-08 Codex review: same count with a dropped
+# entry and an unrelated extra one would pass a count-only check undetected).
+# A backup that "succeeds" by exit code but silently drops/corrupts files on
+# the way to disk (a truncated write, a full disk mid-archive, a tar
+# path/length limit) is worse than an honest failure -- nobody re-reads an
+# old backup until the day they actually need it. Listing the archive is now
+# fatal on its own failure too (no `|| true` swallowing a corrupt/truncated
+# read as "0 entries, so it matched nothing, so who knows").
+ACTUAL_LIST="$(mktemp -t claudeclaw-actual.XXXXXX)"
+EXPECTED_LIST="$(mktemp -t claudeclaw-expected.XXXXXX)"
+trap 'rm -f "${REPOLIST}" "${HOMELIST}" "${MANIFEST}" "${ACTUAL_LIST}" "${EXPECTED_LIST}" "${ACTUAL_LIST}.sorted"; rm -rf "${STAGE}"' EXIT
+
+if ! tar -tzf "${ARCHIVE}" > "${ACTUAL_LIST}" 2>/dev/null; then
+  echo "backup: VERIFY FAILED -- could not even list the contents of the written archive (corrupt/truncated write?)" >&2
+  echo "backup: NOT pruning old archives -- ${ARCHIVE} is suspect, investigate before trusting it" >&2
+  exit 1
+fi
+# Directory entries end in "/" in tar's listing; regular files and symlinks
+# don't -- excluding them is what makes this a fair comparison against the
+# staged FILE/SYMLINK set below (a directory always appears as its own tar
+# entry in addition to what's inside it, which would otherwise false-positive
+# as an "extra" entry on every single archive).
+grep -v '/$' "${ACTUAL_LIST}" | LC_ALL=C sort -u > "${ACTUAL_LIST}.sorted"
+# `-type f -o -type l` (not just `-type f`): a staged symlink is legitimate
+# (e.g. a per-provider channel dir symlinked into place) and must count as
+# present, not be silently excluded from the expected set and then reported
+# as a false "extra" entry once tar lists it as itself.
+( cd "${STAGE}" && find . \( -type f -o -type l \) | sed 's|^\./||' ) | LC_ALL=C sort -u > "${EXPECTED_LIST}"
+
+if ! diff -q "${EXPECTED_LIST}" "${ACTUAL_LIST}.sorted" >/dev/null; then
+  echo "backup: VERIFY FAILED -- the written archive's contents do not exactly match what was staged" >&2
+  MISSING="$(comm -23 "${EXPECTED_LIST}" "${ACTUAL_LIST}.sorted" | head -5)"
+  EXTRA="$(comm -13 "${EXPECTED_LIST}" "${ACTUAL_LIST}.sorted" | head -5)"
+  [[ -n "${MISSING}" ]] && echo "backup: missing from archive (first 5): ${MISSING}" >&2
+  [[ -n "${EXTRA}" ]] && echo "backup: unexpected extra entries in archive (first 5): ${EXTRA}" >&2
+  echo "backup: NOT pruning old archives -- ${ARCHIVE} is suspect, investigate before trusting it" >&2
+  exit 1
+fi
+echo "backup: verified -- archive contains exactly the $(wc -l < "${EXPECTED_LIST}" | tr -d ' ') staged file(s)/symlink(s)"
 
 # The archive contains sensitive tokens (dashboard bearer, channel bot tokens,
 # project .env secrets). Do not auto-sync ${BACKUP_DIR} to iCloud, Dropbox,
