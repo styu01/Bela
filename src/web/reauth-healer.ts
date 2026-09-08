@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, RESPAWN_ENABLED, APP_TZ, ALLOWED_CHAT_ID } from '../config.js'
+import { MAIN_AGENT_ID, RESPAWN_ENABLED, APP_TZ } from '../config.js'
+import { resolveOwnerChatId } from '../owner-chat.js'
 import { resolveFromPath } from '../platform.js'
 import { listAgentNames } from './agent-config.js'
 import { isAgentRunning, capturePane, startAgentProcess } from './agent-process.js'
@@ -330,11 +331,20 @@ function sendNotify(msg: string): void {
     logger.warn('reauth-healer: escalation suppressed -- no TELEGRAM_BOT_TOKEN (config error)')
     return
   }
-  if (!ALLOWED_CHAT_ID.trim()) {
-    logger.warn('reauth-healer: escalation suppressed -- empty ALLOWED_CHAT_ID (config error)')
+  // CHATID0 (2026-09-08): a raw `.trim()` truthiness check treats the
+  // installer's "0" placeholder as a real, deliverable chat id (`!"0".trim()`
+  // is false) -- the exact bug class behind cold_reauth_healer_notify_silent_fail_20260829
+  // (BÉLA's own OAuth session died, the healer detected it, but the Telegram
+  // notice silently failed). resolveOwnerChatId() also normalizes "0" to
+  // "not set" AND falls back to the paired access.json chat when
+  // ALLOWED_CHAT_ID itself is unset -- strictly more likely to actually
+  // reach someone than a bare env-var read for this Telegram-specific sender.
+  const chatId = resolveOwnerChatId()
+  if (!chatId) {
+    logger.warn('reauth-healer: escalation suppressed -- no resolvable owner chat id (config error)')
     return
   }
-  sendTelegramMessage(token, ALLOWED_CHAT_ID, msg).catch((err) => {
+  sendTelegramMessage(token, chatId, msg).catch((err) => {
     logger.warn({ err }, 'reauth-healer: Telegram escalation failed')
   })
 }

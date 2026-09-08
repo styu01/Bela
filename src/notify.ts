@@ -2,9 +2,19 @@ import { CHANNEL_PROVIDER, CHANNEL_TOKEN, CHANNEL_CHAT_ID } from './config.js'
 import { getProvider } from './channel-provider.js'
 import { logger } from './logger.js'
 import { markIfTestRun } from './test-run-marker.js'
+import { normalizeChatId } from './owner-chat.js'
 
 export async function notifyChannel(text: string): Promise<void> {
-  if (!CHANNEL_TOKEN || !CHANNEL_CHAT_ID) {
+  // CHATID0 (2026-09-08): "0" is the installer's placeholder for an
+  // un-paired chat -- normalizeChatId is what treats it as "not set" instead
+  // of a truthy, deliverable-looking value (the whole reason
+  // ALLOWED_CHAT_ID=0 survived: `!"0"` is false). normalizeChatId, NOT
+  // resolveOwnerChatId, on purpose: this function is provider-agnostic
+  // (telegram/slack/discord/googlechat/teams), and resolveOwnerChatId's
+  // access.json fallback is a Telegram-specific concept that would be wrong
+  // to apply to e.g. a Slack-configured install's CHANNEL_CHAT_ID.
+  const chatId = normalizeChatId(CHANNEL_CHAT_ID)
+  if (!CHANNEL_TOKEN || !chatId) {
     logger.warn('Channel ertesites kihagyva: token vagy chat ID hianyzik')
     return
   }
@@ -19,10 +29,10 @@ export async function notifyChannel(text: string): Promise<void> {
   for (const chunk of chunks) {
     try {
       const parseMode = CHANNEL_PROVIDER === 'telegram' ? 'HTML' : undefined
-      await provider.sendMessage(CHANNEL_TOKEN, CHANNEL_CHAT_ID, chunk, parseMode)
+      await provider.sendMessage(CHANNEL_TOKEN, chatId, chunk, parseMode)
     } catch {
       try {
-        await provider.sendMessage(CHANNEL_TOKEN, CHANNEL_CHAT_ID, outbound.slice(0, 4096))
+        await provider.sendMessage(CHANNEL_TOKEN, chatId, outbound.slice(0, 4096))
       } catch { /* last resort, give up */ }
     }
   }
@@ -44,7 +54,15 @@ export const notifyTelegram = notifyChannel
 // that as an expected, silently-skippable state; a caller using THIS
 // function explicitly wants to know delivery didn't happen).
 export async function notifyChannelOrThrow(text: string): Promise<void> {
-  if (!CHANNEL_TOKEN || !CHANNEL_CHAT_ID) {
+  // CHATID0: same reasoning as notifyChannel above -- this is the ONLY
+  // delivery path for owner-escalation.ts's stage-2 alert (the "Istvan gets
+  // notified directly" fallback), so a placeholder "0" silently passing this
+  // guard would mean the most severe escalation tier never actually reaches
+  // anyone while looking like it succeeded (sendMessage would 400, caught by
+  // the caller as "delivery failed" -- but only AFTER already committing to
+  // this being the notification path of last resort).
+  const chatId = normalizeChatId(CHANNEL_CHAT_ID)
+  if (!CHANNEL_TOKEN || !chatId) {
     throw new Error('Channel ertesites nem lehetseges: token vagy chat ID hianyzik')
   }
   const outbound = markIfTestRun(text)
@@ -53,7 +71,7 @@ export async function notifyChannelOrThrow(text: string): Promise<void> {
   const chunks = provider.splitMessage(formatted)
   const parseMode = CHANNEL_PROVIDER === 'telegram' ? 'HTML' : undefined
   for (const chunk of chunks) {
-    await provider.sendMessage(CHANNEL_TOKEN, CHANNEL_CHAT_ID, chunk, parseMode)
+    await provider.sendMessage(CHANNEL_TOKEN, chatId, chunk, parseMode)
   }
 }
 
@@ -62,7 +80,7 @@ export async function notifyChannelOrThrow(text: string): Promise<void> {
 // (fresh installs, channel-less deployments), so it stays fully silent -- the
 // recovery path must never depend on, or be noisy about, Telegram being wired.
 export async function notifySecurityEvent(text: string): Promise<void> {
-  if (!CHANNEL_TOKEN || !CHANNEL_CHAT_ID) return
+  if (!CHANNEL_TOKEN || !normalizeChatId(CHANNEL_CHAT_ID)) return
   try {
     await notifyChannel(text)
   } catch {

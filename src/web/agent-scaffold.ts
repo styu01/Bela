@@ -219,6 +219,23 @@ export function ensureAgentHooks(name: string): boolean {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
   }
   const tplHooks = tpl.hooks as Record<string, unknown>
+  // TOOLLOG906 (2026-09-08): MAIN_AGENT_ID already carries its own,
+  // hand-maintained PostToolUse -> tool-log-capture.py entry in the repo-root
+  // /.claude/settings.json (Claude Code project-level settings, loaded
+  // ALONGSIDE ~/.claude/settings.json -- what this function writes for
+  // MAIN_AGENT_ID -- for the main agent's own session). That entry's command
+  // string uses $CLAUDE_PROJECT_DIR, not {{PROJECT_ROOT}}, so the exact-match
+  // dedup below would never recognize it as the same hook and would add a
+  // SECOND, differently-worded copy -- double-logging every tool call. Strip
+  // the template's copy for the main agent only; every sub-agent (which has
+  // no such hand-maintained duplicate) still gets it normally.
+  if (name === MAIN_AGENT_ID && Array.isArray(tplHooks.PostToolUse)) {
+    const filtered = (tplHooks.PostToolUse as HookEntry[])
+      .map((entry) => ({ ...entry, hooks: (entry.hooks ?? []).filter((h) => !h.command?.includes('tool-log-capture.py')) }))
+      .filter((entry) => (entry.hooks?.length ?? 0) > 0)
+    if (filtered.length > 0) tplHooks.PostToolUse = filtered
+    else delete tplHooks.PostToolUse
+  }
   if (existing.hooks) {
     // Merge strategy:
     //   0. Upgrade pass: in-place replace any legacy bare hook commands with the

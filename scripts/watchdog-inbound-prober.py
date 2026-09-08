@@ -98,9 +98,13 @@ async def main() -> None:
     # --- .env config ---
     env = read_env(ENV_FILE)
     allowed_chat_id_raw = env.get("ALLOWED_CHAT_ID", "").strip()
-    if not allowed_chat_id_raw:
+    # CHATID0 (2026-09-08): "0" is the installer's placeholder for an
+    # un-paired chat -- a Python string "0" is truthy, so `not "0"` is False
+    # and this guard alone would let the probe proceed straight into
+    # int("0") = 0, a real (wrong) chat id.
+    if not allowed_chat_id_raw or allowed_chat_id_raw == "0":
         print(
-            "inbound-prober: ALLOWED_CHAT_ID absent in .env -- exiting as safe no-op",
+            "inbound-prober: ALLOWED_CHAT_ID absent/placeholder in .env -- exiting as safe no-op",
             file=sys.stderr,
         )
         sys.exit(0)

@@ -127,7 +127,13 @@ alert_owner() {
   # value doesn't corrupt the URL or the comparison.
   token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$TG_ENV" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r ')"
   chat="$(grep -E '^ALLOWED_CHAT_ID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r ')"
+  # CHATID0 (2026-09-08): "0" is the installer's placeholder for an un-paired
+  # chat, not a real deliverable id -- treat it the same as empty so the
+  # TELEGRAM_CHAT_ID fallback below actually gets a chance to run, and the
+  # final guard below doesn't send to chat 0.
+  [ "$chat" = "0" ] && chat=""
   [ -z "$chat" ] && chat="$(grep -E '^TELEGRAM_CHAT_ID=' "$TG_ENV" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r ')"
+  [ "$chat" = "0" ] && chat=""
   if [ -z "$token" ] || [ -z "$chat" ]; then
     log "ALERT (no bot token or owner chat id configured, could not Telegram): $msg"; return 1
   fi

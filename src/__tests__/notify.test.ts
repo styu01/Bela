@@ -51,3 +51,31 @@ describe('notifyChannelOrThrow', () => {
     expect(mockSendMessage).toHaveBeenCalledTimes(1)
   })
 })
+
+// CHATID0 (2026-09-08): "0" is the installer's placeholder for an un-paired
+// chat. notifyChannelOrThrow is the ONLY delivery path for owner-escalation's
+// stage-2 alert -- if a placeholder "0" passed as a truthy, deliverable-
+// looking chat id, the send would 400 at the API instead of being recognised
+// up front as "not configured", and the most severe escalation tier would
+// silently never reach anyone. A separate module-mock scope is needed here
+// (vi.resetModules + vi.doMock) since the describe block above pins
+// CHANNEL_CHAT_ID to a real-looking value at module load time.
+describe('notifyChannelOrThrow with CHANNEL_CHAT_ID="0" (placeholder, not a real chat)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.clearAllMocks()
+    mockSendMessage.mockResolvedValue(undefined)
+  })
+
+  it('throws "not possible" (not a provider 400) and never calls sendMessage', async () => {
+    vi.doMock('../config.js', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('../config.js')>()),
+      CHANNEL_PROVIDER: 'telegram',
+      CHANNEL_TOKEN: 'test-token',
+      CHANNEL_CHAT_ID: '0',
+    }))
+    const { notifyChannelOrThrow: notifyWithZero } = await import('../notify.js')
+    await expect(notifyWithZero('hello')).rejects.toThrow('Channel ertesites nem lehetseges')
+    expect(mockSendMessage).not.toHaveBeenCalled()
+  })
+})

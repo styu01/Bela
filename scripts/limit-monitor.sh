@@ -33,7 +33,10 @@ BOT_NAME="$(env_val BOT_NAME)"
 BOT_NAME="${BOT_NAME:-$MAIN_AGENT_ID}"
 
 CHAT_ID="$(env_val ALLOWED_CHAT_ID)"
-if [ -z "$CHAT_ID" ]; then
+# CHATID0 (2026-09-08): "0" is the installer's placeholder for an un-paired
+# chat, and a bare -z check treats it as "set" (it's a non-empty string). Same
+# guard as an empty value -- there is nobody real to alert.
+if [ -z "$CHAT_ID" ] || [ "$CHAT_ID" = "0" ]; then
   # No owner chat configured: there is nobody to alert, and guessing one would
   # send a quota warning to a stranger. Stay silent rather than misdeliver.
   log "no ALLOWED_CHAT_ID in .env, monitor cannot alert -- exiting"

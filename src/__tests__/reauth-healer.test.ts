@@ -257,8 +257,29 @@ describe('decideReauthAction: recent-task sanity check (main agent only)', () =>
 describe('fix-revert guard: reauth-healer escalation no longer shells out to notify.sh', () => {
   it('sendNotify uses sendTelegramMessage, not execFile(.../notify.sh)', () => {
     const src = readFileSync(join(__dirname, '../web/reauth-healer.ts'), 'utf-8')
-    expect(src).toMatch(/sendTelegramMessage\(token, ALLOWED_CHAT_ID, msg\)/)
+    expect(src).toMatch(/sendTelegramMessage\(token, chatId, msg\)/)
     expect(src).not.toMatch(/NOTIFY_SCRIPT/)
     expect(src).not.toMatch(/notify\.sh/)
+  })
+})
+
+// CHATID0 (2026-09-08): sendNotify used to read ALLOWED_CHAT_ID with a raw
+// `.trim()` truthiness check, which does not distinguish the installer's "0"
+// placeholder from a real chat id (`!"0".trim()` is false) -- exactly the bug
+// class behind cold_reauth_healer_notify_silent_fail_20260829 (a REAL prior
+// incident on this exact function: BÉLA's own OAuth session died, the healer
+// detected it, but the Telegram notice silently failed). Pinning the fix so
+// a future edit cannot quietly revert back to the raw env-var read.
+describe('fix-revert guard: reauth-healer sendNotify resolves the owner chat id via owner-chat.ts', () => {
+  it('imports and calls resolveOwnerChatId, not a raw ALLOWED_CHAT_ID read', () => {
+    const src = readFileSync(join(__dirname, '../web/reauth-healer.ts'), 'utf-8')
+    expect(src).toMatch(/import\s*\{\s*resolveOwnerChatId\s*\}\s*from\s*'\.\.\/owner-chat\.js'/)
+    const start = src.indexOf('function sendNotify(')
+    expect(start).toBeGreaterThan(0)
+    const body = src.slice(start, src.indexOf('\n}', start))
+    expect(body).toMatch(/const chatId = resolveOwnerChatId\(\)/)
+    // no ACTUAL usage of the raw env var left (a mention in the explanatory
+    // comment above is fine and expected -- only real code references count)
+    expect(body).not.toMatch(/ALLOWED_CHAT_ID\.trim\(\)|ALLOWED_CHAT_ID\)/)
   })
 })
