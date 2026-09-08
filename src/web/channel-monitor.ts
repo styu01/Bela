@@ -34,7 +34,7 @@ import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence }
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn, wasPluginConfirmedAbsent, clearPluginAbsent } from './channel-plugin-unlock.js'
 import {
-  detectPaneState, decidePaneErrorAlert, detectsBlockingMenu, detectsFirstRunGate, detectsModelConsentDialog, type PaneErrorAlertState, type PaneState,
+  detectPaneState, decidePaneErrorAlert, detectsBlockingMenu, detectsPermissionDialog, detectsFirstRunGate, detectsModelConsentDialog, type PaneErrorAlertState, type PaneState,
   stuckInputSignature, decideStuckInputRecovery, parkedChannelInput,
   parkedInputText, shouldClearTruncatedPreamble,
   parkedInputRowCount, submitLanded, decideStuckInputAction,
@@ -410,14 +410,22 @@ async function performStuckInputAction(
         submitted = true
         break
       }
-      case 'clear-preamble':
+      case 'clear-preamble': {
         logger.warn({ session, attempt }, 'Stuck input -- truncated safety preamble, clearing buffer (no re-inject)')
-        await clearInputBuffer(session)
+        const cleared = await clearInputBuffer(session)
+        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-preamble left text in the box; the leftover stays parked')
         break
-      case 'clear-scheduled':
+      }
+      case 'clear-scheduled': {
         logger.warn({ session, attempt }, 'Stuck input -- parked scheduled-task tick, clearing buffer (no re-inject; next schedule fire re-delivers)')
-        await clearInputBuffer(session)
+        const cleared = await clearInputBuffer(session)
+        // A half-cleared tick is the 2026-09-03 wedge: the fragment left behind
+        // stops matching a delivery wrapper, so every later restart decision
+        // reads it as a human draft. Say so in the log rather than reporting a
+        // clean clear that did not happen.
+        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-scheduled left a fragment in the box; expect machineOrigin=false on the next tick')
         break
+      }
       case 'enter':
         // FABLEFALL1: same guard as the reinject-plain fallback above -- a bare
         // Enter must never reach the model consent dialog (its default SWITCHES
@@ -1363,6 +1371,16 @@ function channelDownMaxRestartsEscalationKey(session: string): string {
   return `channel-down-max-restarts:${session}`
 }
 
+// PERMDENY905 (2026-09-08 Codex review): alertOwnerOrBela derives its
+// escalation key as `${escalationType}:${session}`, so the type string used
+// on the alert call and the key used to clear it must be the EXACT same
+// literal. A shared constant/helper (rather than two independent string
+// literals) is what keeps them from drifting apart.
+const PERMISSION_DIALOG_ESCALATION_TYPE = 'permission-dialog-wait'
+function permissionDialogEscalationKey(session: string): string {
+  return `${PERMISSION_DIALOG_ESCALATION_TYPE}:${session}`
+}
+
 function maybeAlertStuckSubAgent(session: string, agentName: string | null, state: StuckInputState): void {
   const last = subAgentOverdueAlertedAt.get(session) ?? 0
   const now = Date.now()
@@ -1811,7 +1829,16 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       // panes get the channels.sh-style dialog answers instead; only the
       // login picker is alert-only (nobody can log in on the operator's behalf).
       const firstRunGate = pane != null ? detectsFirstRunGate(pane) : null
-      const inMenu = firstRunGate != null || (pane != null && detectsBlockingMenu(pane))
+      // PERMDENY905: detectsPermissionDialog is checked directly here too, not
+      // left to ride on the fact that its current UI shape also happens to
+      // satisfy detectsBlockingMenu's footer pattern -- that overlap is an
+      // implementation detail of both regexes today, not a guarantee. The
+      // boolean is kept (not just folded into inMenu) because the alert
+      // branch below re-reads the pane a second time -- if THAT read fails,
+      // this first, decision-driving read is what stops it from falling
+      // through to a blind Escape (see the race-condition note below).
+      const permissionDialogOnFirstRead = pane != null && detectsPermissionDialog(pane)
+      const inMenu = firstRunGate != null || (pane != null && (detectsBlockingMenu(pane) || permissionDialogOnFirstRead))
       const prev = paneMenuState.get(t.session) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
       const decision = decidePaneErrorAlert(inMenu, prev, Date.now(), {
         confirmMs: MENU_RECOVER_CONFIRM_MS,
@@ -1820,6 +1847,24 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       })
       if (decision.next.firstSeenAt === null) {
         paneMenuState.delete(t.session)
+        // PERMDENY905: the pane-menu state clearing above is NOT the same as
+        // the owner-escalation timer clearing here -- escalateToOwner runs its
+        // own self-driving stage-1/stage-2 timer keyed on this string, and it
+        // only stops when explicitly told to. Without this, a permission
+        // dialog the human already answered could still trigger a stage-2
+        // Istvan alert minutes later, AND a later, genuinely new dialog on the
+        // same session wouldn't start a fresh escalation cycle (the old key's
+        // state would still be "already alerted").
+        //
+        // 2026-09-08 Codex review: firstSeenAt can also go back to null from a
+        // TRANSIENT capturePane() failure this tick (pane == null forces
+        // inMenu = false regardless of what's actually on screen) -- that is
+        // NOT proof the human resolved anything. Only clear the escalation on
+        // a CONFIRMED normal read: the pane was actually captured this tick,
+        // and that capture did not itself show a permission dialog.
+        if (pane != null && !permissionDialogOnFirstRead) {
+          clearOwnerEscalation(permissionDialogEscalationKey(t.session))
+        }
       } else {
         paneMenuState.set(t.session, decision.next)
       }
@@ -1850,6 +1895,26 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             logger.warn({ session: t.session, agent: label }, 'Blocking "menu" is the model usage-credit consent dialog -- answering it safely instead of Escape')
             await dismissModelConsentDialogIfPresent(t.session)
             alertOwnerOrBela(t, 'model-consent-dialog', `🎛️ A(z) ${label} session a modell-hozzájárulás dialóguson parkolt; az 1-es opcióval (a beállított modell megtartása) továbbléptettem. Modellváltás NEM történt.`)
+          } else if (permissionDialogOnFirstRead || (paneNow != null && detectsPermissionDialog(paneNow))) {
+            // PERMDENY905: a tool-permission prompt also says "Esc to cancel",
+            // so detectsBlockingMenu matches it -- but Escape there is NO, not a
+            // dismiss. This monitor was therefore DENYING the agent's own
+            // requests ~45s after they appeared, while the operator believed
+            // they had approved them. Same rule as the model-consent dialog
+            // above: no keystroke is neutral, so send none and say so, loudly.
+            //
+            // 2026-09-08 Codex review (race condition): this branch used to
+            // trust ONLY the second read (paneNow). If that second capturePane()
+            // failed (transient tmux hiccup) right after the FIRST read had
+            // already identified a genuine permission dialog (the read that
+            // set inMenu=true and got us into this alert branch at all), the
+            // code fell through to the blind-Escape else below -- reintroducing
+            // PERMDENY905 through the verification step's own failure mode.
+            // permissionDialogOnFirstRead keeps that first, decision-driving
+            // classification alive so a second-read failure can never downgrade
+            // a real permission dialog into an Escaped "stuck menu".
+            logger.warn({ session: t.session, agent: label }, 'Blocking "menu" is a tool-permission prompt -- a human decides, NO keystrokes sent')
+            alertOwnerOrBela(t, PERMISSION_DIALOG_ESCALATION_TYPE, `🔐 A(z) ${label} session egy engedélykérésen vár, és NEM nyomtam meg semmit: ott az Escape NEM-et jelentene. Döntsd el te: tmux attach -t ${t.session}`)
           } else {
             logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
             try {

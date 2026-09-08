@@ -43,8 +43,14 @@ export interface UpdateStatus {
    * branchless clone keep receiving unreleased code until switched back. */
   branch?: string
   error?: string
-  /** True when the local HEAD is not on the GitHub remote (a customised fork);
-   * `behind`/`commits` are then computed from the upstream merge-base. */
+  /** True when this checkout doesn't map cleanly onto `origin` -- either the
+   * local HEAD itself isn't a commit on the GitHub remote (a customised fork
+   * carrying local commits), OR the checkout's own branch NAME isn't known to
+   * `origin` at all (UPDATEBRANCH904: this install's generated production/*
+   * branches, pushed only to `fork`/`backup`) and a stand-in ref (origin's
+   * default branch) was queried instead. `behind`/`commits` are then computed
+   * against the best available upstream reference rather than the literal
+   * tracked branch. */
   fork?: boolean
 }
 
@@ -108,6 +114,59 @@ export function parseGitHubRemote(): string {
     if (m) return m[1]
   } catch { /* fall through */ }
   return 'Szotasz/marveen'
+}
+
+// Does `branch` exist as a remote-tracking ref for `origin`? Answered from
+// local refs (kept current by `git fetch`), no network call needed.
+//
+// UPDATEBRANCH904 (2026-09-08): trackedBranch() returns whatever branch the
+// checkout is ON, not what origin has ever seen. This install's own generated
+// checkout name (production/marveen-v1.34.1-...) is pushed to the `fork`/
+// `backup` remotes but was NEVER pushed to `origin` -- querying GitHub's
+// /commits/<branch> endpoint about a name it doesn't recognize 422s, and that
+// throw happens BEFORE the fork-fallback logic below ever runs (it only fires
+// once status.latest has already resolved), so the whole check gets stuck on
+// a permanent error while real upstream commits pile up invisibly (179
+// commits behind origin/develop, measured live on this install the day this
+// was found). The caller must check this FIRST and resolve to a real ref on
+// `origin` instead of guessing.
+export function branchExistsOnOrigin(branch: string, root: string = PROJECT_ROOT): boolean {
+  try {
+    execFileSync('/usr/bin/git', ['show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`], { cwd: root, timeout: 3000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// origin's own default branch (main/develop/whatever it's configured to),
+// used only as a fallback when trackedBranch() isn't itself known to origin
+// (branchExistsOnOrigin above) -- a local/generated branch name means nothing
+// to GitHub, so there is nothing else sensible to query.
+async function fetchDefaultBranch(remote: string): Promise<string> {
+  const res = await fetch(`https://api.github.com/repos/${remote}`, { headers: GH_HEADERS, signal: AbortSignal.timeout(TOOL_TIMEOUTS['github']) })
+  if (!res.ok) throw new Error(`GitHub /repos/${remote} -> ${res.status}`)
+  const json = await res.json() as { default_branch?: unknown }
+  const branch = typeof json.default_branch === 'string' ? json.default_branch.trim() : ''
+  if (!branch) throw new Error(`No usable default_branch on /repos/${remote} response`)
+  return branch
+}
+
+// The commits-endpoint lookup for a single branch, distinguishing "branch
+// unknown to GitHub" (404/422) from every other failure. Kept separate from
+// the direct throw-on-!ok shape refreshUpdateStatus used to have so the
+// caller can retry with a different branch instead of treating a 404/422 as
+// fatal.
+async function fetchBranchTip(remote: string, branch: string): Promise<{ sha: string } | { notFound: true }> {
+  const res = await fetch(`https://api.github.com/repos/${remote}/commits/${encodeURIComponent(branch)}`, {
+    headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'marveen-update-check' },
+    signal: AbortSignal.timeout(TOOL_TIMEOUTS['github']),
+  })
+  if (res.status === 404 || res.status === 422) return { notFound: true }
+  if (!res.ok) throw new Error(`GitHub /commits/${branch} -> ${res.status}`)
+  const json = await res.json() as { sha?: unknown }
+  if (typeof json.sha !== 'string' || !json.sha) throw new Error(`No sha on commits/${branch} response`)
+  return { sha: json.sha }
 }
 
 type GhCompare = {
@@ -188,14 +247,18 @@ export function groupByRelease(commits: UpdateCommit[], fullMessages: string[]):
   return out.concat(groups)
 }
 
-// Merge-base of local HEAD with the upstream tracking ref (origin/<tracked
-// branch>, which parseGitHubRemote maps to the GitHub remote). For a customised fork this is
-// the fork point -- an actual upstream commit -- so it can be compared on
-// GitHub even though the local HEAD itself never landed there. Empty string
-// when there is no local upstream ref.
-function upstreamMergeBase(): string {
+// Merge-base of local HEAD with `origin/<branch>`. Takes the ALREADY-RESOLVED
+// query branch (the one refreshUpdateStatus actually queried GitHub about),
+// not a fresh trackedBranch() call -- re-deriving it here would reproduce
+// UPDATEBRANCH904 in this half of the check too: if the checkout's own branch
+// name doesn't exist on origin, `origin/<that name>` doesn't exist as a local
+// ref either, so `git merge-base` would fail the exact same way. For a
+// customised fork this merge-base is the fork point -- an actual upstream
+// commit -- so it can be compared on GitHub even though local HEAD itself
+// never landed there. Empty string when there is no such local ref.
+function upstreamMergeBase(branch: string): string {
   try {
-    return execFileSync('/usr/bin/git', ['merge-base', 'HEAD', `origin/${trackedBranch()}`], { cwd: PROJECT_ROOT, timeout: 3000, encoding: 'utf-8' }).trim()
+    return execFileSync('/usr/bin/git', ['merge-base', 'HEAD', `origin/${branch}`], { cwd: PROJECT_ROOT, timeout: 3000, encoding: 'utf-8' }).trim()
   } catch {
     return ''
   }
@@ -218,16 +281,33 @@ export async function refreshUpdateStatus(): Promise<UpdateStatus> {
     return status
   }
   try {
-    // 1) find HEAD of the branch this checkout follows via the commits endpoint
+    // 1) find HEAD of the branch this checkout follows via the commits endpoint.
+    // UPDATEBRANCH904: if the checkout's own branch was never pushed to
+    // `origin` (only to `fork`/`backup` -- this install's generated
+    // production/* branches), querying origin about it 422s and the
+    // fork-fallback below never gets a chance to run (it only fires once
+    // status.latest already resolved). Resolve to origin's own default
+    // branch instead in that case, and remember that this checkout is on a
+    // branch origin has never seen (same signal the fork-fallback below uses).
     const branch = trackedBranch()
-    const latestRes = await fetch(`https://api.github.com/repos/${remote}/commits/${encodeURIComponent(branch)}`, {
-      headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'marveen-update-check' },
-      signal: AbortSignal.timeout(TOOL_TIMEOUTS['github']),
-    })
-    if (!latestRes.ok) throw new Error(`GitHub /commits/${branch} -> ${latestRes.status}`)
-    const latestJson = await latestRes.json() as { sha?: string }
-    if (!latestJson.sha) throw new Error(`No sha on commits/${branch} response`)
-    status.latest = latestJson.sha
+    let queryBranch = branchExistsOnOrigin(branch) ? branch : await fetchDefaultBranch(remote)
+    if (queryBranch !== branch) status.fork = true
+    let tip = await fetchBranchTip(remote, queryBranch)
+    if ('notFound' in tip) {
+      // branchExistsOnOrigin only reads what a PAST `git fetch` recorded into
+      // local remote-tracking refs -- if `branch` was deleted or renamed on
+      // origin since then, the stale local ref still says "exists" but
+      // GitHub itself 404s/422s on it. One bounded retry against origin's
+      // CURRENT default branch recovers from that without looping.
+      const fallbackBranch = await fetchDefaultBranch(remote)
+      if (fallbackBranch !== queryBranch) {
+        queryBranch = fallbackBranch
+        status.fork = true
+        tip = await fetchBranchTip(remote, queryBranch)
+      }
+      if ('notFound' in tip) throw new Error(`GitHub /commits/${queryBranch} -> not found`)
+    }
+    status.latest = tip.sha
 
     if (status.latest === current) {
       updateStatusCache = status
@@ -246,7 +326,7 @@ export async function refreshUpdateStatus(): Promise<UpdateStatus> {
       // `behind`/`commits` reflect genuinely new upstream commits rather than the
       // fork divergence.
       status.fork = true
-      const base = upstreamMergeBase()
+      const base = upstreamMergeBase(queryBranch)
       if (!base || base === status.latest) {
         // No local upstream ref, or the fork point already is the upstream tip:
         // nothing new upstream. A fork being ahead of upstream is expected, not

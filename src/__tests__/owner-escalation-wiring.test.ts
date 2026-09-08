@@ -68,10 +68,72 @@ describe('channel-monitor.ts: sub-agent alert sites route through escalateToOwne
     expect(SRC).toMatch(/key:\s*channelDownMaxRestartsEscalationKey\(t\.session\)/)
   })
 
-  it('recovery paths clear the escalation state (stuck-subagent, channel-down x2)', () => {
+  // PERMDENY905 (2026-09-08): the pane-menu-state clear (paneMenuState.delete)
+  // and the owner-escalation timer clear are two SEPARATE mechanisms --
+  // clearing only the former leaves escalateToOwner's self-driving stage-2
+  // timer running after a human has already answered the dialog, AND blocks a
+  // later, genuinely new dialog on the same session from starting a fresh
+  // cycle (the old key's "already alerted" state persists). alertOwnerOrBela
+  // and the clear call MUST reference the same PERMISSION_DIALOG_ESCALATION_TYPE
+  // constant (not two independent string literals) so the key can never drift.
+  it('the permission-dialog escalation uses a shared constant for its key, at both the alert site and the clear site', () => {
+    expect(SRC).toMatch(/const PERMISSION_DIALOG_ESCALATION_TYPE = 'permission-dialog-wait'/)
+    expect(SRC).toMatch(/function permissionDialogEscalationKey\(session: string\): string \{\s*\n\s*return `\$\{PERMISSION_DIALOG_ESCALATION_TYPE\}:\$\{session\}`/)
+    expect(SRC).toMatch(/alertOwnerOrBela\(t, PERMISSION_DIALOG_ESCALATION_TYPE,/)
+    expect(SRC).toMatch(/clearOwnerEscalation\(permissionDialogEscalationKey\(t\.session\)\)/)
+  })
+
+  // The permission-dialog detector must feed `inMenu` directly, not rely on
+  // detectsBlockingMenu's regex happening to also match the same footer text
+  // -- that overlap is an implementation detail of both patterns today, not a
+  // contract either one is written to preserve.
+  it('inMenu also checks detectsPermissionDialog directly, not only detectsBlockingMenu', () => {
+    const flagIdx = SRC.indexOf('const permissionDialogOnFirstRead = pane != null && detectsPermissionDialog(pane)')
+    expect(flagIdx).toBeGreaterThan(0)
+    const menuStart = SRC.indexOf('const inMenu = firstRunGate != null', flagIdx)
+    expect(menuStart).toBeGreaterThan(flagIdx)
+    const line = SRC.slice(menuStart, SRC.indexOf('\n', menuStart))
+    expect(line).toMatch(/detectsBlockingMenu\(pane\)/)
+    expect(line).toMatch(/permissionDialogOnFirstRead/)
+  })
+
+  // 2026-09-08 Codex review (race condition): the alert branch re-reads the
+  // pane a SECOND time (paneNow) at alert-time. If that second capturePane()
+  // fails (transient tmux hiccup) -- or the human resolves the dialog in the
+  // gap between the two reads -- right after the FIRST read (the one that
+  // set inMenu=true and got the loop into this alert branch in the first
+  // place) had already identified a genuine permission dialog, trusting ONLY
+  // the second read falls through to the blind-Escape branch below. That
+  // reintroduces PERMDENY905 through the verification step's own failure
+  // mode. The branch condition must OR in the first read's classification.
+  it('the permission-dialog alert branch trusts the FIRST capture, not only the second (race-condition fix)', () => {
+    const branchIdx = SRC.indexOf("} else if (permissionDialogOnFirstRead || (paneNow != null && detectsPermissionDialog(paneNow))) {")
+    expect(branchIdx).toBeGreaterThan(0)
+  })
+
+  it('recovery paths clear the escalation state (stuck-subagent, channel-down x2, permission-dialog)', () => {
     expect(SRC).toMatch(/clearOwnerEscalation\(stuckSubAgentEscalationKey\(t\.session\)\)/)
     expect(SRC).toMatch(/clearOwnerEscalation\(channelDownBusyEscalationKey\(t\.session\)\)/)
+    expect(SRC).toMatch(/clearOwnerEscalation\(permissionDialogEscalationKey\(t\.session\)\)/)
     expect(SRC).toMatch(/clearOwnerEscalation\(channelDownMaxRestartsEscalationKey\(t\.session\)\)/)
+  })
+
+  // 2026-09-08 Codex review: firstSeenAt resetting to null does NOT prove the
+  // human resolved the permission dialog -- a TRANSIENT capturePane() failure
+  // this tick also forces inMenu=false (pane==null short-circuits the whole
+  // check), landing here with nothing actually confirmed. Clearing the
+  // escalation unconditionally on firstSeenAt===null would let a capture
+  // hiccup silently cancel a still-pending stage-2 alert for a real,
+  // unresolved permission request. The clear must require a CONFIRMED normal
+  // read: pane was actually captured this tick, and it did not itself show a
+  // permission dialog.
+  it('the permission-dialog escalation clear requires a confirmed normal pane read, not just firstSeenAt===null', () => {
+    const clearIdx = SRC.indexOf('clearOwnerEscalation(permissionDialogEscalationKey(t.session))')
+    expect(clearIdx).toBeGreaterThan(0)
+    const guardStart = SRC.lastIndexOf('if (', clearIdx)
+    const guardLine = SRC.slice(guardStart, SRC.indexOf('\n', guardStart))
+    expect(guardLine).toMatch(/pane != null/)
+    expect(guardLine).toMatch(/!permissionDialogOnFirstRead/)
   })
 })
 
