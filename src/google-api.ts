@@ -6,7 +6,12 @@ import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 
 const TOKENS_PATH = join(homedir(), '.config', 'google-calendar-mcp', 'tokens.json')
-const CLIENT_CREDS_PATH = join(homedir(), '.gmail-mcp', 'gcp-oauth.keys.json')
+// Moved off ~/.gmail-mcp/ on 2026-09-08: that directory is the hardcoded
+// working dir of the (separately installed) @artymclabin/gmail-mcp npm
+// package, which writes its OWN gcp-oauth.keys.json there for a DIFFERENT
+// (Desktop-app-type) OAuth client. Sharing the path would have let either
+// tool's setup silently clobber the other's Calendar/Gmail credentials.
+const CLIENT_CREDS_PATH = join(homedir(), '.config', 'bela-google-oauth', 'gcp-oauth.keys.json')
 
 interface TokenData {
   access_token: string

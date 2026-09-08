@@ -37,7 +37,7 @@ Security notes (2026-09-08 Codex review rounds 1-3, all addressed):
     can't be silently widened by a future invocation.
   - PKCE (S256) + a random `state` are used and verified.
   - Each auth-url run gets its OWN pending-state file, named by a hash of its
-    `state` value, under ~/.gmail-mcp/oauth-pending/ (0700) -- concurrent
+    `state` value, under ~/.config/bela-google-oauth/oauth-pending/ (0700) -- concurrent
     auth-url runs no longer clobber each other or race an in-flight exchange.
     Pending files older than 10 minutes are pruned opportunistically.
   - The redirect URI is a hardcoded constant (EXPECTED_REDIRECT_URI), never
@@ -91,7 +91,7 @@ JSON, key "web": {client_id, client_secret, redirect_uris, token_uri, ...}).
 
 On successful exchange, writes TWO files so marveen's own src/google-api.ts
 can use them as-is:
-  - CLIENT_OUT (~/.gmail-mcp/gcp-oauth.keys.json): the client id/secret
+  - CLIENT_OUT (~/.config/bela-google-oauth/gcp-oauth.keys.json): the client id/secret
     RESHAPED into the `{"installed": {...}}` wrapper google-api.ts expects
     (ClientCredentials interface reads `client.installed.*`). This is a
     purely local representation choice -- the client is still a "web" type
@@ -112,9 +112,14 @@ CLIENT_JSON = os.environ.get(
     "BELA_GOOGLE_OAUTH_CLIENT",
     os.path.join(os.path.dirname(__file__), "..", "store", ".bela-home-google-oauth-client.json"),
 )
-CLIENT_OUT = os.path.expanduser("~/.gmail-mcp/gcp-oauth.keys.json")
+# Moved off ~/.gmail-mcp/ on 2026-09-08: that directory is the hardcoded
+# working dir of the (separately installed) @artymclabin/gmail-mcp npm
+# package, which writes its OWN gcp-oauth.keys.json there for a DIFFERENT
+# (Desktop-app-type) OAuth client. Sharing the path would have let either
+# tool's setup silently clobber the other's Calendar/Gmail credentials.
+CLIENT_OUT = os.path.expanduser("~/.config/bela-google-oauth/gcp-oauth.keys.json")
 TOKEN_OUT = os.path.expanduser("~/.config/google-calendar-mcp/tokens.json")
-PENDING_DIR = os.path.expanduser("~/.gmail-mcp/oauth-pending")
+PENDING_DIR = os.path.expanduser("~/.config/bela-google-oauth/oauth-pending")
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 
@@ -184,7 +189,7 @@ def _assert_no_symlink_in_path(path):
 def _mkdir_secure(path):
     """Create every directory component under $HOME needed for `path`, chmod
     0700 each one (not just the final leaf -- os.makedirs can silently create
-    intermediate dirs, e.g. ~/.gmail-mcp itself, at the process umask)."""
+    intermediate dirs, e.g. ~/.config/bela-google-oauth itself, at the process umask)."""
     home = os.path.realpath(os.path.expanduser("~"))
     d = os.path.dirname(os.path.abspath(path))
     to_chmod = []

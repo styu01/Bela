@@ -648,7 +648,7 @@ export async function getCalendarEvents(calendarId: string, timeMin: Date, timeM
 ```
 
 - Token fajl: `~/.config/google-calendar-mcp/tokens.json`
-- Client credentials: `~/.gmail-mcp/gcp-oauth.keys.json`
+- Client credentials: `~/.config/bela-google-oauth/gcp-oauth.keys.json` (2026-09-08-ig `~/.gmail-mcp/gcp-oauth.keys.json` volt, athelyezve mert az utvonal utkozott egy kulon telepitett Gmail-MCP npm csomag sajat, mas OAuth-klienset varo fajljaval)
 - Auto token refresh 401 eseten
 - Visszateres: events tomb (id, summary, start, end, status, location, description, attendees)
 - Nativ `https` modul (nincs fetch/axios dependency)

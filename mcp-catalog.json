@@ -21,10 +21,10 @@
     "category": "productivity",
     "icon": "📧",
     "command": "npx",
-    "args": ["-y", "gmail-mcp-server"],
+    "args": ["-y", "@artymclabin/gmail-mcp"],
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor OAuth bejelentkezés szükséges a böngészőben",
+    "authNote": "ELŐFELTÉTEL (a Telepítés gomb ezt NEM végzi el helyetted): előbb létre kell hozni egy Google Cloud OAuth klienst -- Google Cloud Console -> Gmail API engedélyezése -> APIs & Services / Credentials -> Create Credentials -> OAuth client ID -> típus: Desktop app -> a letöltött JSON-t átnevezve `gcp-oauth.keys.json`-ra a `~/.gmail-mcp/` mappába kell tenni. E nélkül a szerver induláskor azonnal elbukik ('OAuth keys file not found'). Csak EZUTÁN jön az egyszeri, KÜLÖN parancssori bejelentkezés a scope-korlátozott hozzáféréshez: `npx -y @artymclabin/gmail-mcp auth --scopes=gmail.readonly,gmail.compose` -- ez menti a tokent a ~/.gmail-mcp/credentials.json-ba, EZUTÁN indul a fenti args szerinti szerver a már korlátozott joggal. Az args maga NEM tartalmaz scope-paramétert.",
     "infoUrl": "https://github.com/ArtyMcLabin/Gmail-MCP-Server"
   },
   {
@@ -37,7 +37,7 @@
     "url": "https://gcal.mcp.claude.com/mcp",
     "env": {},
     "authType": "oauth",
-    "authNote": "Első használatkor a Claude.ai-on kell engedélyezni a Calendar hozzáférést",
+    "authNote": "FONTOS: a fenti 'url' mező jelenleg NEM egy élő, elérhető végpont (DNS-szinten nem is létezik) -- a Gmail/Calendar Anthropic-hosted first-party connectorok NEM adhatók hozzá `claude mcp add`-dal/URL-lel, a Claude Code hivatalos dokumentációja szerint egy ilyen kísérlet 'is Anthropic-hosted and doesn't support local OAuth' hibát adna. A Telepítés gomb ITT tehát várhatóan hibázni fog -- a helyes lépés: jelentkezz be a claude.ai-ra (azzal a fiókkal, amivel a Claude Code munkafolyamat is authentikál) és a https://claude.ai/customize/connectors oldalon engedélyezd a Google Calendar hozzáférést a saját Google-fiókoddal. Fiók-szintű engedélyezés után a connectornak automatikusan elérhetővé kell válnia a Claude Code munkafolyamatban, külön helyi konfiguráció nélkül.",
     "infoUrl": "https://docs.anthropic.com/en/docs/agents-and-tools/remote-mcp-servers"
   },
   {
