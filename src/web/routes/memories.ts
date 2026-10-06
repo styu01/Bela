@@ -71,6 +71,12 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const tier = url.searchParams.get('tier') || url.searchParams.get('category') || ''
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
     const mode = url.searchParams.get('mode') || 'fts'
+    const offsetRaw = parseInt(url.searchParams.get('offset') || '0', 10)
+    const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0
+    if (offset > 0 && q) {
+      json(res, { error: 'offset is not supported together with q (search results are relevance-ranked)' }, 400)
+      return true
+    }
 
     let results: Memory[]
     if (q && mode === 'hybrid') {
@@ -90,9 +96,9 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       }
     } else if (agentId) {
       // Category goes into the query, not a post-filter: see getAgentMemories.
-      results = getAgentMemories(agentId, limit, tier || undefined)
+      results = getAgentMemories(agentId, limit, tier || undefined, offset)
     } else {
-      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit)
+      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit, offset)
     }
 
     // Still needed for the search branches above, which rank by relevance and
@@ -235,11 +241,30 @@ Respond ONLY with JSON, nothing else:
   }
 
   const memUpdateMatch = path.match(/^\/api\/memories\/(\d+)$/)
-  if (memUpdateMatch && method === 'PUT') {
+  if (memUpdateMatch && (method === 'PUT' || method === 'PATCH')) {
     const id = parseInt(memUpdateMatch[1], 10)
     const body = await readBody(req)
-    const { content, category, tier, agent_id, keywords } = JSON.parse(body.toString()) as { content: string; category?: string; tier?: string; agent_id?: string; keywords?: string }
-    if (updateMemory(id, content, tier || category, agent_id, keywords)) { json(res, { ok: true }); return true }
+    const { content, category, tier, agent_id, keywords } = JSON.parse(body.toString()) as { content?: string; category?: string; tier?: string; agent_id?: string; keywords?: string }
+    const newCategory = (tier || category || '').toLowerCase() || undefined
+    if (newCategory && !MEMORY_CATEGORIES.has(newCategory)) {
+      json(res, { error: `Invalid category "${newCategory}". Allowed: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+      return true
+    }
+    // Partial update: a category-only change (the hot->cold tier move) must not
+    // require re-sending the content. updateMemory() always SETs content, so an
+    // omitted content is backfilled from the existing row -- previously an
+    // undefined content made the SQL bind throw and the endpoint 500'd, which
+    // left tier moves impossible via the API (Dream Engine blocker, 2026-07-30).
+    let effectiveContent = content
+    if (effectiveContent === undefined) {
+      const row = getDb().prepare('SELECT content FROM memories WHERE id = ?').get(id) as { content: string } | undefined
+      if (!row) { json(res, { error: 'Memory not found' }, 404); return true }
+      effectiveContent = row.content
+    } else if (containsSuspiciousContent(effectiveContent)) {
+      json(res, { error: 'Content rejected by security filter' }, 400)
+      return true
+    }
+    if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords)) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
-  listKanbanCards, createKanbanCard, updateKanbanCard,
+  listKanbanCards, createKanbanCard, updateKanbanCard, parentWouldCycle,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard, unarchiveKanbanCard,
   getKanbanComments, addKanbanComment, getKanbanCardEvents, listKanbanProjects,
   getKanbanCard, getChildCards, getDb,
@@ -369,6 +369,14 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       const existing = getKanbanCard(id)
       const currentValue = !!existing?.is_recurring_template
       recurringTemplateChanging = !!data.is_recurring_template !== currentValue
+    }
+    if (typeof data.parent_id === 'string' && data.parent_id) {
+      if (!getKanbanCard(data.parent_id)) {
+        json(res, { error: 'A szülő kártya nem található' }, 404); return true
+      }
+      if (parentWouldCycle(id, data.parent_id)) {
+        json(res, { error: data.parent_id === id ? 'Egy kártya nem lehet a saját szülője' : 'Ez a szülő-kapcsolat kört zárna be' }, 409); return true
+      }
     }
     if (updateKanbanCard(id, data, recurringTemplateChanging ? describeAuthActor(auth) : undefined)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)

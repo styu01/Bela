@@ -48,6 +48,7 @@ import { recordSentText } from './sent-text-registry.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { CHANNEL_PROVIDER, MAIN_AGENT_ID, STORE_DIR, PROJECT_ROOT, SUBAGENT_INBOX_TEE } from '../config.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
+import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
 import { loadProfileTemplate } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
 import { writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection } from './agent-scaffold.js'
@@ -554,6 +555,11 @@ function reconcileMcpServers(
   }
   const own = isPlainObject(cur.mcpServers) ? cur.mcpServers : {}
   const projectScoped = projectScopedServerNames(cwd)
+  // Sub-agents may only acquire NEW shared MCP definitions that the owner put
+  // on the explicit allow-list. This remains additive: an existing isolated
+  // config is never stripped, so narrowing the list cannot alter a deployed
+  // agent. The main agent deliberately mirrors the operator's shared config.
+  const allowed = name === MAIN_AGENT_ID ? null : readInheritableMcpServerNames()
   let changed = false
 
   // MIGRATION (2026-09-08 Codex review round 2): this removal-pass runs
@@ -593,8 +599,13 @@ function reconcileMcpServers(
   if (shared && isPlainObject(shared.mcpServers)) {
     const added: string[] = []
     const skippedShadow: string[] = []
+    const notInherited: string[] = []
     for (const [key, def] of Object.entries(shared.mcpServers)) {
       if (key in own) continue
+      if (allowed && !allowed.has(key)) {
+        notInherited.push(key)
+        continue
+      }
       if (projectScoped.has(key)) {
         skippedShadow.push(key)
         continue
@@ -606,6 +617,7 @@ function reconcileMcpServers(
     if (skippedShadow.length > 0) {
       logger.info({ name, skippedShadow }, 'isolated-config: skipped MCP server(s) already defined in this agent\'s own .mcp.json (would have shadowed project scope)')
     }
+    logNotInherited(name, 'gap-fill', notInherited)
     if (added.length > 0) {
       logger.info({ name, added }, 'isolated-config: added missing MCP servers from the shared config')
     }
@@ -791,6 +803,17 @@ function provisionIsolatedConfigDir(
           try { seed = JSON.parse(readFileSync(sharedDot, 'utf-8')) as Record<string, unknown> } catch { /* keep minimal */ }
         }
         seed.hasCompletedOnboarding = true
+        // The shared file is copied for consent state, not as a connector
+        // grant. New sub-agents retain only explicitly allow-listed servers;
+        // the main agent remains the operator-config mirror.
+        if (name !== MAIN_AGENT_ID && isPlainObject(seed.mcpServers)) {
+          const { kept, dropped } = filterInheritableMcpServers(
+            seed.mcpServers,
+            readInheritableMcpServerNames(),
+          )
+          seed.mcpServers = kept
+          logNotInherited(name, 'seed', dropped)
+        }
         stripProjectScopedCollisions(seed, cwd, name)
         writeJsonAtomic(dotClaude, seed)
       } else {

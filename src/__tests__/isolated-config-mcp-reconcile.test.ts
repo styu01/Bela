@@ -15,6 +15,21 @@ vi.mock('../web/agent-config.js', async (orig) => {
   const actual = await orig<typeof import('../web/agent-config.js')>()
   return { ...actual, agentDir: (name: string) => join(SANDBOX, 'agents', name) }
 })
+// These are pre-existing reconcile tests: keep their historical assertion that
+// named shared servers gap-fill correctly by explicitly granting their fixture
+// names. The separate mcp-inheritance suite proves the new narrow default and
+// Gmail exclusion.
+const INHERITED_FOR_THIS_SUITE = 'gmail,google-drive,extra,slack,cortex,more'
+vi.mock('../settings-store.js', async (orig) => {
+  const actual = await orig<typeof import('../settings-store.js')>()
+  return {
+    ...actual,
+    getEffectiveSettingValue: (key: string) =>
+      key === 'AGENT_INHERITED_MCP_SERVERS'
+        ? INHERITED_FOR_THIS_SUITE
+        : actual.getEffectiveSettingValue(key),
+  }
+})
 
 const { ensureIsolatedChannelConfigDir } = await import('../web/agent-process.js')
 

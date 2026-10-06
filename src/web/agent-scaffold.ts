@@ -5,6 +5,8 @@ import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, 
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { logger } from '../logger.js'
+import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
 import { agentDir, agentConfigRoot, listAgentNames, readAgentCapabilities } from './agent-config.js'
 import { resolveProfilePlaceholders, type ProfileTemplate } from './profiles.js'
 import { sanitizeCapabilityTag, CAPABILITY_TAG_MAX_PER_AGENT } from '../prompt-safety.js'
@@ -941,14 +943,27 @@ export function scaffoldAgentDir(name: string) {
   if (!existsSync(memoryMd)) writeFileSync(memoryMd, '')
   const mcpJson = join(dir, '.mcp.json')
   if (!existsSync(mcpJson)) {
-    // Copy shared MCP config so agents get access to common tools (e.g. aiam-blog)
+    // A new agent receives only explicitly allow-listed project MCP servers.
+    // In particular, the Gmail connector remains with BELA unless it is
+    // deliberately granted by name; existing agent files are never rewritten.
     const sharedMcp = join(PROJECT_ROOT, '.mcp.json')
+    let inherited: Record<string, unknown> = { mcpServers: {} }
     if (existsSync(sharedMcp)) {
-      copyFileSync(sharedMcp, mcpJson)
-    } else {
-      // Valid empty shape -- `claude /doctor` rejects plain "{}"
-      atomicWriteFileSync(mcpJson, JSON.stringify({ mcpServers: {} }, null, 2))
+      try {
+        const parsed = JSON.parse(readFileSync(sharedMcp, 'utf-8')) as Record<string, unknown>
+        const servers = parsed && typeof parsed.mcpServers === 'object' && parsed.mcpServers !== null && !Array.isArray(parsed.mcpServers)
+          ? parsed.mcpServers as Record<string, unknown>
+          : {}
+        const { kept, dropped } = filterInheritableMcpServers(servers, readInheritableMcpServerNames())
+        inherited = { ...parsed, mcpServers: kept }
+        logNotInherited(name, 'scaffold', dropped)
+      } catch (err) {
+        // An unreadable source must not become an unfiltered copy.
+        logger.warn({ err, name }, 'MCP inheritance: project .mcp.json unreadable, new agent inherits no servers')
+      }
     }
+    // Valid empty shape -- `claude /doctor` rejects plain "{}".
+    atomicWriteFileSync(mcpJson, JSON.stringify(inherited, null, 2))
   }
   // Seed settings.json from template so the agent gets the PreCompact
   // hook (memory save + skill reflection) out of the box. Only if the
