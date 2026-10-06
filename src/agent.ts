@@ -1,7 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, chmodSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { execSync } from 'node:child_process'
 import { PROJECT_ROOT } from './config.js'
 
@@ -124,45 +123,63 @@ function agentBackend(): 'worker' | 'sdk' {
 // The SDK fallback is a text-generation escape hatch, not a channels session.
 // Starting it at PROJECT_ROOT lets Claude Code discover this repository's
 // .claude/settings.json and load the Telegram plugin, creating a second poller
-// for the main bot. Keep the default-cwd fallback outside every project tree.
-const SDK_FALLBACK_CWD = join(tmpdir(), 'marveen-sdk-fallback')
+// for the main bot. Keep it under the install-private, gitignored store/ area
+// rather than a predictable shared /tmp path.
+const SDK_FALLBACK_CWD = join(PROJECT_ROOT, 'store', '.sdk-fallback')
 const SDK_FALLBACK_CONFIG_DIR = join(SDK_FALLBACK_CWD, '.claude-config')
+
+export interface SdkFallbackSpawnIsolation {
+  cwd: string
+  env: Record<string, string | undefined>
+  // Omitted for caller-owned isolated cwd/config pairs: those paths retain
+  // their historic SDK settings/MCP/skill contract unchanged.
+  settingSources?: []
+}
+
+/** Ensure the default SDK fallback root is a private directory we own. */
+export function ensureSdkFallbackDirectory(path = SDK_FALLBACK_CWD): string {
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(path)
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') throw err
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    stat = lstatSync(path)
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (uid !== undefined && stat.uid !== uid)) {
+    throw new Error(`unsafe SDK fallback directory: ${path}`)
+  }
+  // Existing operator-created directories may have a permissive mode; tighten
+  // them before placing SDK transcripts/config beneath this private root.
+  chmodSync(path, 0o700)
+  return path
+}
 
 export function sdkFallbackSpawnIsolation(
   requestedCwd: string,
   requestedEnv?: Record<string, string | undefined>,
-): {
-  cwd: string
-  env: Record<string, string | undefined>
-  settingSources: []
-  plugins: []
-} {
+): SdkFallbackSpawnIsolation {
   // The two callers that supply a cwd (heartbeat and daily digest) already
-  // create isolated, plugin-disabled homes/configs. Preserve those paths: they
-  // are part of their authentication and project-MCP setup contracts.
+  // create isolated homes/configs. Preserve their COMPLETE historic SDK option
+  // contract: their project/user settings intentionally carry MCP and skills.
   if (requestedCwd !== PROJECT_ROOT) {
     return {
       cwd: requestedCwd,
       env: { ...process.env, ...requestedEnv },
-      // Defense in depth: do not consult project/user/local filesystem
-      // settings even when the SDK is forced via MARVEEN_AGENT_BACKEND=sdk.
-      settingSources: [],
-      plugins: [],
     }
   }
 
-  try {
-    mkdirSync(SDK_FALLBACK_CONFIG_DIR, { recursive: true })
-  } catch (err) {
-    // Query will surface a real spawn error. Do not fall back to PROJECT_ROOT:
-    // that would reintroduce the duplicate Telegram poller incident.
-    logger.warn({ err, cwd: SDK_FALLBACK_CWD }, 'runAgent: failed to prepare neutral SDK fallback directory')
-  }
+  const safeCwd = ensureSdkFallbackDirectory()
+  mkdirSync(SDK_FALLBACK_CONFIG_DIR, { recursive: true, mode: 0o700 })
   return {
-    cwd: SDK_FALLBACK_CWD,
+    cwd: safeCwd,
     env: { ...process.env, ...requestedEnv, CLAUDE_CONFIG_DIR: SDK_FALLBACK_CONFIG_DIR },
+    // This is the load-bearing plugin guard. `plugins: []` is deliberately
+    // absent: SDK plugins are additive local --plugin-dir entries, so an empty
+    // list does NOT disable plugins enabled from settings. An empty source list
+    // prevents project/user/local settings (and their enabled plugins) loading.
     settingSources: [],
-    plugins: [],
   }
 }
 
@@ -223,20 +240,18 @@ export async function runAgent(
   }, timeoutMs)
 
   const claudeCodeBin = resolveClaudeCodeBin()
-  const sdkIsolation = sdkFallbackSpawnIsolation(cwd, env)
-
   try {
+    const sdkIsolation = sdkFallbackSpawnIsolation(cwd, env)
     const events = query({
       prompt: message,
       options: {
         abortController,
         cwd: sdkIsolation.cwd,
-        // SDK isolation mode ignores every on-disk settings source. Together
-        // with the neutral cwd/config and explicit empty plugin list this
-        // prevents project .claude/settings.json from starting a Telegram
-        // poller during the emergency SDK path.
-        settingSources: sdkIsolation.settingSources,
-        plugins: sdkIsolation.plugins,
+        // Only default-project calls opt out of on-disk settings sources.
+        // Caller-owned isolated cwd/config pairs keep their historic MCP and
+        // skill setup. An empty `plugins` list would not disable plugins
+        // enabled by settings, so it is intentionally not used as a guard.
+        ...(sdkIsolation.settingSources ? { settingSources: sdkIsolation.settingSources } : {}),
         permissionMode: 'bypassPermissions',
         ...(claudeCodeBin ? { pathToClaudeCodeExecutable: claudeCodeBin } : {}),
         ...(allowTools ? {} : { disallowedTools: DEFAULT_DISALLOWED_TOOLS }),

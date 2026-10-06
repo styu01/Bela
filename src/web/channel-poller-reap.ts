@@ -389,12 +389,13 @@ interface LivePaneLookup {
 }
 
 /**
- * tmux exits non-zero with this exact diagnostic when the final session has
- * gone away.  That is a normal "nothing to reap" condition, not a degraded
- * observation: there cannot be a live pane to protect while no server exists.
+ * tmux exits non-zero with one of these diagnostics when the final session has
+ * gone away (including a missing or refused socket). That is a normal
+ * "nothing to reap" condition, not a degraded observation: there cannot be a
+ * live pane to protect while no server exists.
  */
 export function isTmuxServerAbsentError(err: unknown): boolean {
-  return /no server running/i.test(String(err))
+  return /no server running|error connecting to .*\((No such file or directory|Connection refused)\)/i.test(String(err))
 }
 
 function livePanePids(tmuxPath: string): LivePaneLookup {
@@ -533,7 +534,12 @@ export function claudeBelongsToMainPane(
   const seen = new Set<number>([claudePid])
   let cur = byPid.get(claudePid)?.ppid
   for (let hops = 0; hops < 8; hops++) {
-    if (cur === undefined || cur <= 1 || seen.has(cur)) return false
+    // This is a destructive reaper: a truncated/looping ps snapshot proves
+    // neither ownership nor foreignness. Keep the candidate alive unless an
+    // actual second Claude is observed. Only a real init-reparented tree is a
+    // positive orphan verdict.
+    if (cur === undefined || seen.has(cur)) return true
+    if (cur <= 1) return false
     const row = byPid.get(cur)
     // A direct or indirect child Claude of a Claude-led pane is a separate
     // local invocation (SDK fallback / `claude -p`), not the channels Claude.
@@ -545,7 +551,8 @@ export function claudeBelongsToMainPane(
     if (row && isClaudeBinary(row.command)) return false
     cur = row?.ppid
   }
-  return false
+  // More than eight wrapper levels is unusual but not evidence of a thief.
+  return true
 }
 
 export function findForeignMainPollers(

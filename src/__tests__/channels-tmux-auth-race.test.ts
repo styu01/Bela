@@ -158,6 +158,16 @@ describe('channels.sh tmux auth wiring (source pin)', () => {
     for (const command of paneCommands) expect(command.trim().startsWith('"${AUTH_PANE_ENV}${MCP_BATCH_ENV}')).toBe(true)
   })
 
+  it('keeps an auth-file setup failure non-fatal but records a durable warning', () => {
+    expect(SH).toContain('WARN: channels auth file unavailable: mktemp failed')
+    expect(SH).toContain('respawn_log "auth-file-unavailable: mktemp failed')
+    expect(SH).toContain('[ -d "$_auth_file" ]')
+    expect(SH).toContain('target is a directory; using tmux global auth fallback')
+    // The directory guard must run before the rename: plain `mv -f tmp dir`
+    // succeeds by placing tmp inside dir and would leave AUTH_PANE_ENV broken.
+    expect(SH.indexOf('[ -d "$_auth_file" ]')).toBeLessThan(SH.indexOf('mv -f "$_auth_tmp" "$_auth_file"'))
+  })
+
   it('retains remain-on-exit for both normal and /tmp fallback launches', () => {
     const first = SH.indexOf(PRIMARY_LAUNCH)
     const second = SH.indexOf('env -u "$STATE_ENV_VAR" $TMUX new-session', first + 1)

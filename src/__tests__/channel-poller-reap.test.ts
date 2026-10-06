@@ -249,11 +249,36 @@ describe('foreign MAIN-token poller detection', () => {
     ]
     expect(findForeignMainPollers([101], tree, new Set([99]))).toEqual([])
   })
+
+  it('fails safe when more than eight shell wrappers separate a Claude from the pane', () => {
+    const tree: ProcRow[] = [
+      { pid: 90, ppid: 1, command: '/bin/sh pane-wrapper' },
+      ...Array.from({ length: 9 }, (_, index) => ({
+        pid: 91 + index,
+        ppid: 90 + index,
+        command: '/bin/sh nested-wrapper',
+      })),
+      { pid: 100, ppid: 99, command: '/usr/bin/claude --channels plugin:telegram' },
+      { pid: 101, ppid: 100, command: 'bun run telegram' },
+    ]
+    expect(findForeignMainPollers([101], tree, new Set([90]))).toEqual([])
+  })
+
+  it('fails safe when a middle process row is absent from the ps snapshot', () => {
+    const tree: ProcRow[] = [
+      { pid: 99, ppid: 1, command: '/bin/sh pane-wrapper' },
+      { pid: 100, ppid: 777, command: '/usr/bin/claude --channels plugin:telegram' },
+      { pid: 101, ppid: 100, command: 'bun run telegram' },
+    ]
+    expect(findForeignMainPollers([101], tree, new Set([99]))).toEqual([])
+  })
 })
 
 describe('tmux server absence classification', () => {
   it('treats tmux no-server output as a normal no-work condition', () => {
     expect(isTmuxServerAbsentError(new Error('no server running on /tmp/tmux-1/default'))).toBe(true)
+    expect(isTmuxServerAbsentError(new Error('error connecting to /tmp/tmux-1000/missing (No such file or directory)'))).toBe(true)
+    expect(isTmuxServerAbsentError(new Error('error connecting to /tmp/tmux-1000/stale (Connection refused)'))).toBe(true)
     expect(isTmuxServerAbsentError(new Error('permission denied'))).toBe(false)
   })
 })

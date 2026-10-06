@@ -802,6 +802,25 @@ _tmux_set_auth_globals() {
   # Propagate the prompt-suggestion disable to every sub-agent tmux session.
   $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null || true
 }
+
+# Producer-side respawn breadcrumb (SOAKRESPAWN819).  Define this before the
+# authentication handoff too: an auth-file failure must be visible in the same
+# durable log, but must never stop the channels service from falling back to
+# the global tmux environment.
+CHANNELS_RESPAWN_LOG="$INSTALL_DIR/store/channels-respawn.log"
+respawn_log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$CHANNELS_RESPAWN_LOG" 2>/dev/null || true
+  # Chronic-churn cap (the 40-min cycle writes ~36 lines/day forever): trim to
+  # the newest 500 once past 1000. mv-free rewrite keeps the inode stable for
+  # anything tailing the file.
+  _lines=$(wc -l < "$CHANNELS_RESPAWN_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$_lines" in (*[!0-9]*|'') _lines=0;; esac
+  if [ "$_lines" -gt 1000 ]; then
+    _trimmed=$(tail -n 500 "$CHANNELS_RESPAWN_LOG" 2>/dev/null)
+    [ -n "$_trimmed" ] && printf '%s\n' "$_trimmed" > "$CHANNELS_RESPAWN_LOG" 2>/dev/null || true
+  fi
+  unset _lines _trimmed
+}
 $TMUX start-server 2>/dev/null || true
 _tmux_set_auth_globals
 
@@ -815,16 +834,28 @@ _auth_file="$INSTALL_DIR/store/.channels-pane-auth"
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   _q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
   _auth_tmp="$(mktemp "$_auth_file.XXXXXX")" || _auth_tmp=""
-  if [ -n "$_auth_tmp" ]; then
-    {
-      [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$(_q "$CLAUDE_CODE_OAUTH_TOKEN")"
-      [ -n "${ANTHROPIC_API_KEY:-}" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$(_q "$ANTHROPIC_API_KEY")"
-      true
-    } > "$_auth_tmp"
+  if [ -z "$_auth_tmp" ]; then
+    echo "WARN: channels auth file unavailable: mktemp failed; using tmux global auth fallback" >&2
+    respawn_log "auth-file-unavailable: mktemp failed; using tmux global auth fallback"
+  elif ! {
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$(_q "$CLAUDE_CODE_OAUTH_TOKEN")"
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$(_q "$ANTHROPIC_API_KEY")"
+    true
+  } > "$_auth_tmp"; then
+    rm -f "$_auth_tmp" 2>/dev/null || true
+    echo "WARN: channels auth file unavailable: write failed; using tmux global auth fallback" >&2
+    respawn_log "auth-file-unavailable: write failed; using tmux global auth fallback"
+  elif [ -d "$_auth_file" ]; then
+    rm -f "$_auth_tmp" 2>/dev/null || true
+    echo "WARN: channels auth file unavailable: target is a directory; using tmux global auth fallback" >&2
+    respawn_log "auth-file-unavailable: target is a directory; using tmux global auth fallback"
+  else
     if mv -f "$_auth_tmp" "$_auth_file"; then
       AUTH_PANE_ENV=". '$_auth_file' && "
     else
       rm -f "$_auth_tmp" 2>/dev/null || true
+      echo "WARN: channels auth file unavailable: rename failed; using tmux global auth fallback" >&2
+      respawn_log "auth-file-unavailable: rename failed; using tmux global auth fallback"
     fi
   fi
   unset -f _q
@@ -1208,38 +1239,12 @@ PLUGIN_DEAD_SINCE=0
 # and the unit stayed inactive/dead for the next ten minutes.
 RESTART_REQUESTED=0
 
-# Producer-side respawn breadcrumb (SOAKRESPAWN819). The watchdog WARNs below
-# go to stderr, which under systemd lands ONLY in journald -- invisible to
-# every store/-file reader (dashboard log tails, soak checks, support
-# bundles). Measured on a live soak box 2026-08-19: 210 service restarts at a
-# ~40min cadence with zero trace outside the journal. This mirror gives the
-# store a copy of WHY the process exited; the dashboard's external-respawn
-# detector (channel-monitor.ts) says THAT a respawn happened, this file says
-# WHY. Best-effort by design: a failed write must never break the watchdog.
-CHANNELS_RESPAWN_LOG="$INSTALL_DIR/store/channels-respawn.log"
 MCP_LOG_DIR="$HOME/.cache/claude-cli-nodejs/$(printf '%s' "$INSTALL_DIR" | tr '/' '-')/mcp-logs-$(printf '%s' "$PLUGIN_PANE_ID" | tr ':' '-')"
 mcp_plugin_log_tail() {
   _f="$(ls -t "$MCP_LOG_DIR"/*.jsonl 2>/dev/null | head -1)"
   [ -n "$_f" ] && tail -n 6 "$_f" 2>/dev/null | tr '\n' ' '
   return 0
 }
-respawn_log() {
-  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$CHANNELS_RESPAWN_LOG" 2>/dev/null || true
-  # Chronic-churn cap (the 40-min cycle writes ~36 lines/day forever): trim to
-  # the newest 500 once past 1000. mv-free rewrite keeps the inode stable for
-  # anything tailing the file.
-  # tr strip is mandatory: BSD wc pads the count with leading spaces, which
-  # the non-numeric guard below would otherwise zero out (trim never firing
-  # on macOS -- caught by the runnable probe in external-respawn-detect).
-  _lines=$(wc -l < "$CHANNELS_RESPAWN_LOG" 2>/dev/null | tr -d '[:space:]')
-  case "$_lines" in (*[!0-9]*|'') _lines=0;; esac
-  if [ "$_lines" -gt 1000 ]; then
-    _trimmed=$(tail -n 500 "$CHANNELS_RESPAWN_LOG" 2>/dev/null)
-    [ -n "$_trimmed" ] && printf '%s\n' "$_trimmed" > "$CHANNELS_RESPAWN_LOG" 2>/dev/null || true
-  fi
-  unset _lines _trimmed
-}
-
 # A respawn-pane creates a new pane leader while this watchdog shell remains
 # alive, so the loop refreshes this value before verifying bot.pid ownership.
 _watchdog_claude_pid="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
