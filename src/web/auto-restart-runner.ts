@@ -142,7 +142,10 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     lastRestart.set(name, nowMs)
     logger.info({ name, mode: name === MAIN_AGENT_ID ? 'fresh(main)' : cfg.mode }, 'auto-restart: restarted session')
   } catch (err) {
-    logger.warn({ err, name }, 'auto-restart: restart failed')
+    // A failed restart is still an attempt. Recording it prevents every
+    // following timer tick from tearing down the same channel session again.
+    lastRestart.set(name, nowMs)
+    logger.warn({ err, name }, 'auto-restart: restart failed, standing down until next scheduled slot')
   }
 }
 

@@ -87,6 +87,14 @@ function readBotPid(chanDir: string): number | null {
 export interface ReapResult {
   reaped: number[]
   source: { fromBotPid: number | null; fromEnvScan: number[] }
+  // Candidates that belong to a live tmux pane must be left to the caller's
+  // imminent respawn-pane. Killing the pane leader here can collapse the pane
+  // before that safe replacement happens.
+  skippedLivePane: number[]
+  // A tmux server can inherit the channel state-dir environment. It is never
+  // a poller candidate we may kill: doing so takes every shared-tmux session
+  // down with it.
+  skippedTmuxServer?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +208,7 @@ export function collectPollerEvidence(
 export function reapChannelOrphans(
   provider: ChannelProviderType,
   agentDirPath: string,
+  opts: { tmuxPath?: string } = {},
 ): ReapResult {
   const chanDir = channelStateDir(provider, agentDirPath)
   const envVar = STATE_ENV_VAR[provider]
@@ -208,13 +217,42 @@ export function reapChannelOrphans(
   const fromEnvScan = listPollerPidsByStateDir(envVar, chanDir)
 
   // Deduplicate while preserving order so the bot.pid path is logged first.
-  const all: number[] = []
+  const candidates: number[] = []
   const seen = new Set<number>()
   for (const pid of [fromBotPid, ...fromEnvScan]) {
     if (pid && !seen.has(pid)) {
       seen.add(pid)
-      all.push(pid)
+      candidates.push(pid)
     }
+  }
+
+  // Fail closed when tmux cannot identify live pane leaders. An empty result
+  // means the query failed, not that a running tmux server has no panes.
+  const tmuxPath = opts.tmuxPath ?? 'tmux'
+  const live = livePanePids(tmuxPath)
+  const liveQueryFailed = live.size === 0
+  const skippedLivePane = liveQueryFailed ? [] : candidates.filter((pid) => live.has(pid))
+  if (liveQueryFailed && candidates.length > 0) {
+    logger.warn({ provider, chanDir, candidates },
+      'channel-poller-reap: could not resolve live tmux panes, refusing to reap (fail-safe)')
+  }
+
+  // The shared tmux server itself can carry the main session's state-dir var
+  // when it was created by the channels launcher. Resolve it separately and
+  // fail safe if this cannot be measured.
+  const serverPid = liveQueryFailed ? null : tmuxServerPid(tmuxPath)
+  const serverQueryFailed = !liveQueryFailed && serverPid === null
+  if (serverQueryFailed && candidates.length > 0) {
+    logger.warn({ provider, chanDir, candidates },
+      'channel-poller-reap: could not resolve the tmux server pid, refusing to reap (fail-safe)')
+  }
+  const skippedTmuxServer = serverPid !== null && candidates.includes(serverPid) && !live.has(serverPid)
+  const all = liveQueryFailed || serverQueryFailed
+    ? []
+    : candidates.filter((pid) => !live.has(pid) && pid !== serverPid)
+  if (skippedTmuxServer) {
+    logger.warn({ provider, chanDir, serverPid, fromBotPid, fromEnvScan },
+      'channel-poller-reap: candidate IS the tmux server, sparing it')
   }
 
   // SIGTERM, give bun/node ~300ms to flush, then SIGKILL stragglers.
@@ -231,7 +269,11 @@ export function reapChannelOrphans(
   if (all.length > 0) {
     logger.info({ provider, chanDir, reaped: all, fromBotPid, fromEnvScan }, 'channel-poller-reap: orphans killed')
   }
-  return { reaped: all, source: { fromBotPid, fromEnvScan } }
+  if (skippedLivePane.length > 0) {
+    logger.warn({ provider, chanDir, skippedLivePane, fromBotPid, fromEnvScan },
+      'channel-poller-reap: candidate IS a live pane leader, sparing it')
+  }
+  return { reaped: all, source: { fromBotPid, fromEnvScan }, skippedLivePane, skippedTmuxServer }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +368,17 @@ function snapshotProcs(): ProcRow[] {
   }
 }
 
+function tmuxServerPid(tmuxPath: string): number | null {
+  try {
+    const out = execSync(`${tmuxPath} display-message -p '#{pid}'`, { timeout: 5000, encoding: 'utf-8' })
+    const n = parseInt(out.trim().split('\n')[0] ?? '', 10)
+    return Number.isFinite(n) && n > 1 ? n : null
+  } catch (err) {
+    logger.warn({ err }, 'channel-poller-reap: tmux display-message failed')
+    return null
+  }
+}
+
 function livePanePids(tmuxPath: string): Set<number> {
   try {
     const out = execSync(`${tmuxPath} list-panes -a -F '#{pane_pid}'`, { timeout: 5000, encoding: 'utf-8' })
@@ -386,4 +439,119 @@ export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxP
     logger.info({ reaped: orphans, channelNeedle: opts.channelNeedle ?? '(all)' }, 'channel-poller-reap: detached channel claudes killed')
   }
   return orphans
+}
+
+// ---------------------------------------------------------------------------
+// Foreign main-token poller reaper.
+//
+// A plain local Claude process launched in the project directory may load the
+// Telegram plugin from project settings. Unlike a channel-configured sub-agent,
+// it has no provider state-dir override and can therefore poll the MAIN bot
+// token. It must be distinguished from the legitimate main-session poller by
+// the nearest owning Claude process, not merely by ancestry: an Agent/Task
+// child can itself descend from the main pane while still being the thief.
+
+const PLUGIN_ROOT_NEEDLE: Record<ChannelProviderType, string> = {
+  telegram: '/telegram',
+  slack: '/slack-channel',
+  discord: '/discord',
+  googlechat: '/googlechat',
+  teams: '/teams',
+}
+
+export function parseMainDirPollerPids(
+  psEwwOutput: string,
+  pluginRootNeedle: string,
+  stateEnvVar: string,
+): number[] {
+  const escaped = pluginRootNeedle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const rootRe = new RegExp(`CLAUDE_PLUGIN_ROOT=\\S*${escaped}(?:[/@ ]|$)`)
+  const out: number[] = []
+  for (const line of psEwwOutput.split('\n')) {
+    if (!rootRe.test(line) || line.includes(`${stateEnvVar}=`)) continue
+    const m = line.match(/^\s*(\d+)\s/)
+    if (!m) continue
+    const pid = parseInt(m[1]!, 10)
+    if (pid > 1) out.push(pid)
+  }
+  return out
+}
+
+export function nearestClaudeAncestor(pid: number, byPid: Map<number, ProcRow>): number | null {
+  const seen = new Set<number>()
+  let cur = byPid.get(pid)?.ppid
+  for (let hops = 0; hops < 8; hops++) {
+    if (cur === undefined || cur <= 1 || seen.has(cur)) break
+    seen.add(cur)
+    const row = byPid.get(cur)
+    if (row && isClaudeBinary(row.command)) return cur
+    cur = row?.ppid
+  }
+  return null
+}
+
+export function findForeignMainPollers(
+  candidatePollerPids: number[],
+  procs: ProcRow[],
+  legitClaudePids: Set<number>,
+): number[] {
+  if (legitClaudePids.size === 0) return []
+  const byPid = new Map<number, ProcRow>()
+  for (const p of procs) byPid.set(p.pid, p)
+  const out: number[] = []
+  for (const pid of candidatePollerPids) {
+    const owner = nearestClaudeAncestor(pid, byPid)
+    if (owner !== null && !legitClaudePids.has(owner)) out.push(pid)
+  }
+  return out
+}
+
+function mainSessionPanePids(session: string, tmuxPath: string): Set<number> {
+  try {
+    const out = execSync(`${tmuxPath} list-panes -t ${session} -F '#{pane_pid}'`, { timeout: 5000, encoding: 'utf-8' })
+    const outPids = new Set<number>()
+    for (const line of out.split('\n')) {
+      const n = parseInt(line.trim(), 10)
+      if (Number.isFinite(n) && n > 1) outPids.add(n)
+    }
+    return outPids
+  } catch {
+    return new Set()
+  }
+}
+
+export function reapForeignMainPollers(opts: {
+  provider: ChannelProviderType
+  mainSession: string
+  tmuxPath?: string
+}): number[] {
+  const tmuxPath = opts.tmuxPath ?? 'tmux'
+  const legit = mainSessionPanePids(opts.mainSession, tmuxPath)
+  if (legit.size === 0) return []
+
+  let psEww: string
+  try {
+    psEww = execSync('/bin/ps eww -e', { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+  } catch (err) {
+    logger.warn({ err }, 'channel-poller-reap: ps eww scan failed (foreign-main reap skipped)')
+    return []
+  }
+  const candidates = parseMainDirPollerPids(psEww, PLUGIN_ROOT_NEEDLE[opts.provider], STATE_ENV_VAR[opts.provider])
+  if (candidates.length === 0) return []
+
+  const foreign = findForeignMainPollers(candidates, snapshotProcs(), legit)
+  for (const pid of foreign) {
+    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  }
+  if (foreign.length > 0) {
+    try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }) } catch { /* ignore */ }
+    for (const pid of foreign) {
+      try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch { /* gone */ }
+    }
+    logger.info(
+      { provider: opts.provider, mainSession: opts.mainSession, reaped: foreign, legit: [...legit] },
+      'channel-poller-reap: foreign main-token poller(s) killed',
+    )
+  }
+  return foreign
 }

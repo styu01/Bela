@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { parsePollerPidsFromPs, findOrphanChannelClaudes, type ProcRow } from '../web/channel-poller-reap.js'
+import {
+  parsePollerPidsFromPs,
+  findOrphanChannelClaudes,
+  parseMainDirPollerPids,
+  nearestClaudeAncestor,
+  findForeignMainPollers,
+  type ProcRow,
+} from '../web/channel-poller-reap.js'
 
 // Sample rows captured from a real `ps eww -e` on macOS during the
 // 2026-06-01 channel-disconnect incident. The bun poller, the slack
@@ -147,5 +154,45 @@ describe('findOrphanChannelClaudes', () => {
       { pid: 76621, ppid: 35874, command: `${CLAUDE} --channels plugin:telegram@claude-plugins-official` },
     ]
     expect(findOrphanChannelClaudes(allLive, new Set([76621]))).toEqual([])
+  })
+})
+
+describe('foreign MAIN-token poller detection', () => {
+  const ps = [
+    '  35352 ?? S bun start CLAUDE_PLUGIN_ROOT=/x/telegram/0.0.6',
+    '  44001 ?? S bun start CLAUDE_PLUGIN_ROOT=/x/telegram/0.0.6',
+    '  30067 ?? S bun start CLAUDE_PLUGIN_ROOT=/x/telegram/0.0.6 TELEGRAM_STATE_DIR=/agents/a/.claude/channels/telegram',
+  ].join('\n')
+  const procs: ProcRow[] = [
+    { pid: 35352, ppid: 35346, command: 'bun server.ts' },
+    { pid: 35346, ppid: 35264, command: 'bun run telegram' },
+    { pid: 35264, ppid: 1, command: '/usr/bin/claude --channels plugin:telegram' },
+    { pid: 44001, ppid: 44050, command: 'bun server.ts' },
+    { pid: 44050, ppid: 44000, command: 'bun run telegram' },
+    // The thief is descended from the main claude but is itself a distinct,
+    // local-agent-mode Claude process. Equality with the pane leader matters.
+    { pid: 44000, ppid: 35264, command: '/usr/bin/claude' },
+  ]
+
+  it('selects default-state-dir pollers but excludes state-dir sub-agents', () => {
+    expect(parseMainDirPollerPids(ps, '/telegram', 'TELEGRAM_STATE_DIR').sort()).toEqual([35352, 44001])
+  })
+
+  it('does not confuse a sibling plugin directory with telegram', () => {
+    expect(parseMainDirPollerPids(' 5 x CLAUDE_PLUGIN_ROOT=/x/telegram-inline', '/telegram', 'TELEGRAM_STATE_DIR')).toEqual([])
+  })
+
+  it('finds the nearest owning Claude process', () => {
+    const byPid = new Map(procs.map((p) => [p.pid, p]))
+    expect(nearestClaudeAncestor(35352, byPid)).toBe(35264)
+    expect(nearestClaudeAncestor(44001, byPid)).toBe(44000)
+  })
+
+  it('spares the main-pane poller and selects only the foreign one', () => {
+    expect(findForeignMainPollers([35352, 44001], procs, new Set([35264]))).toEqual([44001])
+  })
+
+  it('fails safe when the legitimate main pane cannot be resolved', () => {
+    expect(findForeignMainPollers([35352, 44001], procs, new Set())).toEqual([])
   })
 })

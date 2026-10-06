@@ -213,6 +213,42 @@ if [ "${1:-}" = "--resolve-main-effort" ]; then
   exit 0
 fi
 
+# With remain-on-exit enabled, a dead Claude pane still keeps its tmux session
+# alive. Detect a positive pane_dead signal so the supervisor exits promptly;
+# a failed tmux query is deliberately treated as alive (fail-safe).
+pane_dead_detected() {
+  "$TMUX" list-panes -t "$1" -F '#{pane_dead}' 2>/dev/null | grep -q '^1$'
+}
+
+if [ "${1:-}" = "--pane-dead-check" ]; then
+  TMUX="${CHANNELS_TMUX_BIN:-$(command -v tmux)}"
+  if pane_dead_detected "${2:-}"; then echo dead; else echo alive; fi
+  exit 0
+fi
+
+# A live bot.pid belongs to this channels session only when its process-tree
+# reaches the current pane leader. Return 0=own, 1=foreign, 2=unmeasurable.
+bot_pid_descends_from() {
+  _bd_pid="$1"; _bd_root="$2"; _bd_hops=0; _bd_rc=2
+  case "$_bd_pid" in (*[!0-9]*|'') unset _bd_pid _bd_root _bd_hops _bd_rc; return 2;; esac
+  case "$_bd_root" in (*[!0-9]*|'') unset _bd_pid _bd_root _bd_hops _bd_rc; return 2;; esac
+  while :; do
+    if [ "$_bd_pid" = "$_bd_root" ]; then _bd_rc=0; break; fi
+    if [ "$_bd_pid" -le 1 ] || [ "$_bd_hops" -ge 12 ]; then _bd_rc=1; break; fi
+    _bd_pid="$("${CHANNELS_PS_BIN:-/bin/ps}" -o ppid= -p "$_bd_pid" 2>/dev/null | tr -d '[:space:]')"
+    case "$_bd_pid" in (*[!0-9]*|'') _bd_rc=2; break;; esac
+    _bd_hops=$((_bd_hops + 1))
+  done
+  unset _bd_pid _bd_root _bd_hops
+  return "$_bd_rc"
+}
+
+if [ "${1:-}" = "--bot-owner-check" ]; then
+  bot_pid_descends_from "${2:-}" "${3:-}"
+  case $? in (0) echo own;; (1) echo foreign;; (*) echo unknown;; esac
+  exit 0
+fi
+
 if [ "${1:-}" = "--classify-mcp-pane" ]; then
   resolve_plugin_ids "${2:-$CHANNEL_PROVIDER}"
   classify_mcp_plugin_row "$(cat)"
@@ -797,10 +833,14 @@ unset _tmux_ver
 # just THIS session first -- never the server, never another agent's session --
 # otherwise new-session below fails with "duplicate session".
 $TMUX kill-session -t "$SESSION" 2>/dev/null || true
-$TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
+env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
   "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
+$TMUX set-environment -g -u "$STATE_ENV_VAR" 2>/dev/null || true
+# Keep a target pane available for respawn-pane even when its Claude process
+# crashes before the monitor can replace it.
+$TMUX set-option -t "$SESSION" remain-on-exit on 2>/dev/null || true
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin
@@ -840,8 +880,9 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         # invasive change (a stable fallback dir + a seeded ~/.claude.json project
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
-        $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
+        env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
           "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+        $TMUX set-option -t "$SESSION" remain-on-exit on 2>/dev/null || true
         unset _CHANNELS_STARTDIR
       fi
       continue
@@ -1155,6 +1196,12 @@ RESTART_REQUESTED=0
 # detector (channel-monitor.ts) says THAT a respawn happened, this file says
 # WHY. Best-effort by design: a failed write must never break the watchdog.
 CHANNELS_RESPAWN_LOG="$INSTALL_DIR/store/channels-respawn.log"
+MCP_LOG_DIR="$HOME/.cache/claude-cli-nodejs/$(printf '%s' "$INSTALL_DIR" | tr '/' '-')/mcp-logs-$(printf '%s' "$PLUGIN_PANE_ID" | tr ':' '-')"
+mcp_plugin_log_tail() {
+  _f="$(ls -t "$MCP_LOG_DIR"/*.jsonl 2>/dev/null | head -1)"
+  [ -n "$_f" ] && tail -n 6 "$_f" 2>/dev/null | tr '\n' ' '
+  return 0
+}
 respawn_log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$CHANNELS_RESPAWN_LOG" 2>/dev/null || true
   # Chronic-churn cap (the 40-min cycle writes ~36 lines/day forever): trim to
@@ -1172,22 +1219,49 @@ respawn_log() {
   unset _lines _trimmed
 }
 
-# Watchdog's own pane pid, resolved once for the session's lifetime (a tmux
-# pane's pid does not change while the pane lives, and the `while has-session`
-# loop below exits the moment the session disappears anyway). Same lookup as
-# Check 1 in the post-init unlock block above.
+# A respawn-pane creates a new pane leader while this watchdog shell remains
+# alive, so the loop refreshes this value before verifying bot.pid ownership.
 _watchdog_claude_pid="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
 
 # Várakozás amíg a session él
 while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   sleep 5
 
+  if pane_dead_detected "$SESSION"; then
+    echo "WARN: $SESSION pane is dead (Claude exited, pane kept by remain-on-exit) -- exiting for service-manager restart" >&2
+    respawn_log "pane-dead: Claude process of $SESSION exited, pane kept by remain-on-exit -- exiting for service-manager restart"
+    break
+  fi
+
   NOW=$(date +%s)
+  _pane_pid_now="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
+  [ -n "$_pane_pid_now" ] && _watchdog_claude_pid="$_pane_pid_now"
+  unset _pane_pid_now
   _plugin_alive=false
+  _bot_hijacked=false
   if [ -f "$MAIN_BOT_PID_FILE" ]; then
     _bot_pid=$(cat "$MAIN_BOT_PID_FILE" 2>/dev/null | tr -d '[:space:]')
     if [ -n "$_bot_pid" ] && [ "$_bot_pid" -gt 1 ] 2>/dev/null && kill -0 "$_bot_pid" 2>/dev/null; then
-      _plugin_alive=true
+      _bd_verdict=2
+      if [ -n "$_watchdog_claude_pid" ]; then
+        bot_pid_descends_from "$_bot_pid" "$_watchdog_claude_pid"; _bd_verdict=$?
+      fi
+      if [ "$_bd_verdict" = "1" ]; then
+        _bot_hijacked=true
+        if [ "${_bot_hijack_seen:-}" != "$_bot_pid" ]; then
+          _bot_hijack_seen="$_bot_pid"
+          echo "WARN: $CHANNEL_PROVIDER poller hijacked -- bot.pid $_bot_pid is not under this session's pane ($_watchdog_claude_pid)" >&2
+          respawn_log "poller-hijack: bot.pid=$_bot_pid is not under $SESSION pane pid $_watchdog_claude_pid"
+        fi
+      else
+        _plugin_alive=true
+        if [ "$_bd_verdict" = "2" ] && [ "${_bot_owner_unknown_logged:-}" != "$_bot_pid" ]; then
+          _bot_owner_unknown_logged="$_bot_pid"
+          echo "WARN: $CHANNEL_PROVIDER bot.pid owner check could not measure pid $_bot_pid -- keeping liveness-only verdict" >&2
+          respawn_log "poller-owner-unmeasurable: bot.pid=$_bot_pid pane pid=${_watchdog_claude_pid:-?} -- liveness-only verdict kept"
+        fi
+      fi
+      unset _bd_verdict
     fi
   fi
   unset _bot_pid
@@ -1207,7 +1281,7 @@ while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   # exists to catch, silently defeated. A single-agent install never saw this
   # because there was only ever one plugin process to find, and it happened to
   # be the right one.
-  if [ "$_plugin_alive" != "true" ]; then
+  if [ "$_plugin_alive" != "true" ] && [ "$_bot_hijacked" != "true" ]; then
     if [ -n "$_watchdog_claude_pid" ] && /usr/bin/pgrep -P "$_watchdog_claude_pid" bun >/dev/null 2>&1; then
       _plugin_alive=true
     fi
@@ -1231,7 +1305,7 @@ while $TMUX has-session -t "$SESSION" 2>/dev/null; do
       echo "WARN: $CHANNEL_PROVIDER plugin (bot.pid) disappeared -- ${PLUGIN_DEAD_GRACE}s grace before restart" >&2
     elif [ "$((NOW - PLUGIN_DEAD_SINCE))" -ge "$PLUGIN_DEAD_GRACE" ]; then
       echo "WARN: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart" >&2
-      respawn_log "died-after-up: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart"
+      respawn_log "died-after-up: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart -- mcp-log tail: $(mcp_plugin_log_tail)"
       RESTART_REQUESTED=1
       break
     fi

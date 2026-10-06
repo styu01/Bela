@@ -194,7 +194,7 @@ describe('first-run gate wiring contracts', () => {
 
   it('startAgentProcess stamps per-project trust in the config root the session boots from', () => {
     const stampIdx = AGENT_PROCESS.indexOf('stampProjectTrustForDir(\n      claudeConfigDir')
-    const launchIdx = AGENT_PROCESS.indexOf("runTmux(null, ['new-session', '-d', '-s', session, cmd]")
+    const launchIdx = AGENT_PROCESS.indexOf("runTmux(null, ['new-session', '-d', '-s', session, buildLaunchCmd(dir)]")
     expect(stampIdx).toBeGreaterThan(0)
     // The stamp must happen BEFORE the tmux session is spawned.
     expect(launchIdx).toBeGreaterThan(stampIdx)
