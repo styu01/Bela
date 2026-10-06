@@ -125,7 +125,9 @@ export type ModelAction =
  * actual write+restart) separately.
  *
  *   - limit detected & a lower model exists -> downgrade to it.
- *   - limit detected & already at the bottom -> nothing (cannot go lower).
+ *   - limit detected & already at the bottom -> nothing during the revert
+ *     window; after it, retry the primary so stale --continue text cannot pin
+ *     the agent at the bottom forever.
  *   - no limit & downgraded long enough ago -> revert to the primary (chain[0]).
  *   - otherwise -> nothing.
  */
@@ -133,7 +135,7 @@ export function decideModelAction(f: ModelFallbackFacts): ModelAction {
   if (f.limitDetected) {
     const next = nextFallbackModel(f.currentModel, f.chain)
     if (next && next !== f.currentModel) return { kind: 'downgrade', model: next }
-    return { kind: 'none' }
+    if (f.downgradedAt === null || f.now - f.downgradedAt < f.revertAfterMs) return { kind: 'none' }
   }
   if (f.downgradedAt !== null && f.now - f.downgradedAt >= f.revertAfterMs) {
     const primary = f.chain[0]

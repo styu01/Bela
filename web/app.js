@@ -4012,11 +4012,62 @@ async function loadOllamaModels() {
 // panel. Backend gates the list behind a vault entry, so an empty array
 // here means the operator has not configured an API key yet -- in that
 // case we hide the optgroup and surface a hint pointing to the Vault page.
+// The backend supplies the installed CLI's measured compatibility table. This
+// is a display aid only: the POST/PUT writers enforce the same rule.
+function applyClaudeCliGate(data) {
+  const support = data && data.claudeSupport ? data.claudeSupport : null
+  const cli = data && data.cli ? data.cli : null
+  const selects = [document.getElementById('agentModel'), document.getElementById('editAgentModel')]
+  const hints = [document.getElementById('agentModelCliHint'), document.getElementById('editAgentModelCliHint')]
+  const base = (id) => String(id || '').replace(/\[[^\]]*\]$/, '')
+  const unsupported = new Map()
+  if (support && support.measured && Array.isArray(support.unsupported)) {
+    for (const model of support.unsupported) unsupported.set(model.id, model.minCli)
+  }
+  selects.forEach((select, index) => {
+    if (!select) return
+    const hint = hints[index]
+    if (!support || !support.measured) {
+      Array.from(select.options).forEach((option) => {
+        if (option.dataset.cliGated === '1') {
+          option.disabled = false
+          option.textContent = option.dataset.cliLabel || option.textContent
+          delete option.dataset.cliGated
+        }
+      })
+      if (hint) {
+        hint.textContent = t('agents.model.cliUnmeasured').replace('{err}', (cli && cli.error) || '?')
+        hint.style.display = ''
+      }
+      return
+    }
+    if (hint) hint.style.display = 'none'
+    const current = select.value
+    Array.from(select.options).forEach((option) => {
+      if (!String(option.value).startsWith('claude-')) return
+      if (option.dataset.cliGated === '1') {
+        option.disabled = false
+        option.textContent = option.dataset.cliLabel || option.textContent
+        delete option.dataset.cliGated
+      }
+      const minCli = unsupported.get(base(option.value))
+      if (!minCli) return
+      if (!option.dataset.cliLabel) option.dataset.cliLabel = option.textContent
+      option.dataset.cliGated = '1'
+      option.textContent = option.dataset.cliLabel + ' (' + t('agents.model.cliUnsupported').replace('{v}', support.installedVersion).replace('{min}', minCli) + ')'
+      // Preserve a currently configured unsupported model for truthful display;
+      // only new selections are disabled.
+      option.disabled = option.value !== current
+    })
+  })
+}
+
 async function loadAvailableModels() {
   try {
     const res = await fetch('/api/models/available')
     if (!res.ok) return
     const data = await res.json()
+    applyClaudeCliGate(data)
     const deepseekModels = Array.isArray(data.deepseek) ? data.deepseek : []
     const editGroup = document.getElementById('deepseekModelGroup')
     const wizardGroup = document.getElementById('agentModelDeepseekGroup')

@@ -32,6 +32,7 @@ const TOP_TIER_LABEL = humanModelLabel(TOP_TIER_MODEL)
 
 export type ModelId =
   | 'claude-haiku-4-5-20251001'
+  | 'claude-sonnet-5-5'
   | 'claude-sonnet-5'
   | 'claude-opus-5[1m]'
   | 'claude-opus-5'
@@ -96,6 +97,8 @@ const MODEL_COST_PER_M: Record<string, number> = {
   'claude-opus-4-8': 15,
   'claude-opus-5': 15,
   'claude-fable-5': 15,
+  // Published price: USD 2 per 1M input tokens (Sonnet 5.5).
+  'claude-sonnet-5-5': 2,
   'claude-sonnet-5': 3,
   'claude-sonnet-4-6': 3,
   'claude-haiku-4-5': 0.80,

@@ -68,9 +68,16 @@ describe('decideModelAction', () => {
       .toEqual({ kind: 'downgrade', model: HAIKU })
   })
 
-  it('does nothing when limited at the bottom of the chain', () => {
-    expect(decideModelAction({ ...base, limitDetected: true, currentModel: HAIKU, downgradedAt: 500_000 }))
+  it('does nothing at the bottom only inside the revert window', () => {
+    expect(decideModelAction({ ...base, limitDetected: true, currentModel: HAIKU, downgradedAt: 1_000_000 - 59_999 }))
       .toEqual({ kind: 'none' })
+    expect(decideModelAction({ ...base, limitDetected: true, currentModel: HAIKU, downgradedAt: null }))
+      .toEqual({ kind: 'none' })
+  })
+
+  it('reverts past the window even if stale limit text remains at the bottom', () => {
+    expect(decideModelAction({ ...base, limitDetected: true, currentModel: HAIKU, downgradedAt: 500_000 }))
+      .toEqual({ kind: 'revert', model: PRIMARY })
   })
 
   it('reverts to the primary after the window once limit-free', () => {

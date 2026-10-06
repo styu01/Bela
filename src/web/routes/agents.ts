@@ -9,6 +9,8 @@ import { createAgentMessage, listPendingChannelRequests, updateChannelRequestSta
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
 import { ensureFederationClaudeMdSection } from '../federation/onboarding.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
+import { measureClaudeCliVersion } from '../claude-cli-version.js'
+import { CLAUDE_MODEL_MIN_CLI, claudeSupportForCli, isModelUnsupportedByCli } from '../../claude-cli-support.js'
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
@@ -560,6 +562,24 @@ function listAgentSummaries(): AgentSummary[] {
   return listAgentNames().map(getAgentSummary)
 }
 
+/**
+ * Server-side guard for picker writes. An unavailable model must be refused
+ * here too: a stale/browserless client must not create a session that 400s on
+ * its first prompt. A failed measurement deliberately stays fail-open.
+ */
+export async function refuseIfCliCannotLaunch(model: string): Promise<Record<string, unknown> | null> {
+  const cli = await measureClaudeCliVersion({ fresh: true })
+  if (!isModelUnsupportedByCli(model, cli.version)) return null
+  const requirement = CLAUDE_MODEL_MIN_CLI[model.replace(/\[[^\]]*\]$/, '')]
+  return {
+    error: 'model not launchable by the installed Claude Code CLI',
+    model,
+    installedCli: cli.version,
+    minCli: requirement?.minCli ?? null,
+    message: `A telepített Claude Code ${cli.version} nem futtatja a(z) ${model} modellt (legalább ${requirement?.minCli ?? '?'} kell; mérve: ${requirement?.measured ?? 'n/a'}). Frissítsd a CLI-t, vagy válassz támogatott modellt.`,
+  }
+}
+
 // Max inter-agent messages a single main-agent inbox drain returns. The rest
 // stay pending (FIFO) for the next turn's drain -- bounds the context a single
 // turn absorbs, mirroring the router's MAX_MESSAGES_PER_TICK.
@@ -586,10 +606,16 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // options without the key would let the operator pick a model that 401s.
     const hasOpenRouter = getSecret('openrouter-fleet-key') !== null
     const orCatalog = loadOpenRouterCatalog()
+    const cli = await measureClaudeCliVersion()
+    const claudeSupport = claudeSupportForCli(cli.version)
     json(res, {
+      cli: { version: cli.version, measuredAt: cli.measuredAt, error: cli.error, source: cli.source },
+      claudeSupport,
       claude: [
+        // Opus 5.5 deliberately has no plain-context option.
+        { id: 'claude-opus-5-5[1m]', label: 'Opus 5.5 (1M kontextus, legújabb Opus)', minCli: CLAUDE_MODEL_MIN_CLI['claude-opus-5-5'].minCli },
         { id: 'claude-opus-5', label: 'Opus 5 (legújabb Opus)' },
-        { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5 (legújabb Sonnet)' },
+        { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5 (legújabb Sonnet)', minCli: CLAUDE_MODEL_MIN_CLI['claude-sonnet-5-5'].minCli },
         { id: 'claude-sonnet-5', label: 'Sonnet 5' },
         { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
         { id: 'claude-fable-5', label: 'Fable 5' },
@@ -849,6 +875,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const profileId = (rawProfile || 'default').trim() || 'default'
 
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
+    const cliGate = await refuseIfCliCannotLaunch(model)
+    if (cliGate) { json(res, cliGate, 422); return true }
     if (!description) { json(res, { error: 'Description is required' }, 400); return true }
     if (existsSync(agentDir(name))) { json(res, { error: 'Agent already exists' }, 409); return true }
 
@@ -2137,7 +2165,11 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     }
     if (data.soulMd !== undefined) atomicWriteFileSync(join(agentDir(name), 'SOUL.md'), data.soulMd)
     if (data.mcpJson !== undefined) atomicWriteFileSync(join(agentDir(name), '.mcp.json'), data.mcpJson)
-    if (data.model !== undefined) writeAgentModel(name, data.model)
+    if (data.model !== undefined) {
+      const cliGate = await refuseIfCliCannotLaunch(String(data.model))
+      if (cliGate) { json(res, cliGate, 422); return true }
+      writeAgentModel(name, data.model)
+    }
     // Card c755f4b2 Block B: optional generic capability tier. An unknown id
     // is a 400, never a persisted value -- storing one would leave the UI
     // showing a profile while resolution silently fell back to the install

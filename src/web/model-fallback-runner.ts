@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { hardRestartMarveenChannels } from './channel-monitor.js'
@@ -44,8 +44,44 @@ const INTERVAL_MS = 60_000
 const downgradedAt = new Map<string, number>()
 
 const MAIN_SETTINGS_PATH = join(PROJECT_ROOT, '.claude', 'settings.json')
+const MAIN_ENV_PATH = join(PROJECT_ROOT, '.env')
+
+// channels.sh gives a non-empty MAIN_AGENT_MODEL in .env precedence over the
+// tracked settings file. The fallback must therefore read and write the same
+// source, otherwise it can log a downgrade that the restarted main process
+// silently ignores.
+function mainEnvModel(): string | null {
+  try {
+    const line = readFileSync(MAIN_ENV_PATH, 'utf8').split('\n').reverse()
+      .find((item) => /^\s*MAIN_AGENT_MODEL\s*=/.test(item))
+    if (!line) return null
+    const value = line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')
+    return value || null
+  } catch {
+    return null
+  }
+}
+
+function writeMainEnvModel(model: string): boolean {
+  let raw: string
+  try { raw = readFileSync(MAIN_ENV_PATH, 'utf8') } catch { return false }
+  const lines = raw.split('\n')
+  let index = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*MAIN_AGENT_MODEL\s*=/.test(lines[i] ?? '')) { index = i; break }
+  }
+  if (index < 0) return false
+  lines[index] = `MAIN_AGENT_MODEL=${model}`
+  // The file may contain secrets; atomic replacement must preserve its mode.
+  let mode = 0o600
+  try { mode = statSync(MAIN_ENV_PATH).mode & 0o777 } catch { /* secure fallback */ }
+  atomicWriteFileSync(MAIN_ENV_PATH, lines.join('\n'), { mode })
+  return true
+}
 
 function readMainModel(): string {
+  const fromEnv = mainEnvModel()
+  if (fromEnv) return resolveModelId(fromEnv)
   try {
     const cfg = JSON.parse(readFileSync(MAIN_SETTINGS_PATH, 'utf-8'))
     return resolveModelId((cfg && typeof cfg.model === 'string' && cfg.model) || DEFAULT_MODEL)
@@ -56,11 +92,24 @@ function readMainModel(): string {
 
 function writeMainModel(model: string): void {
   if (!isValidModelId(model)) throw new InvalidModelIdError(model)
+  if (mainEnvModel() && writeMainEnvModel(model)) return
+  // Do not overwrite a malformed tracked settings file with a minimal object:
+  // that would destroy unrelated configuration while attempting a fallback.
   let cfg: Record<string, unknown> = {}
-  try { cfg = JSON.parse(readFileSync(MAIN_SETTINGS_PATH, 'utf-8')) } catch {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(MAIN_SETTINGS_PATH, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('settings.json must be an object')
+    cfg = parsed as Record<string, unknown>
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') cfg = {}
+    else throw err
+  }
   cfg.model = model
   atomicWriteFileSync(MAIN_SETTINGS_PATH, JSON.stringify(cfg, null, 2))
 }
+
+export const _mainModelIoForTest = { readMainModel, writeMainModel }
 
 function readModelFor(name: string): string {
   return name === MAIN_AGENT_ID ? readMainModel() : readAgentModel(name)
