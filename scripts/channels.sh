@@ -786,8 +786,9 @@ fi
 # token-less global env: "Not logged in", --channels ignored, the channel
 # silently dead until the next restart -- this is the exact bela-worker OAuth
 # symptom seen 2026-09-24 23:59. Two layers now:
-#   1. the token rides on OUR new-session itself (`-e`, tmux >= 3.2), so this
-#      session has it whoever created the server;
+#   1. the pane sources the token from a 0600 file before anything else runs
+#      (TOKENARGV929). This preserves the race guard without putting a secret
+#      on tmux's argv, which the server keeps visible in `ps` for its lifetime;
 #   2. the globals are set again right AFTER new-session, when a server
 #      certainly exists, so a later pane relaunch and every sub-agent session
 #      inherit them too.
@@ -804,14 +805,34 @@ _tmux_set_auth_globals() {
 $TMUX start-server 2>/dev/null || true
 _tmux_set_auth_globals
 
-# new-session -e needs tmux >= 3.2; older tmux keeps the global-env path only.
-TMUX_AUTH_ENV=()
-_tmux_ver="$($TMUX -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-if [ -n "$_tmux_ver" ] && awk -v v="$_tmux_ver" 'BEGIN { split(v, p, "."); exit !((p[1] > 3) || (p[1] == 3 && p[2] >= 2)) }'; then
-  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && TMUX_AUTH_ENV+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
-  [ -n "${ANTHROPIC_API_KEY:-}" ] && TMUX_AUTH_ENV+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+# Layer 1 of CHANNELSAUTHRACE923, WITHOUT the secret in any argv (TOKENARGV929).
+# A `new-session -e CLAUDE_CODE_OAUTH_TOKEN=<value>` put the fleet token on the
+# tmux server command line when it created that server. Write a fresh 0600 file
+# and source it inside the pane instead. mktemp + rename avoids ever writing a
+# token through a pre-existing wider-mode file or a symlink.
+AUTH_PANE_ENV=""
+_auth_file="$INSTALL_DIR/store/.channels-pane-auth"
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  _q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+  _auth_tmp="$(mktemp "$_auth_file.XXXXXX")" || _auth_tmp=""
+  if [ -n "$_auth_tmp" ]; then
+    {
+      [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$(_q "$CLAUDE_CODE_OAUTH_TOKEN")"
+      [ -n "${ANTHROPIC_API_KEY:-}" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$(_q "$ANTHROPIC_API_KEY")"
+      true
+    } > "$_auth_tmp"
+    if mv -f "$_auth_tmp" "$_auth_file"; then
+      AUTH_PANE_ENV=". '$_auth_file' && "
+    else
+      rm -f "$_auth_tmp" 2>/dev/null || true
+    fi
+  fi
+  unset -f _q
+  unset _auth_tmp
+else
+  rm -f "$_auth_file" 2>/dev/null || true
 fi
-unset _tmux_ver
+unset _auth_file
 
 # Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
 # path (it always polls getUpdates here -- never outbound-only). The standalone
@@ -833,8 +854,8 @@ unset _tmux_ver
 # just THIS session first -- never the server, never another agent's session --
 # otherwise new-session below fails with "duplicate session".
 $TMUX kill-session -t "$SESSION" 2>/dev/null || true
-env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
-  "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+  "${AUTH_PANE_ENV}${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
 $TMUX set-environment -g -u "$STATE_ENV_VAR" 2>/dev/null || true
@@ -880,8 +901,8 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         # invasive change (a stable fallback dir + a seeded ~/.claude.json project
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
-        env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
-          "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+        env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+          "${AUTH_PANE_ENV}${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
         $TMUX set-option -t "$SESSION" remain-on-exit on 2>/dev/null || true
         unset _CHANNELS_STARTDIR
       fi

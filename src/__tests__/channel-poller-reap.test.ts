@@ -4,7 +4,9 @@ import {
   findOrphanChannelClaudes,
   parseMainDirPollerPids,
   nearestClaudeAncestor,
+  claudeBelongsToMainPane,
   findForeignMainPollers,
+  isTmuxServerAbsentError,
   type ProcRow,
 } from '../web/channel-poller-reap.js'
 
@@ -194,5 +196,64 @@ describe('foreign MAIN-token poller detection', () => {
 
   it('fails safe when the legitimate main pane cannot be resolved', () => {
     expect(findForeignMainPollers([35352, 44001], procs, new Set())).toEqual([])
+  })
+
+  it('keeps a normal main pane whose leader is Claude', () => {
+    const normal: ProcRow[] = [
+      { pid: 100, ppid: 1, command: '/usr/bin/claude --channels plugin:telegram' },
+      { pid: 101, ppid: 100, command: 'bun run telegram' },
+      { pid: 102, ppid: 101, command: 'bun server.ts' },
+    ]
+    expect(findForeignMainPollers([101, 102], normal, new Set([100]))).toEqual([])
+  })
+
+  it('keeps a main poller below a shell pane wrapper (regression: old pid equality would kill it)', () => {
+    const wrapped: ProcRow[] = [
+      { pid: 99, ppid: 1, command: '/bin/sh -lc export X=1' },
+      { pid: 100, ppid: 99, command: '/usr/bin/claude --channels plugin:telegram' },
+      { pid: 101, ppid: 100, command: 'bun run telegram' },
+      { pid: 102, ppid: 101, command: 'bun server.ts' },
+    ]
+    const byPid = new Map(wrapped.map((p) => [p.pid, p]))
+    expect(nearestClaudeAncestor(102, byPid)).toBe(100)
+    expect(claudeBelongsToMainPane(100, byPid, new Set([99]))).toBe(true)
+    expect(findForeignMainPollers([101, 102], wrapped, new Set([99]))).toEqual([])
+  })
+
+  it('reaps a foreign SDK Claude below the main pane Claude', () => {
+    const tree: ProcRow[] = [
+      { pid: 100, ppid: 1, command: '/usr/bin/claude --channels plugin:telegram' },
+      { pid: 200, ppid: 100, command: '/usr/bin/claude -p summary' },
+      { pid: 201, ppid: 200, command: 'bun run telegram' },
+      { pid: 202, ppid: 201, command: 'bun server.ts' },
+    ]
+    expect(findForeignMainPollers([201, 202], tree, new Set([100]))).toEqual([201, 202])
+  })
+
+  it('reaps a Claude -p launched from a main-session Bash tool', () => {
+    const tree: ProcRow[] = [
+      { pid: 100, ppid: 1, command: '/usr/bin/claude --channels plugin:telegram' },
+      { pid: 150, ppid: 100, command: '/bin/bash -lc claude -p work' },
+      { pid: 200, ppid: 150, command: '/usr/bin/claude -p work' },
+      { pid: 201, ppid: 200, command: 'bun run telegram' },
+      { pid: 202, ppid: 201, command: 'bun server.ts' },
+    ]
+    expect(findForeignMainPollers([201, 202], tree, new Set([100]))).toEqual([201, 202])
+  })
+
+  it('fails safe when no real Claude binary owns a Node-wrapper poller', () => {
+    const tree: ProcRow[] = [
+      { pid: 99, ppid: 1, command: '/bin/sh -lc node wrapper.js' },
+      { pid: 100, ppid: 99, command: 'node /opt/wrapper.js' },
+      { pid: 101, ppid: 100, command: 'bun run telegram' },
+    ]
+    expect(findForeignMainPollers([101], tree, new Set([99]))).toEqual([])
+  })
+})
+
+describe('tmux server absence classification', () => {
+  it('treats tmux no-server output as a normal no-work condition', () => {
+    expect(isTmuxServerAbsentError(new Error('no server running on /tmp/tmux-1/default'))).toBe(true)
+    expect(isTmuxServerAbsentError(new Error('permission denied'))).toBe(false)
   })
 })

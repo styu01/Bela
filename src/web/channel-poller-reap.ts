@@ -229,8 +229,12 @@ export function reapChannelOrphans(
   // Fail closed when tmux cannot identify live pane leaders. An empty result
   // means the query failed, not that a running tmux server has no panes.
   const tmuxPath = opts.tmuxPath ?? 'tmux'
-  const live = livePanePids(tmuxPath)
-  const liveQueryFailed = live.size === 0
+  const liveResult = livePanePids(tmuxPath)
+  const live = liveResult.pids
+  // No server is a known safe no-work result. A different empty lookup still
+  // means our observation failed and must retain the fail-safe refusal.
+  const noTmuxServer = liveResult.serverAbsent
+  const liveQueryFailed = live.size === 0 && !noTmuxServer
   const skippedLivePane = liveQueryFailed ? [] : candidates.filter((pid) => live.has(pid))
   if (liveQueryFailed && candidates.length > 0) {
     logger.warn({ provider, chanDir, candidates },
@@ -240,14 +244,14 @@ export function reapChannelOrphans(
   // The shared tmux server itself can carry the main session's state-dir var
   // when it was created by the channels launcher. Resolve it separately and
   // fail safe if this cannot be measured.
-  const serverPid = liveQueryFailed ? null : tmuxServerPid(tmuxPath)
-  const serverQueryFailed = !liveQueryFailed && serverPid === null
+  const serverPid = liveQueryFailed || noTmuxServer ? null : tmuxServerPid(tmuxPath)
+  const serverQueryFailed = !liveQueryFailed && !noTmuxServer && serverPid === null
   if (serverQueryFailed && candidates.length > 0) {
     logger.warn({ provider, chanDir, candidates },
       'channel-poller-reap: could not resolve the tmux server pid, refusing to reap (fail-safe)')
   }
   const skippedTmuxServer = serverPid !== null && candidates.includes(serverPid) && !live.has(serverPid)
-  const all = liveQueryFailed || serverQueryFailed
+  const all = noTmuxServer || liveQueryFailed || serverQueryFailed
     ? []
     : candidates.filter((pid) => !live.has(pid) && pid !== serverPid)
   if (skippedTmuxServer) {
@@ -379,7 +383,21 @@ function tmuxServerPid(tmuxPath: string): number | null {
   }
 }
 
-function livePanePids(tmuxPath: string): Set<number> {
+interface LivePaneLookup {
+  pids: Set<number>
+  serverAbsent: boolean
+}
+
+/**
+ * tmux exits non-zero with this exact diagnostic when the final session has
+ * gone away.  That is a normal "nothing to reap" condition, not a degraded
+ * observation: there cannot be a live pane to protect while no server exists.
+ */
+export function isTmuxServerAbsentError(err: unknown): boolean {
+  return /no server running/i.test(String(err))
+}
+
+function livePanePids(tmuxPath: string): LivePaneLookup {
   try {
     const out = execSync(`${tmuxPath} list-panes -a -F '#{pane_pid}'`, { timeout: 5000, encoding: 'utf-8' })
     const s = new Set<number>()
@@ -387,10 +405,13 @@ function livePanePids(tmuxPath: string): Set<number> {
       const n = parseInt(line.trim(), 10)
       if (Number.isFinite(n) && n > 1) s.add(n)
     }
-    return s
+    return { pids: s, serverAbsent: false }
   } catch (err) {
+    if (isTmuxServerAbsentError(err)) {
+      return { pids: new Set(), serverAbsent: true }
+    }
     logger.warn({ err }, 'channel-poller-reap: tmux list-panes failed')
-    return new Set()
+    return { pids: new Set(), serverAbsent: false }
   }
 }
 
@@ -419,11 +440,16 @@ function killBunChildren(claudePid: number): void {
 export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxPath?: string } = {}): number[] {
   const tmuxPath = opts.tmuxPath ?? 'tmux'
   const procs = snapshotProcs()
-  const live = livePanePids(tmuxPath)
+  const liveResult = livePanePids(tmuxPath)
+  const live = liveResult.pids
   // No live panes resolved (tmux query failed) -> refuse to reap: without the
   // live set we cannot tell orphans from the active session. Fail safe.
   if (live.size === 0) {
-    logger.warn('channel-poller-reap: no live panes resolved, skipping detached-claude reap (fail-safe)')
+    if (liveResult.serverAbsent) {
+      logger.debug('channel-poller-reap: tmux server absent, no detached-claude reap needed')
+    } else {
+      logger.warn('channel-poller-reap: no live panes resolved, skipping detached-claude reap (fail-safe)')
+    }
     return []
   }
   const orphans = findOrphanChannelClaudes(procs, live, opts.channelNeedle)
@@ -490,6 +516,38 @@ export function nearestClaudeAncestor(pid: number, byPid: Map<number, ProcRow>):
   return null
 }
 
+/**
+ * A poller's nearest Claude ancestor is part of the main channels session only
+ * when it is the pane leader itself, or it is below a shell/wrapper pane leader
+ * with no other Claude between it and that pane.  A second Claude below the
+ * live main Claude is a locally spawned SDK/`claude -p` process and may own a
+ * foreign main-token poller, even though it is transitively in the pane tree.
+ */
+export function claudeBelongsToMainPane(
+  claudePid: number,
+  byPid: Map<number, ProcRow>,
+  panePids: Set<number>,
+): boolean {
+  if (panePids.has(claudePid)) return true
+
+  const seen = new Set<number>([claudePid])
+  let cur = byPid.get(claudePid)?.ppid
+  for (let hops = 0; hops < 8; hops++) {
+    if (cur === undefined || cur <= 1 || seen.has(cur)) return false
+    const row = byPid.get(cur)
+    // A direct or indirect child Claude of a Claude-led pane is a separate
+    // local invocation (SDK fallback / `claude -p`), not the channels Claude.
+    // A shell-led pane is the one legitimate wrapper shape.
+    if (panePids.has(cur)) return !isClaudeBinary(row?.command ?? '')
+    seen.add(cur)
+    // The first Claude is the candidate itself.  Any additional Claude before
+    // the pane leader marks a nested local invocation, not the channels pane.
+    if (row && isClaudeBinary(row.command)) return false
+    cur = row?.ppid
+  }
+  return false
+}
+
 export function findForeignMainPollers(
   candidatePollerPids: number[],
   procs: ProcRow[],
@@ -501,7 +559,9 @@ export function findForeignMainPollers(
   const out: number[] = []
   for (const pid of candidatePollerPids) {
     const owner = nearestClaudeAncestor(pid, byPid)
-    if (owner !== null && !legitClaudePids.has(owner)) out.push(pid)
+    // No identifiable Claude owner is deliberately fail-safe: a Node wrapper
+    // or truncated process snapshot must never cause us to kill a poller.
+    if (owner !== null && !claudeBelongsToMainPane(owner, byPid, legitClaudePids)) out.push(pid)
   }
   return out
 }

@@ -14,6 +14,7 @@ import { respawnMainSessionFresh } from './channel-monitor.js'
 import { paneLooksIdle } from '../pane-state.js'
 import { readAutoRestartConfig } from './auto-restart-store.js'
 import { restartDue, dailyDueAtMs, parseHHMM, mainRestartMechanism, type AutoRestartConfig } from '../auto-restart.js'
+import { createAgentMessage } from '../db.js'
 
 // Drives per-agent scheduled restarts (see src/auto-restart.ts for the why and
 // the pure due-logic). Mirrors the other watcher loops: a 60s sweep, started
@@ -103,7 +104,7 @@ async function performRestart(name: string, cfg: AutoRestartConfig): Promise<voi
   }
 }
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+export async function checkAgent(name: string, nowMs: number): Promise<void> {
   const cfg = readAutoRestartConfig(name)
   if (!cfg.enabled) {
     lastRestart.delete(name) // re-seed cleanly if re-enabled later
@@ -146,7 +147,26 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     // following timer tick from tearing down the same channel session again.
     lastRestart.set(name, nowMs)
     logger.warn({ err, name }, 'auto-restart: restart failed, standing down until next scheduled slot')
+    // BÉLA-first, like the context-restart gate: a scheduled restart that did
+    // not happen is operationally relevant, but must not silently turn into an
+    // owner-facing channel alert or trigger a retry loop every minute.
+    try {
+      createAgentMessage(
+        'system',
+        MAIN_AGENT_ID,
+        `[AUTO-RESTART] A(z) "${name}" utemezett ujrainditasa SIKERTELEN volt. ` +
+        'A rendszer a kovetkezo utemezett idopontig nem probalkozik ujra; ellenorizd a dashboard.log-ot.',
+        'auto-restart failure alert',
+      )
+    } catch (notifyErr) {
+      logger.warn({ err: notifyErr, name }, 'auto-restart: failed to queue BÉLA-first restart-failure alert')
+    }
   }
+}
+
+/** Test seam for the in-memory once-per-slot guard. */
+export function resetAutoRestartStateForTests(): void {
+  lastRestart.clear()
 }
 
 export function startAutoRestartRunner(): NodeJS.Timeout {
