@@ -64,6 +64,19 @@ describe('quarantine-reader sub-agent definition', () => {
     const src = readFileSync(join(REPO_ROOT, 'src', 'web', 'agent-scaffold.ts'), 'utf8')
     expect(src).toContain('quarantine-reader.md')
   })
+
+  it('treats WebFetch content as model-reconstructed rather than byte-exact', () => {
+    const content = readFileSync(tplPath, 'utf8')
+    expect(content).toMatch(/model-reconstructed|not a byte-exact copy/i)
+    expect(content).toMatch(/MUST NOT state a structural fact/i)
+  })
+
+  it('forbids fabricated verbatim-looking excerpts', () => {
+    const content = readFileSync(tplPath, 'utf8')
+    expect(content).toMatch(/MUST NEVER produce a quoted, verbatim-looking excerpt/i)
+    expect(content).toMatch(/unless every character of it appears/i)
+    expect(content).toMatch(/cannot verify/i)
+  })
 })
 
 // ---------------------------------------------------------------------------
