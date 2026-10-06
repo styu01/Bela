@@ -40,14 +40,36 @@ def _dashboard_token() -> str:
 
 
 # Patterns that could reveal secrets if stored verbatim.
+#
+# TOOLLOGREDACT924: shell input arrives in several equivalent spellings.  Keep
+# a label (or flag) visible for diagnostics, but never its literal value.  A
+# shell-variable reference is deliberately retained: it is a reference, not
+# the secret itself.  `-p X` is not a generic password flag because it is also
+# commonly a port flag; the mysql and sshpass spellings are handled narrowly.
 _SECRET_PATTERNS = [
-    # Bearer / Authorization headers
-    re.compile(r'(?i)(bearer\s+)[A-Za-z0-9+/=_\-\.]{8,}'),
-    # Generic key=value / key: value pairs
-    re.compile(r'(?i)((?:token|secret|password|api[_\-]?key|apikey|auth|credential)\s*[=:]\s*)[^\s,\'";&|]{6,}'),
-    # GitHub/Anthropic/OpenAI style tokens
-    re.compile(r'\b(ghp_|sk-|sk-ant-|xoxb-|xoxp-)[A-Za-z0-9_\-]{10,}'),
-    # Raw hex blobs ≥ 32 chars (likely hashed secrets) -- no capture group, full match replaced
+    # Bearer / Basic authorization values
+    re.compile(r'(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9+/=_\-\.]{8,}'),
+    # Credentials embedded in a URL: any RFC 3986 scheme.  The password runs
+    # to the final @ before the authority so an unescaped @ in it stays hidden.
+    re.compile(r'(?i)(\b[a-z][a-z0-9+.\-]*://)(?!\$)[^/\s:@]*:(?!\$)[^/\s]+(?=@[^/\s@]*(?:[/\s?#]|$))'),
+    re.compile(r'(?i)(\b[a-z][a-z0-9+.\-]*://)[A-Za-z0-9_\-]{20,}(?=@)'),
+    # Spaced or = flags: --token X, --password 'X', --api-key=X ...
+    re.compile(r'(?i)(--(?:token|password|passwd|api-key|apikey|access-token|auth-token|secret)(?:\s+|=)[\'\"]?)(?!\$)[^\s\'\"]{6,}'),
+    # key=value / key: value, with a quoted or unquoted value.  This includes
+    # arbitrary *_KEY, *_TOKEN, *_SECRET and *_PASSWORD names.
+    re.compile(r'(?i)(\b\w*(?:token|secret|passw(?:or)?d|api[_\-]?key|apikey|auth|credential|_key)[\'\"]?\s*[=:]\s*[\'\"]?)(?!\$)[^\s,\'";&|]{6,}'),
+    # Known token prefixes.  Preserve only the non-sensitive prefix.
+    re.compile(r'\b(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|sbp_|sk-ant-|sk-|xoxb-|xoxp-|xapp-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_)[A-Za-z0-9_\-]{10,}'),
+    # Telegram bot token and AWS access-key id.
+    re.compile(r'(\b(?:bot)?\d{6,12}:)[A-Za-z0-9_\-]{30,}'),
+    re.compile(r'\b(AKIA|ASIA)[A-Z0-9]{16}\b'),
+    # Explicit password-taking tools.  A bare mysql -p prompts for a password
+    # and has no secret to redact.
+    re.compile(r'(\bsshpass\s+-p\s*)(?:\'[^\']*\'|"(?!\$)[^"]*"|(?!\$)[^\s\'\"]+)'),
+    re.compile(r'(\b(?:mysql|mysqldump|mariadb)\b[^|;&\n]*?\s-p[\'\"]?)(?!\$)[^\s\'\"]{4,}'),
+    # A JWT anywhere (header.payload.signature).
+    re.compile(r'\beyJ[\w\-]{8,}\.eyJ[\w\-]{8,}\.[\w\-]{8,}'),
+    # Raw hex blobs >= 32 chars (likely hashed secrets) -- no capture group.
     re.compile(r'\b[0-9a-fA-F]{32,}\b'),
 ]
 
