@@ -572,7 +572,7 @@ function selfHealWorkerOnce(ctx: WorkerCtx): boolean {
     }
   }
   logger.warn({ session: ctx.session }, 'agent-worker: Escape did not clear the parked chrome -- restarting the worker session')
-  restartWorkerSession(ctx)
+  restartWorkerSession(ctx, { reason: 'self-heal-unexpected-chrome' })
   return true
 }
 
@@ -626,7 +626,13 @@ async function ensureWorkerReady(ctx: WorkerCtx): Promise<boolean> {
   return false
 }
 
-function restartWorkerSession(ctx: WorkerCtx): void {
+interface WorkerRestartMeta {
+  reason: string
+  reqId?: string
+  caller?: string
+}
+
+function restartWorkerSession(ctx: WorkerCtx, meta: WorkerRestartMeta = { reason: 'unspecified' }): void {
   // Defense-in-depth (WORKERHOME1): every WEB_ONLY-reachable path is already
   // gated upstream, but a restart here would kill-session a LIVE worker from a
   // staging instance -- never do that.
@@ -634,8 +640,9 @@ function restartWorkerSession(ctx: WorkerCtx): void {
     logger.warn({ session: ctx.session }, 'agent-worker: WEB_ONLY mode -- refusing to restart (kill) a worker session')
     return
   }
+  logger.warn({ session: ctx.session, ...meta }, 'agent-worker: restarting worker session')
   try { execFileSync(TMUX, ['kill-session', '-t', ctx.session], { timeout: 5000 }) } catch { /* not running */ }
-  try { startWorkerSessionFor(ctx) } catch (err) { logger.warn({ err, session: ctx.session }, 'agent-worker: restart failed') }
+  try { startWorkerSessionFor(ctx) } catch (err) { logger.warn({ err, session: ctx.session, ...meta }, 'agent-worker: restart failed') }
 }
 
 // Reset context between requests so unrelated one-shots never share/grow context.
@@ -663,7 +670,7 @@ type AttemptResult =
   | { kind: 'auth' }
   | { kind: 'fail'; error: string }
 
-async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: number): Promise<AttemptResult> {
+async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: number, caller?: string): Promise<AttemptResult> {
   const ready = await ensureWorkerReady(ctx)
   if (!ready) {
     // A non-ready worker can be a dead auth (the session boots, prints the
@@ -708,16 +715,17 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
       // Not done yet: catch a mid-flight auth failure (the access token can
       // expire while the session is up) BEFORE burning the full timeout.
       if (workerPaneHasAuthFailure(ctx)) {
-        logger.warn({ reqId, session: ctx.session }, 'agent-worker: auth failure detected mid-request')
+        logger.warn({ reqId, caller, session: ctx.session }, 'agent-worker: auth failure detected mid-request')
         return { kind: 'auth' }
       }
       if (decision === 'timeout') {
-        logger.warn({ reqId, timeoutMs, session: ctx.session }, 'agent-worker: request timed out')
+        logger.warn({ reqId, caller, timeoutMs, session: ctx.session }, 'agent-worker: request timed out; restarting before returning failure')
+        restartWorkerSession(ctx, { reason: 'request-timeout', reqId, caller })
         return { kind: 'fail', error: `worker timeout after ${Math.round(timeoutMs / 1000)}s` }
       }
       if (decision === 'dead') {
-        logger.warn({ reqId, session: ctx.session }, 'agent-worker: session died mid-request, restarting (fail-fast)')
-        restartWorkerSession(ctx)
+        logger.warn({ reqId, caller, session: ctx.session }, 'agent-worker: session died mid-request, restarting (fail-fast)')
+        restartWorkerSession(ctx, { reason: 'session-died-mid-request', reqId, caller })
         return { kind: 'fail', error: 'worker session died mid-request' }
       }
     }
@@ -744,12 +752,13 @@ export async function runViaWorker(
   message: string,
   timeoutMs: number,
   priority?: 'fast' | 'slow',
+  caller?: string,
 ): Promise<{ text: string | null; error?: string; authFailed?: boolean }> {
   const p = priority ?? classifyPriority(message)
   const ctx = p === 'fast' ? ctxFast : ctxSlow
   return withWorkerLockFor(ctx, async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await runWorkerAttempt(ctx, message, timeoutMs)
+      const r = await runWorkerAttempt(ctx, message, timeoutMs, caller)
       if (r.kind === 'ok') return { text: r.text, error: r.error }
       if (r.kind === 'fail') {
         // A momentary not-ready is TRANSIENT, not terminal: the boot-time
@@ -759,7 +768,7 @@ export async function runViaWorker(
         // fixes them all. Mirrors the auth-recovery retry-once shape above.
         if (r.error === 'worker session not ready' && attempt === 0) {
           logger.warn({ session: ctx.session }, 'agent-worker: worker not ready -- restarting once and retrying the request')
-          restartWorkerSession(ctx)
+          restartWorkerSession(ctx, { reason: 'worker-not-ready', caller })
           continue
         }
         return { text: null, error: r.error }
@@ -768,7 +777,7 @@ export async function runViaWorker(
       if (attempt === 0) {
         logger.warn({ session: ctx.session }, 'agent-worker: auth failure -> recovering (reseed creds + clear keychain + restart)')
         seedWorkerCredentials(ctx)
-        restartWorkerSession(ctx)
+        restartWorkerSession(ctx, { reason: 'auth-recovery', caller })
         continue
       }
       logger.error({ session: ctx.session }, 'agent-worker: auth failure persists after recovery -> signalling SDK fallback (authFailed)')

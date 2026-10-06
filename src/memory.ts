@@ -173,6 +173,8 @@ ${memoryLines}`
     const digestConfigDir = ensureDigestConfigDir()
     const { text } = await runAgent(prompt, undefined, undefined, false, digestCwd, {
       CLAUDE_CONFIG_DIR: digestConfigDir,
+    }, {
+      source: 'daily-digest',
     })
     if (!text) return null
 

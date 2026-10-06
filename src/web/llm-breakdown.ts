@@ -78,7 +78,7 @@ function stripCodeFences(s: string): string {
 // runAgent returns as `text`.
 async function callBreakdownAgent(userPrompt: string): Promise<SubtaskSuggestion[]> {
   const fullPrompt = `${buildSystemPrompt()}\n\n${userPrompt}`
-  const { text, error } = await runAgent(fullPrompt)
+  const { text, error } = await runAgent(fullPrompt, undefined, undefined, false, undefined, undefined, { source: 'llm-breakdown' })
   if (!text || !text.trim()) {
     throw new Error(`breakdown agent returned no content${error ? `: ${error}` : ''}`)
   }

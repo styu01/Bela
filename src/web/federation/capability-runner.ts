@@ -61,6 +61,7 @@ async function runOnce(): Promise<void> {
         const r = await runAgent(prompt, undefined, undefined, false, undefined, undefined, {
           timeoutMs: CAPABILITY_GENERATION_TIMEOUT_MS,
           timeoutAsError: true,
+          source: 'capability-summary',
         })
         return { text: r.text, error: r.error }
       })

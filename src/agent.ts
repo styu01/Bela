@@ -130,6 +130,11 @@ export interface RunAgentOpts {
   // that CACHE or PERSIST the result (capability summaries) must set this:
   // the apology would otherwise be stored as if it were generated content.
   timeoutAsError?: boolean
+  // Caller label (heartbeat/daily-digest/agent-scaffold/llm-breakdown/etc.),
+  // threaded through to the worker's restart-diagnostics logging so a future
+  // "worker not ready"/timeout incident can be traced back to the request
+  // that actually triggered it, instead of only the restart timestamp.
+  source?: string
 }
 
 export async function runAgent(
@@ -151,7 +156,7 @@ export async function runAgent(
     // and avoids any load-order coupling.
     if (sessionId) logger.warn('runAgent(worker): resume/sessionId not supported on worker backend, ignoring')
     const { runViaWorker } = await import('./web/agent-worker.js')
-    const { text, error, authFailed } = await runViaWorker(message, timeoutMs)
+    const { text, error, authFailed } = await runViaWorker(message, timeoutMs, undefined, opts.source)
     // authFailed = the worker could not recover its subscription auth even after
     // a reseed + clear-keychain + restart + retry. Fall through to the SDK path
     // so the call still completes (API billing) instead of dying silently (the

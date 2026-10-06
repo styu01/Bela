@@ -555,6 +555,8 @@ async function executeHeartbeat(): Promise<void> {
     // the SDK config-dir code honours.
     const { text } = await runAgent(prompt, undefined, undefined, false, HEARTBEAT_AGENT_CWD, {
       CLAUDE_CONFIG_DIR: HEARTBEAT_CONFIG_DIR,
+    }, {
+      source: 'heartbeat',
     })
     if (text) {
       await notifyTelegram(text)

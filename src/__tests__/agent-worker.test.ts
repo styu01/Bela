@@ -59,6 +59,33 @@ describe('decidePoll', () => {
   })
 })
 
+describe('mid-request timeout recovery wiring', () => {
+  it('restarts the worker with request and caller context before returning a timeout failure', () => {
+    // This is intentionally a source-wiring guard: exercising runWorkerAttempt
+    // would require a live tmux/Claude session, while the regression is that a
+    // timeout branch returned without invoking its session cleanup at all.
+    const __dirname = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(join(__dirname, '../web/agent-worker.ts'), 'utf-8')
+    const start = src.indexOf("if (decision === 'timeout')")
+    const end = src.indexOf("if (decision === 'dead')", start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const timeoutBranch = src.slice(start, end)
+    expect(timeoutBranch).toContain("restartWorkerSession(ctx, { reason: 'request-timeout', reqId, caller })")
+    expect(timeoutBranch.indexOf('restartWorkerSession')).toBeLessThan(timeoutBranch.indexOf("return { kind: 'fail'"))
+  })
+})
+
+describe('worker caller source wiring', () => {
+  it('passes heartbeat and daily-digest labels through RunAgentOpts, not the child env object', () => {
+    const __dirname = dirname(fileURLToPath(import.meta.url))
+    const heartbeat = readFileSync(join(__dirname, '../heartbeat.ts'), 'utf-8')
+    const memory = readFileSync(join(__dirname, '../memory.ts'), 'utf-8')
+    expect(heartbeat).toMatch(/CLAUDE_CONFIG_DIR: HEARTBEAT_CONFIG_DIR,\s*},\s*{\s*source: 'heartbeat',/)
+    expect(memory).toMatch(/CLAUDE_CONFIG_DIR: digestConfigDir,\s*},\s*{\s*source: 'daily-digest',/)
+  })
+})
+
 describe('configDirKeychainService', () => {
   // Locked vector: macOS Claude Code reads the OAuth token from a Keychain
   // service named "Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>"

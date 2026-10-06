@@ -1359,7 +1359,7 @@ Ezeket ${OWNER_NAME} adta, a flotta minden kolléga-asszisztensére kötelezőek
 
 Output ONLY the markdown content, no code fences.`
 
-  const { text, error } = await runAgent(prompt)
+  const { text, error } = await runAgent(prompt, undefined, undefined, false, undefined, undefined, { source: 'agent-scaffold-claude-md' })
   if (!text) throw new Error(error ? blockedHint('CLAUDE.md', error) : noOutputHint('CLAUDE.md'))
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
@@ -1423,7 +1423,7 @@ IMPORTANT FORMATTING RULES:
 Make the personality distinctive but professional.
 Output ONLY the markdown content, no code fences.`
 
-  const { text, error } = await runAgent(prompt)
+  const { text, error } = await runAgent(prompt, undefined, undefined, false, undefined, undefined, { source: 'agent-scaffold-soul-md' })
   if (!text) throw new Error(error ? blockedHint('SOUL.md', error) : noOutputHint('SOUL.md'))
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
@@ -1461,7 +1461,7 @@ IMPORTANT FORMATTING RULES:
 Keep the body under 200 lines. Be specific and actionable. The owner's name is ${OWNER_NAME}; use only this name when referring to the user.
 Output ONLY the markdown content, no code fences.`
 
-  const { text, error } = await runAgent(prompt)
+  const { text, error } = await runAgent(prompt, undefined, undefined, false, undefined, undefined, { source: 'agent-scaffold-skill-md' })
   if (!text) throw new Error(error ? blockedHint('SKILL.md', error) : noOutputHint('SKILL.md'))
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {

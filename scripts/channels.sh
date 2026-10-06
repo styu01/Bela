@@ -740,15 +740,42 @@ fi
 # plugin dies in a restart loop, on a headless box where /login is impossible.
 # Creating the server ourselves makes set-environment -g always land, which is
 # what the fix intended. start-server is idempotent and cheap.
+#
+# CHANNELSAUTHRACE923 (ported from Szotasz/marveen commit f5fd9b9, 2026-09-24):
+# `start-server` alone does NOT keep a server alive -- with no session it exits
+# at once (exit-empty), so the set-environment -g calls below can still answer
+# "no server running" and be lost if something else (e.g. the dashboard's
+# worker session) creates the server in the gap between start-server and
+# set-environment. When that happens our new-session below inherits the
+# token-less global env: "Not logged in", --channels ignored, the channel
+# silently dead until the next restart -- this is the exact bela-worker OAuth
+# symptom seen 2026-09-24 23:59. Two layers now:
+#   1. the token rides on OUR new-session itself (`-e`, tmux >= 3.2), so this
+#      session has it whoever created the server;
+#   2. the globals are set again right AFTER new-session, when a server
+#      certainly exists, so a later pane relaunch and every sub-agent session
+#      inherit them too.
+_tmux_set_auth_globals() {
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    $TMUX set-environment -g CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN" 2>/dev/null || true
+  fi
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    $TMUX set-environment -g ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" 2>/dev/null || true
+  fi
+  # Propagate the prompt-suggestion disable to every sub-agent tmux session.
+  $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null || true
+}
 $TMUX start-server 2>/dev/null || true
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  $TMUX set-environment -g CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN" 2>/dev/null || true
+_tmux_set_auth_globals
+
+# new-session -e needs tmux >= 3.2; older tmux keeps the global-env path only.
+TMUX_AUTH_ENV=()
+_tmux_ver="$($TMUX -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+if [ -n "$_tmux_ver" ] && awk -v v="$_tmux_ver" 'BEGIN { split(v, p, "."); exit !((p[1] > 3) || (p[1] == 3 && p[2] >= 2)) }'; then
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && TMUX_AUTH_ENV+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && TMUX_AUTH_ENV+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 fi
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  $TMUX set-environment -g ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" 2>/dev/null || true
-fi
-# Propagate the prompt-suggestion disable to every sub-agent tmux session.
-$TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null || true
+unset _tmux_ver
 
 # Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
 # path (it always polls getUpdates here -- never outbound-only). The standalone
@@ -770,8 +797,10 @@ $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null 
 # just THIS session first -- never the server, never another agent's session --
 # otherwise new-session below fails with "duplicate session".
 $TMUX kill-session -t "$SESSION" 2>/dev/null || true
-$TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+$TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
   "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+# The server certainly exists now: see CHANNELSAUTHRACE923 above.
+_tmux_set_auth_globals
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin
@@ -811,7 +840,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         # invasive change (a stable fallback dir + a seeded ~/.claude.json project
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
-        $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+        $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
           "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
         unset _CHANNELS_STARTDIR
       fi
