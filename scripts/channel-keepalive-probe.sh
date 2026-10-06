@@ -91,14 +91,16 @@ descends_from_pane() {
 
 alive=0
 # Candidate pollers: bun/node processes whose argv references a /telegram/
-# plugin dir. Anchored on path separators to avoid matching an unrelated argv.
+# plugin dir. Keep this portable ERE equivalent to the TypeScript detector's
+# runtime-word check: a runtime installed at an absolute path must match too.
+RUNTIME_TOKEN_RX='(^|[^A-Za-z0-9_])(bun|node)([^A-Za-z0-9_]|$)'
 while read -r cand; do
   [ -z "$cand" ] && continue
   if descends_from_pane "$cand"; then
     alive=1
     break
   fi
-done < <(ps -axo pid,command 2>/dev/null | grep -E '(^| )(bun|node)( |$|.*/)' | grep -E '/telegram/' | grep -v grep | awk '{print $1}')
+done < <(ps -axo pid,command 2>/dev/null | grep -E "$RUNTIME_TOKEN_RX" | grep -E '/telegram/' | grep -v grep | awk '{print $1}')
 
 if [ "$alive" -ne 1 ]; then
   # Do NOT advance the keepalive: a dead pipe must stay visibly stale so a real
