@@ -82,6 +82,7 @@ import { tryHandleVaultSsh } from './web/routes/vault-ssh.js'
 import { tryHandleFleet } from './web/routes/fleet.js'
 import { tryHandleVaultSshKeys } from './web/routes/vault-ssh-keys.js'
 import type { RouteContext } from './web/routes/types.js'
+import { dashboardBootstrapMessage } from './web/dashboard-bootstrap-message.js'
 
 const WEB_DIR = join(PROJECT_ROOT, 'web')
 
@@ -289,12 +290,10 @@ export function startWebServer(port = 3420): http.Server {
     logger.info({ port }, `Web dashboard: http://localhost:${port}`)
     // Do NOT log the bearer token: launchd/journal/pipe captures of the
     // structured log would otherwise carry a root-equivalent credential.
-    // Print the bootstrap URL directly to stderr instead so it shows in the
-    // interactive terminal but does not land in the pino log stream.
-    const bootstrapUrl = `http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
-    process.stderr.write(
-      `\nDashboard access URL (paste into browser, token is stored afterward):\n  ${bootstrapUrl}\n\n`
-    )
+    // stderr can itself be redirected to a persistent error log. Preserve the
+    // convenient URL for an operator's terminal, but write only the protected
+    // token-file location in every non-interactive startup.
+    process.stderr.write(dashboardBootstrapMessage(port, DASHBOARD_TOKEN, process.stderr.isTTY))
   })
 
   // Self-heal a SILENT listener failure. Under launchd, a `kickstart -k` can
