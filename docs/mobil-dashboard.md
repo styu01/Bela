@@ -28,7 +28,7 @@ A dashboard a localhostra kötve marad; a Tailscale Serve csak proxyzza a tailne
 1. Telepítsd a Tailscale appot, lépj be UGYANAZZAL a fiókkal, és kapcsold be.
 2. A böngészőben nyisd meg a hozzáférési linket a tokennel:
    `https://<gep-neve>.<tailnet>.ts.net/?token=<ACCESS_TOKEN>`
-   (Az access token a gazdagépen a `store/.dashboard-token` fájlban van, illetve a dashboard indítási logja kiírja egy "Dashboard access URL" sorban.)
+   (Az access token a gazdagépen a `store/.dashboard-token` fájlban van)
 3. Tedd ki a kezdőképernyőre: a böngésző Megosztás menüjében "Add to Home Screen" / "Főképernyőhöz adás". Így app-ikonként indul (PWA).
 4. Első indításkor a home-screen app egy token-mezőt kér (mert külön tárhelyet kap a böngészőtől). Illeszd be a TELJES linket vagy csak a tokent, a mező magától kiszedi a tokent, és bejelentkezel. Ezt csak egyszer kell.
 
