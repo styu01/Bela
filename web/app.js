@@ -14344,6 +14344,8 @@ const TU_MODEL_PRICING = {
   'claude-opus-4-6':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
   // Opus 4.0 / 4.1 -- the last generation still on the old Opus pricing.
   'claude-opus-4':       { in: 15.0,  out: 75.0,  cw: 18.75, cr: 1.50 },
+  // Published rate (docs.claude.com model overview, checked 2026-10-06).
+  'claude-sonnet-5-5':   { in: 2.0,   out: 10.0,  cw: 2.50,  cr: 0.20 },
   'claude-sonnet-5':     TU_SONNET5_PRICE,
   'claude-sonnet-4-6':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
   'claude-sonnet-4-5':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },

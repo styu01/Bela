@@ -1,5 +1,5 @@
 {
-  "model": "claude-sonnet-5",
+  "model": "claude-sonnet-5-5",
   "enabledPlugins": {
     "slack-channel@marveen-marketplace": false,
     "telegram@claude-plugins-official": true
@@ -47,5 +47,5 @@
       }
     ]
   },
-  "effort": "high"
+  "effort": "medium"
 }

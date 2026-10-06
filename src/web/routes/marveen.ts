@@ -17,7 +17,14 @@ import { readAutoRestartConfig } from '../auto-restart-store.js'
 import type { RouteContext } from './types.js'
 
 function getActiveMarveenModel(): string {
-  return readActiveModelFromProjectDir(PROJECT_ROOT) ?? 'unknown'
+  const active = readActiveModelFromProjectDir(PROJECT_ROOT)
+  if (active) return active
+  // Fresh session with no assistant turn yet: show the configured model rather than 'unknown'.
+  try {
+    const cfg = JSON.parse(readFileOr(join(PROJECT_ROOT, '.claude', 'settings.json'), '{}')) as { model?: unknown }
+    if (typeof cfg.model === 'string' && cfg.model) return cfg.model
+  } catch { /* fall through */ }
+  return 'unknown'
 }
 
 // Pure identity-core of the /api/marveen payload: the brand-relevant fields the

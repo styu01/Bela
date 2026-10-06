@@ -156,11 +156,11 @@ import json
 path = "/home/kisss/marveen/.claude/settings.json"
 with open(path) as f: s = json.load(f)
 changed = False
-if s.get("model") != "claude-sonnet-5":
-    s["model"] = "claude-sonnet-5"
+if s.get("model") != "claude-sonnet-5-5":
+    s["model"] = "claude-sonnet-5-5"
     changed = True
-if s.get("effort") != "high":
-    s["effort"] = "high"
+if s.get("effort") != "medium":
+    s["effort"] = "medium"
     changed = True
 plugins = s.setdefault("enabledPlugins", {})
 if plugins.get("telegram@claude-plugins-official") != True:

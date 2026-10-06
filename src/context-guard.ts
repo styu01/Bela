@@ -250,7 +250,7 @@ export const CONTEXT_LIMIT_TIERS = [200_000, 500_000, CONTROL_DENOMINATOR_1M] as
  * proactive tiers (the 2026-07-26 failure mode), while under-estimating is
  * loud and self-correcting.
  */
-const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/, /^claude-sonnet-5$/]
+const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/, /^claude-sonnet-5(-5)?$/]
 
 export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
