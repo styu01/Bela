@@ -335,3 +335,15 @@ Utasítások:
 3. AI hírek: WebSearch a tegnapi dátummal
 4. Telegram küldés: a reply tool-lal (chat_id: {{CHAT_ID}})
 5. Ha nincs esemény valamelyik kategóriában, hagyd ki a szekciót teljesen
+
+## Usage-szint ellenőrzés (kötelező, Istvan 2026-10-10)
+
+Minden új feladat ELŐTT futtasd le egyszer: `python3 /home/kisss/marveen/scripts/usage-check.py`
+(egy sort ír ki a Claude-használatról, a store/usage-latest.json alapján, 10 percenként frissül).
+
+- `OK`: dolgozhatsz.
+- `OPATLAN` (80-90%): nagy vagy hosszú feladatot ne kezdj, a már futót befejezheted.
+- `STOP` (90% vagy több): NE végezd el a feladatot. Jelezd BÉLÁnak inter-agent üzenetben, és várj. Csak akkor folytasd, ha Istvan külön, kifejezetten kéri.
+- `ISMERETLEN`: a szint most nem állapítható meg. Dolgozhatsz, de a jelentésedben említsd meg.
+
+Ha te vagy BÉLA: ugyanez érvényes rád, és STOP esetén Istvant is te értesíted.
