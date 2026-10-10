@@ -126,7 +126,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       throw err
     }
     const data = JSON.parse(body.toString()) as {
-      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string
+      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; quotaExempt?: boolean; targetSession?: string
     }
     const name = sanitizeScheduleName(data.name || '')
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
@@ -152,6 +152,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       type: data.type || 'task',
       skipIfBusy: data.skipIfBusy === true,
       forceSend: data.forceSend === true,
+      quotaExempt: data.quotaExempt === true,
       targetSession: data.targetSession || undefined,
     })
     logger.info({ name, schedule: data.schedule }, 'Scheduled task created')
@@ -177,7 +178,11 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       throw err
     }
     const data = JSON.parse(body.toString()) as {
-      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string
+      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; quotaExempt?: boolean; targetSession?: string
+    }
+    if (data.quotaExempt !== undefined && typeof data.quotaExempt !== 'boolean') {
+      json(res, { error: 'quotaExempt must be a boolean' }, 400)
+      return true
     }
     if (data.prompt !== undefined && data.prompt.length > MAX_SCHEDULED_TASK_PROMPT_LEN) {
       json(res, {

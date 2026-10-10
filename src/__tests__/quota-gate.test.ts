@@ -77,10 +77,21 @@ describe('decideQuotaAction -- fail open', () => {
 
   it('runs when the snapshot is too old to describe now', () => {
     const d = background(
-      snap({ five_hour: { used: 99 } }, { ageMs: QUOTA_GATE.staleAfterMs + 60_000 }),
+      snap({ five_hour: { used: 99 } }, { ageMs: 25 * 60_000 + 60_000 }),
     )
     expect(d.action).toBe('run')
     expect(d.reason).toContain('stale-snapshot')
+  })
+
+  it('uses authoritative collection time before fresh file-write time', () => {
+    const s = snap({ five_hour: { used: 99 } })
+    s.generatedAtMs = NOW - 1_000
+    s.authoritativeCollectedAtMs = NOW - 26 * 60_000
+    expect(background(s).action).toBe('run')
+  })
+
+  it('pins the stale horizon at 25 minutes', () => {
+    expect(QUOTA_GATE.staleAfterMs).toBe(25 * 60_000)
   })
 
   it('runs when the snapshot has no usable window', () => {

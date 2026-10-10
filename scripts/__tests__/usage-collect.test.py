@@ -154,6 +154,94 @@ class TestShouldFire(unittest.TestCase):
         self.assertFalse(uc._should_fire(state, "k", False, "throttle", 1000.0, refire_seconds=1))
 
 
+class TestCollectClaudeUsageHeaders(unittest.TestCase):
+    def _response(self, headers):
+        cm = MagicMock()
+        cm.__enter__.return_value.headers = headers
+        cm.__enter__.return_value.read.return_value = b'{}'
+        cm.__exit__.return_value = False
+        return cm
+
+    def test_post_headers_and_fraction_conversion(self):
+        headers = {
+            "anthropic-ratelimit-unified-5h-utilization": "0.02",
+            "anthropic-ratelimit-unified-7d-utilization": "0.7",
+            "anthropic-ratelimit-unified-5h-reset": "1800000000",
+            "anthropic-ratelimit-unified-7d-reset": "1800500000",
+        }
+        with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+             patch.object(uc, "_claude_cli_version", return_value="1.2.3"), \
+             patch("urllib.request.urlopen", return_value=self._response(headers)) as open_url:
+            windows, err, kind = uc._collect_claude_usage_headers()
+        self.assertIsNone(err)
+        self.assertIsNone(kind)
+        self.assertEqual(windows["five_hour"]["used_percent"], 2.0)
+        self.assertEqual(windows["seven_day"]["used_percent"], 70.0)
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.full_url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(json.loads(request.data)["max_tokens"], 1)
+        self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
+
+    def test_invalid_header_is_transient(self):
+        with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+             patch("urllib.request.urlopen", return_value=self._response({})):
+            windows, _, kind = uc._collect_claude_usage_headers()
+        self.assertIsNone(windows)
+        self.assertEqual(kind, "transient")
+
+    def test_429_with_valid_headers_is_authoritative(self):
+        headers = {
+            "anthropic-ratelimit-unified-5h-utilization": "1.2",
+            "anthropic-ratelimit-unified-7d-utilization": "0.89996",
+            "anthropic-ratelimit-unified-5h-reset": "1800000000",
+            "anthropic-ratelimit-unified-7d-reset": "1800500000",
+        }
+        error = urllib.error.HTTPError("url", 429, "busy", headers, None)
+        with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+             patch("urllib.request.urlopen", side_effect=error):
+            windows, err, kind = uc._collect_claude_usage_headers()
+        self.assertIsNone(err)
+        self.assertIsNone(kind)
+        self.assertEqual(windows["five_hour"]["used_percent"], 100.0)
+        self.assertEqual(windows["seven_day"]["used_percent"], 90.0)
+
+    def test_negative_nan_inf_or_partial_headers_are_transient(self):
+        valid = {
+            "anthropic-ratelimit-unified-5h-utilization": "0.2",
+            "anthropic-ratelimit-unified-7d-utilization": "0.7",
+            "anthropic-ratelimit-unified-5h-reset": "1800000000",
+            "anthropic-ratelimit-unified-7d-reset": "1800500000",
+        }
+        for bad in ("-0.1", "nan", "inf"):
+            headers = dict(valid, **{"anthropic-ratelimit-unified-5h-utilization": bad})
+            with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+                 patch("urllib.request.urlopen", return_value=self._response(headers)):
+                windows, _, kind = uc._collect_claude_usage_headers()
+            self.assertIsNone(windows)
+            self.assertEqual(kind, "transient")
+        del valid["anthropic-ratelimit-unified-7d-reset"]
+        with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+             patch("urllib.request.urlopen", return_value=self._response(valid)):
+            windows, _, kind = uc._collect_claude_usage_headers()
+        self.assertIsNone(windows)
+        self.assertEqual(kind, "transient")
+
+    def test_http_failures_and_exception_do_not_leak_token(self):
+        for code, expected in ((400, "transient"), (401, "permanent"), (403, "permanent"), (404, "transient"), (429, "transient"), (503, "transient")):
+            err = urllib.error.HTTPError("https://api.anthropic.com", code, "boom", {}, None)
+            with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+                 patch("urllib.request.urlopen", side_effect=err):
+                _, message, kind = uc._collect_claude_usage_headers()
+            self.assertEqual(kind, expected)
+            self.assertNotIn("secret-token", message)
+        with patch.object(uc, "_read_claude_token", return_value=("secret-token", "test")), \
+             patch("urllib.request.urlopen", side_effect=TimeoutError("secret-token")):
+            _, message, kind = uc._collect_claude_usage_headers()
+        self.assertEqual(kind, "transient")
+        self.assertNotIn("secret-token", message)
+
+
 class TestCollectClaudeAuthoritative(unittest.TestCase):
     """_collect_claude_authoritative() against the REAL api/oauth/usage
     response shape: windows are TOP-LEVEL keys (not nested under
@@ -261,14 +349,74 @@ class TestCollectClaudeAuthoritative(unittest.TestCase):
         self.assertEqual(err_kind, "transient")
 
 
+class TestCollectClaudeSourceOrder(unittest.TestCase):
+    def test_direct_headers_stamp_collection_time(self):
+        windows = {"five_hour": {"used_percent": 2, "resets_at": 1}, "seven_day": {"used_percent": 70, "resets_at": 2}}
+        with patch.object(uc, "_collect_claude_usage_headers", return_value=(windows, None, None)):
+            result = uc.collect_claude()
+        self.assertEqual(result["source"], "authoritative")
+        self.assertIsInstance(result.get("authoritative_collected_at_unix"), float)
+
+    def test_default_never_calls_legacy_after_header_failure(self):
+        with patch.object(uc, "_collect_claude_usage_headers", return_value=(None, "timeout", "transient")), \
+             patch.object(uc, "_collect_claude_authoritative") as legacy, \
+             patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+             patch.object(uc, "_collect_claude_estimate", return_value={}):
+            uc.collect_claude()
+        legacy.assert_not_called()
+
+    def test_config_kill_switch_restores_legacy_statusline_first_order_and_ceilings(self):
+        windows = {"five_hour": {"used_percent": 2, "resets_at": 1}, "seven_day": {"used_percent": 70, "resets_at": 2}}
+        config = dict(uc.CONFIG, claude_usage_headers_enabled=False)
+        with patch.object(uc, "CONFIG", config), \
+             patch.object(uc, "_collect_claude_usage_headers") as headers, \
+             patch.object(uc, "_read_statusline_cache", return_value=(windows, 20.0)) as statusline, \
+             patch.object(uc, "_collect_claude_authoritative") as legacy:
+            result = uc.collect_claude()
+        headers.assert_not_called()
+        legacy.assert_not_called()
+        statusline.assert_called_once_with(15, {"five_hour": 45, "seven_day": 8 * 60})
+        self.assertEqual(result["source"], "authoritative_statusline")
+        self.assertIsInstance(result.get("authoritative_collected_at_unix"), float)
+
+    def test_marker_kill_switch_uses_legacy_after_statusline_miss(self):
+        windows = {"five_hour": {"used_percent": 2, "resets_at": 1}, "seven_day": {"used_percent": 70, "resets_at": 2}}
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, ".usage-headers-disabled")
+            open(marker, "w").close()
+            with patch.object(uc, "USAGE_HEADERS_DISABLED_PATH", marker), \
+                 patch.object(uc, "_collect_claude_usage_headers") as headers, \
+                 patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+                 patch.object(uc, "_collect_claude_authoritative", return_value=(windows, None, None)) as legacy:
+                result = uc.collect_claude()
+        headers.assert_not_called()
+        legacy.assert_called_once()
+        self.assertEqual(result["source"], "authoritative")
+
+    def test_statusline_and_cached_paths_stamp_real_collection_time(self):
+        windows = {"five_hour": {"used_percent": 2, "resets_at": 1}, "seven_day": {"used_percent": 70, "resets_at": 2}}
+        with patch.object(uc, "_collect_claude_usage_headers", return_value=(None, "timeout", "transient")), \
+             patch.object(uc, "_read_statusline_cache", return_value=(windows, 4.0)):
+            statusline = uc.collect_claude()
+        self.assertAlmostEqual(datetime.now(timezone.utc).timestamp() - statusline["authoritative_collected_at_unix"], 240, delta=2)
+        with patch.object(uc, "_collect_claude_usage_headers", return_value=(None, "timeout", "transient")), \
+             patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+             patch.object(uc, "_read_cached_claude_authoritative", return_value=(windows, 5.0)):
+            cached = uc.collect_claude()
+        self.assertAlmostEqual(datetime.now(timezone.utc).timestamp() - cached["authoritative_collected_at_unix"], 300, delta=2)
+
+
 class TestReadCachedClaudeAuthoritative(unittest.TestCase):
     """_read_cached_claude_authoritative() -- reused by collect_claude() to
     avoid losing real numbers to a transient 429/5xx during the freshness
     window."""
 
-    def _write_latest(self, path, source, windows, generated_at):
+    def _write_latest(self, path, source, windows, generated_at, collected_at=None):
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"generated_at": generated_at, "claude": {"source": source, "windows": windows}}, f)
+            claude = {"source": source, "windows": windows}
+            if collected_at is not None:
+                claude["authoritative_collected_at_unix"] = collected_at
+            json.dump({"generated_at": generated_at, "claude": claude}, f)
 
     def test_missing_file_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,6 +436,35 @@ class TestReadCachedClaudeAuthoritative(unittest.TestCase):
                 got_windows, age = uc._read_cached_claude_authoritative(90)
         self.assertEqual(got_windows, windows)
         self.assertAlmostEqual(age, 5, delta=0.5)
+
+    def test_prefers_real_collection_time_and_accepts_25_minute_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "usage-latest.json")
+            now = datetime.now(timezone.utc)
+            windows = {"five_hour": {"used_percent": 11.0, "resets_at": 123.0}}
+            self._write_latest(path, "authoritative", windows, now.isoformat(), (now - timedelta(minutes=25)).timestamp())
+            with patch.object(uc, "LATEST_PATH", path):
+                got, age = uc._read_cached_claude_authoritative(25, now)
+            self.assertEqual(got, windows)
+            self.assertAlmostEqual(age, 25, delta=0.01)
+
+    def test_future_or_over_25_minute_collection_time_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "usage-latest.json")
+            now = datetime.now(timezone.utc)
+            for offset in (timedelta(minutes=26), timedelta(minutes=-1)):
+                self._write_latest(path, "authoritative", {"five_hour": {}}, now.isoformat(), (now - offset).timestamp())
+                with patch.object(uc, "LATEST_PATH", path):
+                    self.assertEqual(uc._read_cached_claude_authoritative(25, now), (None, None))
+
+    def test_nonfinite_collection_time_is_rejected_without_generated_at_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "usage-latest.json")
+            now = datetime.now(timezone.utc)
+            for collected_at in (float("nan"), float("inf"), float("-inf")):
+                self._write_latest(path, "authoritative", {"five_hour": {}}, now.isoformat(), collected_at)
+                with patch.object(uc, "LATEST_PATH", path):
+                    self.assertEqual(uc._read_cached_claude_authoritative(25, now), (None, None))
 
     def test_stale_cache_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1013,8 +1190,7 @@ class TestStatuslineCache(unittest.TestCase):
         )
 
     def test_seven_day_still_stale_beyond_its_own_override_ceiling(self):
-        """The override raises the ceiling, it doesn't remove it -- a
-        seven_day window older than ITS OWN override must still reject."""
+        """A synthetic non-production override still has a hard ceiling."""
         self._write({
             "windows": {
                 "five_hour": self._window(42, 1234, age_seconds=60),
@@ -1026,14 +1202,10 @@ class TestStatuslineCache(unittest.TestCase):
             (None, None),
         )
 
-    def test_five_hour_override_lets_slow_moving_window_through(self):
-        """2026-09-02 follow-up (two live usage-monitor heartbeats ~2h
-        apart, BÉLA): five_hour turned out to plateau the same way
-        seven_day did, just over a shorter natural period -- during an idle
-        gap between scheduled polls the rounded percentage doesn't move, so
-        collected_at_unix can sit unchanged across several 10-minute poll
-        cycles even on a healthy tracker. A per-window override must let a
-        stale-LOOKING but otherwise valid five_hour window through."""
+    def test_generic_five_hour_override_lets_old_value_through(self):
+        """The generic override mechanism remains testable independently of
+        the production configuration, which now uses 25 minutes for both
+        windows because statusline is a deliberately rare fallback."""
         self._write({
             "windows": {
                 "five_hour": self._window(44, 1234, age_seconds=20 * 60),     # 20 min old
@@ -1046,9 +1218,7 @@ class TestStatuslineCache(unittest.TestCase):
         self.assertAlmostEqual(age, 20.0, delta=0.2)
 
     def test_five_hour_still_stale_beyond_its_own_override_ceiling(self):
-        """The override raises the ceiling, it doesn't remove it -- a
-        five_hour window older than ITS OWN 45-minute override must still
-        reject the whole cache."""
+        """A synthetic non-production override still rejects over-age data."""
         self._write({
             "windows": {
                 "five_hour": self._window(44, 1234, age_seconds=46 * 60),     # 46 min old > 45 min override
@@ -1061,9 +1231,8 @@ class TestStatuslineCache(unittest.TestCase):
         )
 
     def test_five_hour_override_does_not_affect_seven_day_override(self):
-        """Both per-window overrides coexist independently -- configuring
-        five_hour's 45-minute ceiling must not disturb seven_day's separate
-        8-hour one (or vice versa)."""
+        """Synthetic per-window overrides coexist independently; production
+        pins both to 25 minutes."""
         self._write({
             "windows": {
                 "five_hour": self._window(44, 1234, age_seconds=20 * 60),      # 20 min old, under 45 min
@@ -1075,29 +1244,30 @@ class TestStatuslineCache(unittest.TestCase):
         self.assertEqual(windows["five_hour"]["used_percent"], 44)
         self.assertEqual(windows["seven_day"]["used_percent"], 8)
 
-    def test_configured_five_hour_override_is_45_minutes(self):
+    def test_configured_five_hour_override_is_25_minutes(self):
         """Pins the actual production CONFIG value (not just the function's
         generic override mechanism) -- catches an accidental edit of the
         constant itself going unnoticed."""
         self.assertEqual(
             uc.CONFIG["claude_statusline_cache_max_age_min_by_window"]["five_hour"],
-            45,
+            25,
         )
 
     def test_combined_stale_five_hour_and_fresh_seven_day_resolves_authoritative(self):
         """End-to-end (real production CONFIG, not a passed-in override):
-        a five_hour window that is stale-by-value under its 45-minute
+        a five_hour window that is fresh under its 25-minute
         ceiling, alongside a fresh seven_day window, must still resolve
         collect_claude() to source=authoritative_statusline -- both windows
         independently satisfy their own configured ceiling, so neither
         should drag the other down."""
         self._write({
             "windows": {
-                "five_hour": self._window(44, 1234, age_seconds=20 * 60),   # 20 min old, under 45 min ceiling
-                "seven_day": self._window(8, 5678, age_seconds=120),        # 2 min old, well under 8h ceiling
+                "five_hour": self._window(44, 1234, age_seconds=20 * 60),   # 20 min old, under 25 min ceiling
+                "seven_day": self._window(8, 5678, age_seconds=120),        # 2 min old, under 25 min ceiling
             },
         })
-        result = uc.collect_claude()
+        with patch.object(uc, "_collect_claude_usage_headers", return_value=(None, "auth", "permanent")):
+            result = uc.collect_claude()
         self.assertEqual(result["source"], "authoritative_statusline")
         self.assertEqual(result["windows"]["five_hour"]["used_percent"], 44)
         self.assertEqual(result["windows"]["seven_day"]["used_percent"], 8)
@@ -1114,13 +1284,13 @@ class TestStatuslineCache(unittest.TestCase):
         })
         self.assertEqual(uc._read_statusline_cache(15), (None, None))
 
-    def test_configured_seven_day_override_is_eight_hours(self):
+    def test_configured_seven_day_override_is_25_minutes(self):
         """Pins the actual production CONFIG value (not just the function's
         generic override mechanism) -- catches an accidental edit of the
         constant itself going unnoticed."""
         self.assertEqual(
             uc.CONFIG["claude_statusline_cache_max_age_min_by_window"]["seven_day"],
-            8 * 60,
+            25,
         )
 
     def test_only_five_hour_present_rejected(self):
@@ -1218,9 +1388,10 @@ class TestCollectClaudeStatuslinePriority(unittest.TestCase):
     dedicated tracker session's export never pays for (or gets masked by) a
     setup-token 403/429 on the /api/oauth/usage endpoint."""
 
-    def test_fresh_statusline_cache_skips_network_fetch_entirely(self):
+    def test_fresh_statusline_cache_follows_direct_header_failure(self):
         fake_windows = {"five_hour": {"used_percent": 7, "resets_at": 1234}}
         with patch.object(uc, "_read_statusline_cache", return_value=(fake_windows, 1.2)), \
+             patch.object(uc, "_collect_claude_usage_headers", return_value=(None, "auth", "permanent")), \
              patch.object(uc, "_collect_claude_authoritative") as mock_network:
             result = uc.collect_claude()
         mock_network.assert_not_called()
@@ -1228,14 +1399,15 @@ class TestCollectClaudeStatuslinePriority(unittest.TestCase):
         self.assertEqual(result["windows"], fake_windows)
         self.assertEqual(result["statusline_age_min"], 1.2)
 
-    def test_stale_or_absent_statusline_cache_falls_through_to_network(self):
-        fake_windows = {"five_hour": {"used_percent": 33, "resets_at": 5678}}
-        with patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
-             patch.object(uc, "_collect_claude_authoritative", return_value=(fake_windows, None, None)) as mock_network:
+    def test_stale_or_absent_statusline_does_not_retry_legacy_network(self):
+        with patch.object(uc, "_collect_claude_usage_headers", return_value=(None, "timeout", "transient")), \
+             patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+             patch.object(uc, "_collect_claude_authoritative") as mock_network, \
+             patch.object(uc, "_collect_claude_estimate", return_value={}) as estimate:
             result = uc.collect_claude()
-        mock_network.assert_called_once()
-        self.assertEqual(result["source"], "authoritative")
-        self.assertEqual(result["windows"], fake_windows)
+        mock_network.assert_not_called()
+        estimate.assert_called_once()
+        self.assertEqual(result["source"], "estimate")
 
     def test_iter_windows_includes_authoritative_statusline_source(self):
         snapshot = {

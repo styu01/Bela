@@ -35,6 +35,9 @@ export interface ScheduledTask {
   // deferred to a retry queue (e.g. daily briefings, heartbeats during
   // active conversations).
   forceSend?: boolean
+  // Safety/observability heartbeat: must run even when the shared quota gate
+  // defers ordinary background work. This is owner-facing by policy.
+  quotaExempt?: boolean
   // Override the default tmux session name derived from the agent. When
   // set, the scheduler targets this exact tmux session instead of
   // `agent-<name>` or MAIN_CHANNELS_SESSION. Enables dedicated
@@ -104,7 +107,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = hasSkill ? readFileOr(skillPath, '') : ''
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown } } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; quotaExempt?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown } } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -120,6 +123,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     type: (config.type as 'task' | 'heartbeat' | 'command') || 'task',
     skipIfBusy: config.skipIfBusy === true,
     forceSend: config.forceSend === true,
+    quotaExempt: config.quotaExempt === true,
     targetSession: config.targetSession || undefined,
     command: config.command,
     timeoutMs: config.timeoutMs,
@@ -168,7 +172,7 @@ export function listScheduledTasks(): ScheduledTask[] {
 
 export function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: number; stuckAfterMinutes?: number },
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; quotaExempt?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: number; stuckAfterMinutes?: number },
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -194,6 +198,7 @@ export function writeScheduledTask(
   if (data.type !== undefined) config.type = data.type
   if (data.skipIfBusy !== undefined) config.skipIfBusy = data.skipIfBusy
   if (data.forceSend !== undefined) config.forceSend = data.forceSend
+  if (data.quotaExempt !== undefined) config.quotaExempt = data.quotaExempt
   if (data.targetSession !== undefined) config.targetSession = data.targetSession
   if (data.command !== undefined) config.command = data.command
   if (data.timeoutMs !== undefined) config.timeoutMs = data.timeoutMs

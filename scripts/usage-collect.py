@@ -5,8 +5,8 @@ usage-collect.py -- subscription QUOTA-WINDOW monitor for this fleet.
 Reads current usage/quota status for two providers:
   - Codex (OpenAI Codex CLI): authoritative, parsed from the newest
     ~/.codex/sessions/*/*/*/rollout-*.jsonl rate_limits event.
-  - Claude (Claude Code subscription): tries the authoritative
-    api.anthropic.com/api/oauth/usage endpoint first, authenticating with
+  - Claude (Claude Code subscription): gets the authoritative utilization
+    headers from a minimal api.anthropic.com/v1/messages request first, authenticating with
     the session OAuth token (~/.claude/.credentials.json, or the macOS
     login Keychain entry "Claude Code-credentials" -- on darwin the file
     does not exist). On a transient
@@ -35,6 +35,7 @@ noted in the summary/snapshot instead of raising.
 import argparse
 import glob
 import json
+import math
 import os
 import subprocess
 import sys
@@ -62,54 +63,20 @@ CONFIG = {
                                              # quota is actually lost at reset (weekly-class, >=24h).
                                              # Short windows (e.g. Claude 5h) reset constantly --
                                              # under-pace there is normal, not a signal.
-    "claude_authoritative_cache_max_age_min": 90,  # reuse last authoritative Claude snapshot
-                                                    # on a transient failure (429/5xx/timeout)
-                                                    # if it's younger than this
-    "claude_statusline_cache_max_age_min": 15,  # a dedicated tracker session's statusLine
-                                                 # export (see statusline-usage-export.py) counts
-                                                 # as authoritative if fresher than this -- generous
-                                                 # enough for a session with no refreshInterval set
-                                                 # (updates are otherwise event-driven only) while
-                                                 # still catching a tracker session that died.
-                                                 # This is the DEFAULT; see
-                                                 # claude_statusline_cache_max_age_min_by_window
-                                                 # below for windows that need a wider one.
+    # The collector runs every 10 minutes. 25 minutes admits one missed run
+    # plus scheduler jitter, but never presents a much older quota value as
+    # current after an upstream incident.
+    "claude_authoritative_cache_max_age_min": 25,
+    # Operational kill-switch. A False value restores the complete legacy
+    # collection order; store/.usage-headers-disabled does the same per run.
+    "claude_usage_headers_enabled": True,
+    "claude_statusline_cache_max_age_min": 25,
     "claude_statusline_cache_max_age_min_by_window": {
-        # seven_day found false-stale in production 2026-09-02 (BÉLA, live
-        # usage-monitor heartbeat, kanban -- see
-        # warm_statusline_weekly_window_false_stale_gap_20260902 memory):
-        # statusline-usage-export.py deliberately only advances a window's
-        # collected_at_unix when its VALUE changes (documented, accepted
-        # tradeoff there -- fails safe, not silently). The weekly percentage
-        # is coarse (integer, rolling 7-day window) and can go a genuine
-        # HOUR+ without moving even while the tracker session is perfectly
-        # healthy (the same slow-drift behavior already documented in the
-        # claude-usage-check skill for the raw oauth/usage endpoint). Using
-        # the same 15-minute default here made the whole cache reject
-        # itself on a healthy tracker purely because seven_day hadn't
-        # ticked -- not a real outage. 8 hours mirrors the skill's own
-        # observed "can stick for 6-8+ hours" note; still short enough to
-        # catch a genuinely dead tracker session well before a stale number
-        # could mislead anyone.
-        "seven_day": 8 * 60,
-        # five_hour found false-stale in production too, 2026-09-02 (BÉLA,
-        # two separate usage-monitor heartbeats ~2h apart, 11:30 and 12:30
-        # CEST): same root cause as seven_day above, just a shorter natural
-        # period. five_hour's 300-minute span makes each rounded percentage
-        # point worth ~3 minutes of *continuous* consumption -- during an
-        # idle gap between scheduled polls (no active work) the value simply
-        # doesn't move, so collected_at_unix can sit unchanged across
-        # several 10-minute tracker-poll cycles even on a perfectly healthy
-        # tracker (confirmed via store/dashboard.log: the tracker's own
-        # scheduled poll fired on time at every tick in both incidents; the
-        # poller was never the problem). 45 minutes: wide enough to absorb
-        # the observed ~20-minute plateaus with real margin, but kept
-        # deliberately narrower than seven_day's 8 hours -- five_hour's own
-        # window is only 5 hours long, so an 8-hour ceiling would be
-        # nonsensical (it could ride out an entire reset cycle on a stale
-        # number). A genuinely dead tracker is still caught well inside the
-        # 5-hour window.
-        "five_hour": 45,
+        # Direct headers are primary. A seven_day statusline value can remain
+        # unchanged for hours, so this strict fallback is normally rejected;
+        # that is intentional rather than a tracker failure.
+        "seven_day": 25,
+        "five_hour": 25,
     },
 }
 
@@ -139,10 +106,25 @@ STORE_DIR = os.path.join(REPO_ROOT, "store")
 HISTORY_PATH = os.path.join(STORE_DIR, "usage-history.jsonl")
 LATEST_PATH = os.path.join(STORE_DIR, "usage-latest.json")
 STATUSLINE_CACHE_PATH = os.path.join(STORE_DIR, "usage-statusline-latest.json")
+USAGE_HEADERS_DISABLED_PATH = os.path.join(STORE_DIR, ".usage-headers-disabled")
 STATE_PATH = os.path.join(STORE_DIR, "usage-alert-state.json")
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
 
 BUDAPEST = ZoneInfo("Europe/Budapest")
+
+# Historical statusline limits used only by the complete legacy kill-switch
+# path. Direct header collection uses the stricter 25-minute values above.
+LEGACY_STATUSLINE_CACHE_MAX_AGE_MIN = 15
+LEGACY_AUTHORITATIVE_CACHE_MAX_AGE_MIN = 90
+LEGACY_STATUSLINE_CACHE_MAX_AGE_MIN_BY_WINDOW = {
+    "five_hour": 45,
+    "seven_day": 8 * 60,
+}
+
+
+def _claude_usage_headers_enabled():
+    """Evaluate both operational kill-switches on every collector run."""
+    return bool(CONFIG.get("claude_usage_headers_enabled", True)) and not os.path.exists(USAGE_HEADERS_DISABLED_PATH)
 
 TOKEN_FIELDS = (
     "input_tokens",
@@ -493,12 +475,10 @@ def _read_statusline_cache(max_age_minutes, max_age_overrides=None):
     doesn't exist, is unparseable, or either required window is missing/
     invalid/individually stale.
 
-    max_age_overrides: optional {window_key: minutes} dict giving a
-    DIFFERENT freshness ceiling for specific windows (e.g. seven_day, which
-    can legitimately go far longer without its collected_at_unix advancing
-    -- see claude_statusline_cache_max_age_min_by_window in CONFIG and the
-    2026-09-02 false-stale finding). Falls back to max_age_minutes for any
-    window not listed.
+    max_age_overrides: optional {window_key: minutes} dict. Both primary
+    windows currently use the same 25-minute direct-collector horizon. The
+    weekly statusline percentage may be unchanged longer, making this an
+    intentionally rare fallback, not a tracker-health error.
 
     This exists because /api/oauth/usage 403s for any setup-token-scoped
     fleet token (see docs/usage-percent-oauth-scope-root-cause-20260901.md)
@@ -512,9 +492,7 @@ def _read_statusline_cache(max_age_minutes, max_age_overrides=None):
     fleet-critical session) sidesteps the scope problem entirely, no network
     call needed here at all.
 
-    Checked BEFORE the network fetch in collect_claude() -- if this is
-    fresh, skip the network round-trip (and its now-expected
-    403/429) entirely for this cycle.
+    Checked after the direct header query in collect_claude().
 
     PER-WINDOW freshness (Codex review round 3, 2026-09-01, confirmed by
     BÉLA independently re-reading the code): an earlier version checked one
@@ -578,6 +556,79 @@ def _read_statusline_cache(max_age_minutes, max_age_overrides=None):
     return windows, max(ages)
 
 
+def _parse_claude_usage_headers(headers):
+    """Return quota windows from Messages response headers, or an error.
+
+    Anthropic includes these headers on a 429 too; at the important boundary
+    the HTTP status must therefore not discard otherwise valid measurements.
+    """
+    def header_number(name):
+        try:
+            value = float(headers.get(name))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    windows = {}
+    for key, header_key in (("five_hour", "5h"), ("seven_day", "7d")):
+        utilization = header_number(f"anthropic-ratelimit-unified-{header_key}-utilization")
+        resets_at = header_number(f"anthropic-ratelimit-unified-{header_key}-reset")
+        # A slight value above one is a server-side rounding/saturation value,
+        # not a reason to discard the result. Negative/non-finite values are
+        # malformed and fail conservatively.
+        if utilization is None or utilization < 0 or resets_at is None or resets_at <= 0:
+            return None, f"messages response missing or invalid {header_key} usage headers"
+        windows[key] = {
+            "used_percent": round(min(utilization, 1.0) * 100.0, 2),
+            "resets_at": resets_at,
+        }
+    return windows, None
+
+
+def _collect_claude_usage_headers():
+    """Read Claude quota utilization from a minimal Messages API response.
+
+    The usage is carried in response headers. Error text deliberately omits
+    both response bodies and credentials.
+    """
+    token, token_source = _read_claude_token()
+    if not token:
+        return None, "no oauth token available", "no_token"
+
+    body = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1,
+        "system": [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
+        "messages": [{"role": "user", "content": "hi"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body, method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "oauth-2025-04-20",
+            "content-type": "application/json",
+            "User-Agent": f"claude-code/{_claude_cli_version()}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            headers = resp.headers
+            resp.read()
+    except urllib.error.HTTPError as e:
+        windows, parse_error = _parse_claude_usage_headers(e.headers)
+        if windows is not None:
+            return windows, None, None
+        kind = "permanent" if e.code in (401, 403) else "transient"
+        return None, f"messages HTTP {e.code} ({token_source} token): {parse_error}", kind
+    except Exception as e:
+        return None, f"messages {type(e).__name__}", "transient"
+    windows, parse_error = _parse_claude_usage_headers(headers)
+    if windows is None:
+        return None, parse_error, "transient"
+    return windows, None, None
+
+
 def _collect_claude_authoritative():
     """Return (windows_dict, None, None) on success.
     On failure: (None, error_str, error_kind) where error_kind is one of:
@@ -602,10 +653,10 @@ def _collect_claude_authoritative():
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        kind = "permanent" if e.code == 403 else "transient"
+        kind = "permanent" if e.code in (401, 403) else "transient"
         return None, f"HTTP {e.code} ({token_source} token)", kind
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}", "transient"
+        return None, type(e).__name__, "transient"
 
     # Windows are TOP-LEVEL keys of the response (not nested under
     # "rate_limits"), e.g. {"five_hour": {...}, "seven_day": {...}, ...,
@@ -668,18 +719,25 @@ def _read_cached_claude_authoritative(max_age_minutes, now_utc=None):
     if not windows:
         return None, None
 
-    generated_at = data.get("generated_at")
-    if not generated_at:
-        return None, None
-    try:
-        gen_dt = datetime.fromisoformat(generated_at)
-    except (ValueError, TypeError):
-        return None, None
-    if gen_dt.tzinfo is None:
-        gen_dt = gen_dt.replace(tzinfo=timezone.utc)
-
     now_utc = now_utc or datetime.now(timezone.utc)
-    age_minutes = (now_utc - gen_dt).total_seconds() / 60.0
+    collected_at = claude.get("authoritative_collected_at_unix")
+    if collected_at is not None:
+        if not isinstance(collected_at, (int, float)) or isinstance(collected_at, bool) or not math.isfinite(collected_at):
+            return None, None
+        age_minutes = (now_utc.timestamp() - collected_at) / 60.0
+    else:
+        # On the first post-migration run a legacy snapshot has no upstream
+        # collection timestamp, so use generated_at once for compatibility.
+        generated_at = data.get("generated_at")
+        if not generated_at:
+            return None, None
+        try:
+            gen_dt = datetime.fromisoformat(generated_at)
+        except (ValueError, TypeError):
+            return None, None
+        if gen_dt.tzinfo is None:
+            gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+        age_minutes = (now_utc - gen_dt).total_seconds() / 60.0
     if age_minutes < 0 or age_minutes > max_age_minutes:
         return None, None
     return windows, age_minutes
@@ -745,40 +803,69 @@ def _collect_claude_estimate():
 def collect_claude():
     result = {"provider": "claude", "source": "estimate", "ok": True}
 
-    # Dedicated tracker session's statusLine export, if fresh, wins outright
-    # -- it is genuinely authoritative (sourced from the account's own real
-    # inference responses) and needs no network call, so it skips straight
-    # past the now-expected 403/429 from a setup-token-scoped fleet token.
-    sl_windows, sl_age = _read_statusline_cache(
-        CONFIG["claude_statusline_cache_max_age_min"],
-        CONFIG.get("claude_statusline_cache_max_age_min_by_window"),
-    )
-    if sl_windows is not None:
-        result["source"] = "authoritative_statusline"
-        result["windows"] = sl_windows
-        result["statusline_age_min"] = round(sl_age, 1)
-        return result
+    headers_enabled = _claude_usage_headers_enabled()
+    if headers_enabled:
+        windows, err, err_kind = _collect_claude_usage_headers()
+        if windows is not None:
+            result["source"] = "authoritative"
+            result["windows"] = windows
+            result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp()
+            return result
+        errors = [err] if err else []
+        saw_transient = err_kind == "transient"
+    else:
+        # Complete v1-compatible order: statusline first with its historical
+        # per-window ceilings, then the legacy endpoint and its fallbacks.
+        sl_windows, sl_age = _read_statusline_cache(
+            LEGACY_STATUSLINE_CACHE_MAX_AGE_MIN,
+            LEGACY_STATUSLINE_CACHE_MAX_AGE_MIN_BY_WINDOW,
+        )
+        if sl_windows is not None:
+            result["source"] = "authoritative_statusline"
+            result["windows"] = sl_windows
+            result["statusline_age_min"] = round(sl_age, 1)
+            result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp() - (sl_age * 60)
+            return result
+        errors = []
+        saw_transient = False
+        windows, legacy_err, legacy_kind = _collect_claude_authoritative()
+        if windows is not None:
+            result["source"] = "authoritative"
+            result["windows"] = windows
+            result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp()
+            return result
+        if legacy_err:
+            errors.append(legacy_err)
+        saw_transient = saw_transient or legacy_kind == "transient"
 
-    windows, err, err_kind = _collect_claude_authoritative()
-    if windows is not None:
-        result["source"] = "authoritative"
-        result["windows"] = windows
-        return result
+    result["auth_error"] = "; ".join(errors)
 
-    result["auth_error"] = err
+    if headers_enabled:
+        # The tracker export remains fallback-only after the direct query.
+        sl_windows, sl_age = _read_statusline_cache(
+            CONFIG["claude_statusline_cache_max_age_min"],
+            CONFIG.get("claude_statusline_cache_max_age_min_by_window"),
+        )
+        if sl_windows is not None:
+            result["source"] = "authoritative_statusline"
+            result["windows"] = sl_windows
+            result["statusline_age_min"] = round(sl_age, 1)
+            result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp() - (sl_age * 60)
+            return result
 
     # A transient failure (429/5xx/timeout/unparseable) must not throw away
     # real numbers -- reuse the last authoritative snapshot if it's fresh
     # enough. A missing token or a 403 (real scope problem) skips the cache
     # and goes straight to the estimate.
-    if err_kind == "transient":
+    if saw_transient:
         cached_windows, age_minutes = _read_cached_claude_authoritative(
-            CONFIG["claude_authoritative_cache_max_age_min"]
+            CONFIG["claude_authoritative_cache_max_age_min"] if headers_enabled else LEGACY_AUTHORITATIVE_CACHE_MAX_AGE_MIN
         )
         if cached_windows is not None:
             result["source"] = "authoritative_cached"
             result["windows"] = cached_windows
             result["cache_age_minutes"] = round(age_minutes, 1)
+            result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp() - (age_minutes * 60)
             return result
 
     try:

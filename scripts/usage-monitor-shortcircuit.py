@@ -14,7 +14,7 @@ own "say so, don't silently build the wrong thing" rule: the request as
 phrased ("ha a generated_at mezo NEM valtozott") would compare
 usage-latest.json's own `generated_at` timestamp VALUE. That field is
 unconditionally re-stamped to `now` by scripts/usage-collect.py's
-build_snapshot() on EVERY run of its own 5-minute cron, REGARDLESS of
+build_snapshot() on EVERY run of its own 10-minute cron, REGARDLESS of
 whether the underlying quota numbers moved. Since this heartbeat runs every
 30 minutes (6x the collector's own cadence), generated_at is virtually
 guaranteed to differ between any two consecutive heartbeat runs -- comparing
@@ -22,13 +22,14 @@ it verbatim would make this short-circuit a permanent no-op. This script
 instead compares the MEANINGFUL fields: claude.source, both window
 used_percent/resets_at values, a normalized view of store/.usage-fleet-pause,
 AND (Codex review, 2026-09-12, 1st round) a FRESHNESS CLASS derived from
-generated_at (fresh: <=15min old, matching the original prompt's own
+the upstream authoritative_collected_at_unix when present (otherwise
+generated_at; fresh: <=25min old, matching the collector's current
 staleness threshold; stale: older; missing/invalid otherwise) -- the class,
 never the raw timestamp. This closes the gap the first draft had: without
 tracking freshness at all, a FROZEN collector (crashed but its last output
 file still sitting there with old-but-otherwise-unchanged numbers) would
 short-circuit FOREVER and the heartbeat's own stale-episode handling (which
-depends on noticing >15min staleness) would never get to run even once.
+depends on noticing >25min staleness) would never get to run even once.
 
 IMPORTANT DEVIATION #2 (Codex review, 2026-09-12, 1st round): the original
 draft of this short-circuit also gated the heartbeat's STUCK-MENU tmux scan
@@ -78,7 +79,8 @@ LAST_CHECK_PATH = Path(os.environ.get("USAGE_MONITOR_LAST_CHECK_PATH", str(DEFAU
 # Same threshold the original usage-monitor prompt itself uses for its own
 # AG.1 ("kiesesi epizod") stale-source branch -- kept in sync deliberately,
 # not re-derived, so the two can never silently drift apart.
-STALE_THRESHOLD_SECONDS = 15 * 60
+# One missed ten-minute collection plus scheduler jitter remains acceptable.
+STALE_THRESHOLD_SECONDS = 25 * 60
 
 # Fields compared for the skip decision. generated_at itself is recorded in
 # the state file for humans debugging this script, but MUST NOT be added
@@ -96,17 +98,20 @@ COMPARE_KEYS = [
 ]
 
 
-def classify_freshness(generated_at_iso, now):
-    """fresh / stale / missing / invalid -- never the raw timestamp itself."""
-    if not generated_at_iso:
-        return "missing"
-    try:
-        gen_dt = datetime.fromisoformat(generated_at_iso)
-    except (ValueError, TypeError):
-        return "invalid"
-    if gen_dt.tzinfo is None:
-        gen_dt = gen_dt.replace(tzinfo=timezone.utc)
-    age_seconds = (now - gen_dt).total_seconds()
+def classify_freshness(generated_at_iso, authoritative_collected_at_unix, now):
+    """fresh / stale / missing / invalid, preferring upstream data age."""
+    if isinstance(authoritative_collected_at_unix, (int, float)) and not isinstance(authoritative_collected_at_unix, bool):
+        age_seconds = now.timestamp() - authoritative_collected_at_unix
+    else:
+        if not generated_at_iso:
+            return "missing"
+        try:
+            gen_dt = datetime.fromisoformat(generated_at_iso)
+        except (ValueError, TypeError):
+            return "invalid"
+        if gen_dt.tzinfo is None:
+            gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+        age_seconds = (now - gen_dt).total_seconds()
     if age_seconds < 0:
         # Clock skew or a future timestamp -- do not trust it as "fresh".
         return "invalid"
@@ -162,15 +167,17 @@ def build_current_state(now):
         five = windows.get("five_hour") or {}
         seven = windows.get("seven_day") or {}
         generated_at = raw.get("generated_at")
+        collected_at = claude.get("authoritative_collected_at_unix")
         state = {
             "usage_latest_status": "ok",
-            "freshness": classify_freshness(generated_at, now),
+            "freshness": classify_freshness(generated_at, collected_at, now),
             "source": claude.get("source"),
             "five_hour_percent": five.get("used_percent"),
             "seven_day_percent": seven.get("used_percent"),
             "five_hour_resets_at": five.get("resets_at"),
             "seven_day_resets_at": seven.get("resets_at"),
             "generated_at": generated_at,  # diagnostics only, not in COMPARE_KEYS
+            "authoritative_collected_at_unix": collected_at,  # diagnostics only
         }
     state["pause_state"] = read_pause_state()
     return state

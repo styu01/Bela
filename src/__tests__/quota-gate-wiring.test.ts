@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { quotaWorkClass } from '../web/schedule-runner.js'
 import { parseQuotaSnapshot } from '../quota-snapshot.js'
+import { decideQuotaAction } from '../quota-gate.js'
 
 // The gate itself is covered in quota-gate.test.ts. This file covers the two
 // seams around it: how a scheduled task is classified, and how the collector's
@@ -15,8 +16,21 @@ describe('quotaWorkClass', () => {
     expect(quotaWorkClass({ type: 'command' })).toBe('free')
   })
 
-  it('classifies heartbeats as background', () => {
+  it('classifies ordinary heartbeats as background', () => {
     expect(quotaWorkClass({ type: 'heartbeat' })).toBe('background')
+  })
+
+  it('classifies quota-exempt safety heartbeats as owner-facing', () => {
+    const workClass = quotaWorkClass({ type: 'heartbeat', quotaExempt: true })
+    expect(workClass).toBe('owner-facing')
+    expect(decideQuotaAction({
+      workClass,
+      nowMs: 1_000_000,
+      snapshot: {
+        source: 'authoritative', generatedAtMs: 999_000,
+        windows: { five_hour: { used_percent: 95, resets_at: 2_000 } },
+      },
+    }).action).toBe('run')
   })
 
   it('treats owner-visible and unknown future types as owner-facing', () => {
@@ -70,6 +84,24 @@ describe('parseQuotaSnapshot', () => {
     expect(s?.source).toBe('authoritative')
     expect(s?.generatedAtMs).toBe(Date.parse('2026-08-17T14:53:57.362898+00:00'))
     expect(s?.windows?.five_hour?.used_percent).toBe(10)
+  })
+
+  it('prefers authoritative collection time while retaining generated_at fallback', () => {
+    const withCollected = parseQuotaSnapshot({
+      ...onDisk,
+      claude: { ...onDisk.claude, authoritative_collected_at_unix: 1786989000 },
+    })
+    expect(withCollected?.authoritativeCollectedAtMs).toBe(1786989000 * 1000)
+    expect(parseQuotaSnapshot(onDisk)?.authoritativeCollectedAtMs).toBeNull()
+  })
+
+  it('rejects a present but non-finite authoritative collection time', () => {
+    for (const value of [NaN, Infinity, -Infinity, 'not-a-number']) {
+      expect(parseQuotaSnapshot({
+        ...onDisk,
+        claude: { ...onDisk.claude, authoritative_collected_at_unix: value },
+      })).toBeNull()
+    }
   })
 
   it('returns null for anything that is not a collector snapshot', () => {

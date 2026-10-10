@@ -36,6 +36,8 @@ export interface QuotaWindow {
 export interface QuotaSnapshot {
   /** 'authoritative' | 'authoritative_cached' | 'estimate' | ... */
   source?: string | null
+  /** Real upstream collection time, preferred over file-write timestamp. */
+  authoritativeCollectedAtMs?: number | null
   generatedAtMs?: number | null
   windows?: Record<string, QuotaWindow> | null
 }
@@ -58,7 +60,7 @@ export interface QuotaDecision {
 
 export const QUOTA_GATE = {
   /** A snapshot older than this tells us nothing about now. */
-  staleAfterMs: 20 * 60_000,
+  staleAfterMs: 25 * 60_000,
   /** Background work stops at or above this utilization. */
   deferAtPercent: 85,
   /** ... and also stops above this, if the window is about to reset anyway. */
@@ -121,11 +123,14 @@ export function decideQuotaAction(input: {
     return { action: 'run', reason: `untrusted-source:${source || 'none'}`, pressure: null }
   }
 
-  const generatedAtMs = snapshot.generatedAtMs
-  if (typeof generatedAtMs !== 'number' || Number.isNaN(generatedAtMs)) {
+  const timestampMs = snapshot.authoritativeCollectedAtMs ?? snapshot.generatedAtMs
+  if (typeof timestampMs !== 'number' || !Number.isFinite(timestampMs)) {
     return { action: 'run', reason: 'no-snapshot-timestamp', pressure: null }
   }
-  const ageMs = nowMs - generatedAtMs
+  const ageMs = nowMs - timestampMs
+  if (ageMs < 0) {
+    return { action: 'run', reason: 'future-snapshot-timestamp', pressure: null }
+  }
   if (ageMs > QUOTA_GATE.staleAfterMs) {
     return { action: 'run', reason: `stale-snapshot:${Math.round(ageMs / 60_000)}m`, pressure: null }
   }

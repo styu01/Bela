@@ -30,12 +30,26 @@ export function parseQuotaSnapshot(raw: unknown): QuotaSnapshot | null {
     if (!Number.isNaN(parsed)) generatedAtMs = parsed
   }
 
+  // The collector rewrites generated_at on every run. Prefer the time the
+  // authoritative quota data was actually acquired, but retain generated_at
+  // for the first migration run / old snapshots that do not have it.
+  const collected = c.authoritative_collected_at_unix
+  let authoritativeCollectedAtMs: number | null = null
+  if (collected !== undefined) {
+    // A present but malformed upstream timestamp is not equivalent to an old
+    // snapshot that lacks the field: fail open instead of silently trusting
+    // the freshly rewritten generated_at file timestamp.
+    if (typeof collected !== 'number' || !Number.isFinite(collected)) return null
+    authoritativeCollectedAtMs = collected * 1000
+  }
+
   const windows = c.windows && typeof c.windows === 'object'
     ? (c.windows as QuotaSnapshot['windows'])
     : null
 
   return {
     source: typeof c.source === 'string' ? c.source : null,
+    authoritativeCollectedAtMs,
     generatedAtMs,
     windows,
   }

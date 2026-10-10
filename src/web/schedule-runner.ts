@@ -876,8 +876,9 @@ export function resolveBoundChatId(agentName: string): string | null {
 // all; heartbeats are background checks nobody is waiting for; everything else
 // (task, dream-engine, unknown future types) reports to the owner and is never
 // held back.
-export function quotaWorkClass(task: Pick<ScheduledTask, 'type'>): QuotaWorkClass {
+export function quotaWorkClass(task: Pick<ScheduledTask, 'type' | 'quotaExempt'>): QuotaWorkClass {
   if (task.type === 'command') return 'free'
+  if (task.quotaExempt) return 'owner-facing'
   if (task.type === 'heartbeat') return 'background'
   return 'owner-facing'
 }
