@@ -841,6 +841,18 @@ def strip_technical(text: str) -> str:
     return TECHNICAL.sub(" ", text)
 
 
+# STRIPDASH1109 (upstream e08d720f): a ' -- ' szamlalas a strip_technical() kimeneten futott, az pedig SZOKOZT tesz a
+# technikai regio helyere, ezert maga a kivagas epitette fel a mintat: '--accept_routes=true' (snake_case ag) ' -- =true'
+# lett, es proza-gondolatjelkent bukott, pedig a nyers szovegben nincs ' -- '. A szamlalas mostantol olyan masolaton fut,
+# ahol minden regio egy szokoz- es kotojelmentes helyorzo, igy a kivagas csak elvehet gondolatjelet, letrehozni nem.
+# A valodi ' -- ' egy regio mellett megtartja a sajat szokozeit, es tovabbra is szamit ('ez -- `kod`').
+TECH_PLACEHOLDER = "_"
+
+
+def strip_technical_closed(text: str) -> str:
+    return TECHNICAL.sub(TECH_PLACEHOLDER, text)
+
+
 def strip_for_name(text: str) -> str:
     """A nev-ellenorzes maszkja: csak az egyertelmuen technikai regiok esnek ki."""
     return NAME_MASK.sub(" ", text)
@@ -1143,7 +1155,9 @@ def audit(text: str):
     # (strip_technical utan), igy a kodreszletek/parancsok --flag alakjai nem
     # erintettek -- azok amugy sem " -- " alakuak (nincs szokoz a kotojelek
     # utan), de a technikai regiok kivagasa a biztos hatar.
-    dh = prose.count(" -- ")
+    # STRIPDASH1109: a szamlalas a szokoz nelkuli helyorzos kivagason fut, mert a
+    # szokozos kivagas maga is letre tudta hozni a " -- " mintat.
+    dh = strip_technical_closed(plain).count(" -- ")
     if dh:
         problems.append(
             f"DUPLA KOTOJEL gondolatjel-potlokent {dh} helyen (' -- ') -- Szabi jelzese: "
