@@ -1,0 +1,16 @@
+# User-unit TEMPLATE only. Replace /path/to/marveen before installation.
+# Keep the old stuck-menu-scan heartbeat for the mandatory 3-day comparison.
+# `fleet` defaults to shadow: this unit never sends keys or notifications.
+[Unit]
+Description=Marveen fleet stuck-menu scan in shadow mode
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/marveen
+ExecStart=/bin/bash /path/to/marveen/scripts/stuck-modal-guard.sh fleet
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal

@@ -819,8 +819,12 @@ _TECH_COMMON = r"""
 """
 # CSAK a token-/ekezet-vizsgalat vaghatja ki ezeket: mindharom ag kepes egy
 # tulajdonnevet a toldalekaval egyutt elnyelni, ezert a nev-szabaly nem kapja meg.
+# A shortened hex identifier keeps its Hungarian suffix across an ellipsis.
+# Require >=4 hex characters, an explicit ellipsis, and an attached hyphen:
+# a standalone "es" (even after an identifier) must remain a prose token.
 _TECH_SUFFIXED = r"""
-        \d+(?:[.:,]\d+)*-[^\W\d_]+   # szam + magyar toldalek (8:09-es, 2-es, 17:06-kor)
+        (?<![\w.])[A-Fa-f0-9]{4,}(?:\.{3}|…)-(?:es|as)(?![\w-])
+      | \d+(?:[.:,]\d+)*-[^\W\d_]+   # szam + magyar toldalek (8:09-es, 2-es, 17:06-kor)
       | \b[A-ZÁÉÍÓÖŐÚÜŰ][^\W\d_]*-[a-záéíóöőúüű]{1,4}\b   # tulajdonnev + toldalek (Chrome-ot, Drive-ra)
       | \blevel\s+\d+\b            # angol "level 1" (autonomia-szint, log-szint)
       | \b[a-z]+(?:-[a-z]+){1,4}\b    # kotojeles kisbetus azonosito (feladat- es skill-nevek)
@@ -840,7 +844,10 @@ def strip_for_name(text: str) -> str:
 
 def is_hungarian(text: str) -> bool:
     low = text.lower()
-    return sum(1 for m in HU_MARKERS if m in low) >= 3
+    # Even this short article/conjunction fragment is Hungarian prose, not an
+    # identifier suffix. It otherwise falls below the three-marker threshold.
+    return (sum(1 for m in HU_MARKERS if m in low) >= 3
+            or re.search(r"\baz\s+es\s+a\b", low) is not None)
 
 
 # GATETG816 (2026-08-16, Marveen merese): az is_hungarian() funkcionalis szavakra

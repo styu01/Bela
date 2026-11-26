@@ -336,14 +336,18 @@ Utasítások:
 4. Telegram küldés: a reply tool-lal (chat_id: {{CHAT_ID}})
 5. Ha nincs esemény valamelyik kategóriában, hagyd ki a szekciót teljesen
 
-## Usage-szint ellenőrzés (kötelező, Istvan 2026-10-10)
+## Usage-szint ellenőrzés (kötelező, István 2026-11-07)
 
 Minden új feladat ELŐTT futtasd le egyszer: `python3 /home/kisss/marveen/scripts/usage-check.py`
-(egy sort ír ki a Claude-használatról, a store/usage-latest.json alapján, 10 percenként frissül).
+A sor a **Claude-előfizetés** 5 órás és heti keretét nevezi meg; nem a Codex vagy a Gemini keretét.
 
-- `OK`: dolgozhatsz.
-- `OPATLAN` (80-90%): nagy vagy hosszú feladatot ne kezdj, a már futót befejezheted.
-- `STOP` (90% vagy több): NE végezd el a feladatot. Jelezd BÉLÁnak inter-agent üzenetben, és várj. Csak akkor folytasd, ha Istvan külön, kifejezetten kéri.
-- `ISMERETLEN`: a szint most nem állapítható meg. Dolgozhatsz, de a jelentésedben említsd meg.
+- `OK`: Claude 5 órás <90% ÉS heti <80%. Dolgozhatsz.
+- `FIGYELMEZTETÉS`: Claude 5 órás 90% és 98% között, VAGY heti 80% és 90% között, a STOP-határok elérése nélkül. Óvatos figyelmeztetés, a munka folytatható; ez önmagában nem pause. Az új nagy feladatokat mérlegeld.
+- `STOP`: Claude 5 órás >=98% VAGY heti >=90%. NE kezdj új munkát. Jelezd BÉLÁnak, hogy pontosan melyik Claude-keret és ablak érintett, majd várj. Csak István külön, kifejezett feloldása vagy a flotta-feloldás után folytasd.
+- `ISMERETLEN`: a Claude-szint most nem állapítható meg. Dolgozhatsz, de a jelentésedben említsd meg.
 
-Ha te vagy BÉLA: ugyanez érvényes rád, és STOP esetén Istvant is te értesíted.
+Már elrendelt flotta-pause csak akkor oldható fel, ha Claude 5 órás <90% ÉS heti <80%. A `STOP` megszűnése önmagában nem feloldás. A `store/.usage-fleet-pause` állapotát a flotta-monitor kezeli; kézzel ne írd át.
+
+A Codex és Gemini külön keret. Ellenőrzésükhöz a saját `codex-usage-check.py`, illetve `gemini-usage-check.py` való. A Claude-szabály nem módosítja ezek küszöbeit. Minden használati figyelmeztetés és feloldás nevezze meg a keretet és az ablakot; használj ékezetes magyar szöveget, gondolatjel, em dash és ` -- ` nélkül.
+
+Ha te vagy BÉLA: ugyanez érvényes rád, és STOP esetén Istvánt is te értesíted, a Claude-keret és az érintett ablak megnevezésével.

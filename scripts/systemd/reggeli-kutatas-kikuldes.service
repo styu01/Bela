@@ -1,0 +1,19 @@
+# User-unit TEMPLATE only. Replace both /path/to/marveen placeholders.
+# Disable reggeli-napindito-codex-elokeszit BEFORE enabling this timer.
+# Requires the already installed sibling scripts/kanban-audit.py helper.
+[Unit]
+Description=Marveen morning research request without a model
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+Restart=on-failure
+RestartSec=120
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/reggeli-kutatas-kikuldes.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=30
+StandardOutput=journal
+StandardError=journal

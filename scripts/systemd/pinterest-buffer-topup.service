@@ -1,0 +1,19 @@
+# User-unit TEMPLATE only. Replace both /path/to/marveen paths.
+# Disable the old pinterest-buffer-topup Claude heartbeat BEFORE enabling.
+# Requires pinterest_schedule.py and the installed kanban-audit.py helpers.
+[Unit]
+Description=Marveen approved Pinterest draft scheduling without a model
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+Restart=on-failure
+RestartSec=300
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/pinterest-buffer-topup.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

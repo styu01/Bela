@@ -1,0 +1,20 @@
+# User-unit template only. Replace /path/to/marveen before installation.
+# Installation/enabling is a separate operator action. No dashboard restart.
+# Install checklist: disable old usage-monitor heartbeat first; replace both
+# /path/to/marveen paths; install this and the timer under ~/.config/systemd/user;
+# enable lingering for the user on WSL; verify units; daemon-reload; then enable
+# the timer only after an explicit operator decision. Full commands and WSL
+# limitations: docs/usage-fleet-monitor-review.md.
+[Unit]
+Description=Marveen model-free usage fleet monitor
+# No After=network-online.target: the user manager does not order host networking.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/usage-fleet-monitor.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal

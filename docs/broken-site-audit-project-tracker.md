@@ -57,3 +57,20 @@ Gazdagabb megyék előre, majd minden régió sorban:
   megjegyzés: néhány "hiányzó meta/viewport" megállapítás a quarantine-reader
   feldolgozott markdown-kimenetén alapul, nem 100%-ban nyers forráskód-ellenőrzés.
   Következő kör: Komárom-Esztergom megye.
+- 2026-09-23: Istvan pontosított -- Budapest/Pest megyéből NEM elég 10 jelölt
+  (több ezer weboldal van a régióban), legalább 200 kell első körben.
+  Delegálva `gemini/kutato`-nak (msg #2760). ELSŐ TERV (fájlírás
+  gemini oldalán) MEGHIÚSULT: gemini/kutató jelezte (msg #2769), hogy a
+  szerepköre kizárólag kutatás/elemzés, fájlírásra/módosításra NINCS
+  jogosultsága -- a `/home/bridge/.gemini/antigravity-cli/...` útvonal (amit
+  korábban artifact-linkként küldött) egy teljesen elkülönített sandbox, a
+  BÉLA-oldali fájlrendszerről egyáltalán nem elérhető (`ls /home/bridge/`
+  "No such file or directory"). A `/home/kisss/gemini-shared/` közös
+  könyvtárba SEM tud írni.
+  JAVÍTOTT MÓDSZER (msg #2770): gemini/kutató kis adagokban (max 3-5
+  találat/üzenet) KÜLDI vissza a találatokat inter-agent üzenetben, BÉLA írja
+  ki egyenként .txt fájlba a `/home/kisss/gemini-shared/broken-site-audit-budapest-pest-200/`
+  könyvtárba, ahogy megérkeznek -- ez tartja meg az eredeti célt (ha gemini
+  kerete elfogy menet közben, a már elküldött adagok ne vesszenek el), csak a
+  fájlírás felelőssége BÉLA-nál van, nem gemininél. Napi állapot-ellenőrzés
+  beütemezve (`broken-site-audit-bp-pest-gemini-checkin`, 10:00 CEST).

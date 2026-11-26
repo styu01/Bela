@@ -1,0 +1,21 @@
+# User-unit TEMPLATE only. Replace both /path/to/marveen placeholders.
+# Disable bumblebee-hygiene-scan BEFORE enabling this timer.
+# incomplete exits 0; notification/error failures retry at most five starts per hour.
+# Pending notification remains after the retry limit; operator intervention may be needed.
+# Requires the installed scripts/kanban-audit.py helper; no pip dependencies.
+[Unit]
+Description=Marveen local known-threat supply-chain inventory
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+Restart=on-failure
+RestartSec=300
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/supply-chain-scan.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal

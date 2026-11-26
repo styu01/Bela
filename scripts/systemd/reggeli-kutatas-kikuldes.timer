@@ -1,0 +1,14 @@
+# User-unit TEMPLATE only. No installation or enabling is performed.
+# Missed calendar events must not be replayed after boot/enable.
+[Unit]
+Description=Marveen morning research request at 0530 Budapest time
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 Europe/Budapest
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit=reggeli-kutatas-kikuldes.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+# User-unit TEMPLATE only. No automatic installation or enabling.
+[Unit]
+Description=Marveen kanban audit at 08, 12, 16 and 20 Budapest time
+
+[Timer]
+OnCalendar=*-*-* 08,12,16,20:00:00 Europe/Budapest
+AccuracySec=1min
+Persistent=true
+Unit=kanban-audit.service
+
+[Install]
+WantedBy=timers.target

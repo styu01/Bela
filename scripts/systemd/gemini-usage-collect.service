@@ -1,0 +1,15 @@
+# User-unit TEMPLATE only. Replace both /path/to/marveen placeholders.
+# Not installed or enabled by this file. Runs only the agy /usage command.
+[Unit]
+Description=Collect Gemini weekly quota without a model call
+
+[Service]
+Type=oneshot
+SuccessExitStatus=75
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/gemini-usage-collect.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal

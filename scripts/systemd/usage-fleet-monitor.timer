@@ -1,0 +1,16 @@
+# User-unit template only. Do not enable while the old heartbeat is active.
+# Install alongside usage-fleet-monitor.service after replacing its repo paths.
+# WSL needs systemd support and user lingering; see the review document for the
+# disable-old / verify / daemon-reload / enable-timer checklist. This is a file
+# template, not an installer, and has no side effects by itself.
+[Unit]
+Description=Check Marveen fleet usage every 10 minutes without a model
+
+[Timer]
+OnCalendar=*-*-* *:00,10,20,30,40,50:00
+AccuracySec=30s
+Persistent=true
+Unit=usage-fleet-monitor.service
+
+[Install]
+WantedBy=timers.target

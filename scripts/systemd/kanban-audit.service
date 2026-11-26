@@ -1,0 +1,18 @@
+# User-unit TEMPLATE. Replace both /path/to/marveen paths before installation.
+# Disable the old kanban-audit heartbeat before enabling this timer.
+# No installation or enabling is performed by this file.
+# Defaults use this script's repo/store for DB, token and state, independent
+# of cwd. Explicit relative --state-dir/--db paths use WorkingDirectory.
+# /usr/bin/python3 is absolute: the service does not depend on PATH.
+[Unit]
+Description=Marveen read-only kanban audit without a model
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/kanban-audit.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal

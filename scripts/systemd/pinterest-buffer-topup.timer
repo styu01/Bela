@@ -1,0 +1,12 @@
+# User-unit TEMPLATE only. No installation/enabling is performed.
+[Unit]
+Description=Marveen Pinterest Buffer top-up daily at 07 Budapest time
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 Europe/Budapest
+AccuracySec=1min
+Persistent=true
+Unit=pinterest-buffer-topup.service
+
+[Install]
+WantedBy=timers.target

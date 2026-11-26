@@ -1,0 +1,12 @@
+# User-unit TEMPLATE only. Never run alongside the old Claude heartbeat.
+[Unit]
+Description=Weekly Marveen supply-chain scan Monday 09 Budapest time
+
+[Timer]
+OnCalendar=Mon *-*-* 09:00:00 Europe/Budapest
+AccuracySec=1min
+Persistent=true
+Unit=supply-chain-scan.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,24 @@
+# User-unit TEMPLATE only. Replace both /path/to/marveen placeholders.
+# Disable the old heti-elakadas-audit heartbeat BEFORE enabling this timer.
+# No installation or enabling is performed by this template.
+# Requires the sibling scripts/kanban-audit.py already installed in this repo.
+[Unit]
+Description=Marveen read-only weekly stuck-state audit without a model
+# Count the initial start and two retries within one hour. A default short
+# interval would never limit restarts separated by 300 seconds.
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+# Optional operator-provided fallback unit, not included or enabled here:
+# OnFailure=marveen-audit-failure@%n.service
+
+[Service]
+Type=oneshot
+Restart=on-failure
+RestartSec=300
+WorkingDirectory=/path/to/marveen
+ExecStart=/usr/bin/python3 /path/to/marveen/scripts/heti-elakadas-audit.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,25 @@
+{
+  "id": "browser-agent",
+  "label": "Böngésző-ügynök (Playwright, interaktív)",
+  "description": "Headless Playwright MCP-t futtató, adverzariális web-tartalmat megnyitó és azzal interakciót végző ügynöknek (vizsla). Host-védelmi hard-deny: fájl-fel/letöltés, videó/trace/storage-state mentés-olvasás, tetszőleges JS-futtatás, route-eltérítés mind tiltva.",
+  "permissionMode": "permissive",
+  "filesystem": {
+    "allow": [],
+    "deny": [
+      "mcp__claude_ai_Supabase__*",
+      "mcp__playwright__browser_file_upload",
+      "mcp__playwright__browser_pdf_save",
+      "mcp__playwright__browser_evaluate",
+      "mcp__playwright__browser_run_code_unsafe",
+      "mcp__playwright__browser_install",
+      "mcp__playwright__browser_route*",
+      "mcp__playwright__browser_unroute",
+      "mcp__playwright__browser_storage_state",
+      "mcp__playwright__browser_set_storage_state",
+      "mcp__playwright__browser_start_video",
+      "mcp__playwright__browser_stop_video",
+      "mcp__playwright__browser_start_tracing",
+      "mcp__playwright__browser_stop_tracing"
+    ]
+  }
+}

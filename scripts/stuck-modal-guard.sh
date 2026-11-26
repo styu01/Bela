@@ -30,6 +30,11 @@
 #     watchdogs never double-respawn (no storm), plus its own consecutive cap.
 #   - Stamp writes are best-effort (disk-full tolerance).
 #
+# Fleet extension: `stuck-modal-guard.sh fleet [--mode shadow|active] [--dry-run]`
+# scans agent sessions with a strict session-limit recognizer. Default shadow
+# mode NEVER sends keys or notifications. The stdlib Python helper owns fleet
+# locking, state and JSONL audit; it does not replace main-session recovery.
+#
 # Modes (for tests; mirror the pure functions in src/pane-state.ts):
 #   stuck-modal-guard.sh classify         < pane.txt   -> prints idle|busy|stuck|empty
 #   stuck-modal-guard.sh decide STATE FIRSTSEEN NOW     -> prints the action
@@ -279,6 +284,7 @@ run_guard() {
 }
 
 case "${1:-}" in
+  fleet)          shift; exec python3 "$INSTALL_DIR/scripts/stuck-modal-guard-fleet.py" "$@" ;;
   classify)       classify_pane ;;
   decide)         decide_action "${2:-}" "${3:-0}" "${4:-0}" ;;
   sanitize-model) sanitize_model "${2:-}" ;;

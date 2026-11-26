@@ -16,7 +16,7 @@ _spec.loader.exec_module(collector)
 
 
 def status(used):
-    return "STOP" if used >= 90 else "OPATLAN" if used >= 80 else "OK"
+    return "STOP" if used >= 90 else "FIGYELMEZTETÉS" if used >= 80 else "OK"
 
 
 def format_snapshot(snapshot, now=None):

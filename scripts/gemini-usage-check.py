@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Print one Gemini quota line, reading only the local usage snapshot."""
+import sys
+sys.dont_write_bytecode = True
+import argparse
+import importlib.util
+import json
+import os
+import stat
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location("gemini_usage_collect", Path(__file__).with_name("gemini-usage-collect.py"))
+collector = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(collector)
+
+
+def rounded(value):
+    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def display(value):
+    value = rounded(value)
+    return format(value, "f").rstrip("0").rstrip(".") if value % 1 else str(int(value))
+
+
+def status(used):
+    used = rounded(used)
+    return "STOP" if used >= 90 else "FIGYELMEZTETÉS" if used >= 80 else "OK"
+
+
+def format_snapshot(snapshot, now=None):
+    now = datetime.now(timezone.utc) if now is None else now
+    if not isinstance(now, datetime) or now.tzinfo is None or not isinstance(snapshot, dict):
+        return "Gemini heti keret: ISMERETLEN (missing)"
+    observed = collector.parse_time(snapshot.get("collectedAt"))
+    groups = snapshot.get("groups")
+    if (observed is None or not isinstance(groups, dict) or set(groups) != set(collector.GROUPS.values())
+            or not all(collector.valid_group(v) for v in groups.values())):
+        return "Gemini heti keret: ISMERETLEN (missing)"
+    if not 0 <= (now - observed).total_seconds() <= collector.FRESH_SECONDS:
+        return "Gemini heti keret: ISMERETLEN (stale)"
+    gemini, other = groups["gemini"], groups["claude_gpt"]
+    if collector.parse_time(gemini["resets_at"]) <= now:
+        return "Gemini heti keret: ISMERETLEN (reset)"
+    other_reset = " (reset elmúlt)" if collector.parse_time(other["resets_at"]) <= now else ""
+    used = rounded(gemini["used_pct"])
+    return (f"Gemini heti keret {display(used)}% {status(used)}, "
+            f"maradt: {display(gemini['remaining_pct'])}%, reset: {gemini['resets_at']} | "
+            f"Gemini szolgáltatói Claude/GPT heti keret {display(other['used_pct'])}% használt, maradt: {display(other['remaining_pct'])}%, "
+            f"reset: {other['resets_at']}{other_reset}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", type=Path, default=collector.DEFAULT_STORE / collector.SNAPSHOT)
+    parser.add_argument("--now")
+    args = parser.parse_args(argv)
+    now = collector.parse_time(args.now) if args.now else datetime.now(timezone.utc)
+    try:
+        if now is None:
+            raise ValueError()
+        directory = collector.open_store(args.input.parent)
+        try:
+            fd = os.open(args.input.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > collector.MAX_OUTPUT:
+                raise ValueError()
+            raw = stream.read(collector.MAX_OUTPUT + 1)
+            if len(raw) > collector.MAX_OUTPUT:
+                raise ValueError()
+        line = format_snapshot(json.loads(raw.decode("utf-8")), now)
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        line = "Gemini heti keret: ISMERETLEN (missing)"
+    print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

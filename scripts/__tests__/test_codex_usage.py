@@ -271,8 +271,8 @@ class CodexUsageTests(unittest.TestCase):
         self.assertEqual(list(self.root.glob(".snapshot.json.*")), [])
 
     def test_checker_thresholds_for_both_windows(self):
-        for used, label in ((0, "OK"), (79.9, "OK"), (80, "OPATLAN"),
-                            (89.9, "OPATLAN"), (90, "STOP"), (100, "STOP")):
+        for used, label in ((0, "OK"), (79.9, "OK"), (80, "FIGYELMEZTETÉS"),
+                            (89.9, "FIGYELMEZTETÉS"), (90, "STOP"), (100, "STOP")):
             with self.subTest(used=used):
                 self.write(rows=[row(used=used, weekly=used)])
                 line = check.format_snapshot(self.snapshot(), NOW)
@@ -363,7 +363,7 @@ class FreshnessRegressionTests(unittest.TestCase):
         self.assertNotIn("ISMERETLEN",line)
 
     def test_stale_status_80_90_thresholds_are_unchanged(self):
-        for used, status in ((0,"OK"),(10,"OK"),(79.999,"OK"),(80,"OPATLAN"),(85,"OPATLAN"),(89.999,"OPATLAN"),(90,"STOP"),(92,"STOP"),(95,"STOP"),(100,"STOP")):
+        for used, status in ((0,"OK"),(10,"OK"),(79.999,"OK"),(80,"FIGYELMEZTETÉS"),(85,"FIGYELMEZTETÉS"),(89.999,"FIGYELMEZTETÉS"),(90,"STOP"),(92,"STOP"),(95,"STOP"),(100,"STOP")):
             self.write(rows=[row(used=used,weekly=used)])
             now = NOW+timedelta(minutes=31)
             line = check.format_snapshot(collect.collect(self.sessions,now),now)
@@ -371,7 +371,7 @@ class FreshnessRegressionTests(unittest.TestCase):
             self.assertNotIn("OK",line)
             expected = f"{status}-szint, " if used >= 80 else ""
             self.assertEqual(line.count(f"legalább {used:g}% ({expected}nem friss)"),2)
-            self.assertNotIn("STOP-szint" if used < 90 else "OPATLAN-szint",line)
+            self.assertNotIn("STOP-szint" if used < 90 else "FIGYELMEZTETÉS-szint",line)
             self.assertEqual(line.count("legalább"),2)
             self.assertEqual(line.count("nem friss"),2)
 
@@ -461,8 +461,8 @@ class FreshnessRegressionTests(unittest.TestCase):
                 self.assertEqual(line.count("nem friss"),2-expired,index)
                 self.assertEqual(line.count("előző mérés"),expired,index)
                 self.assertNotIn("OK",line)
-                expected_level = "STOP" if used>=90 else "OPATLAN" if used>=80 else None
-                for level in ("STOP","OPATLAN"):
+                expected_level = "STOP" if used>=90 else "FIGYELMEZTETÉS" if used>=80 else None
+                for level in ("STOP","FIGYELMEZTETÉS"):
                     self.assertEqual(line.count(f"{level}-szint"),2-expired if level==expected_level else 0,index)
             self.assertEqual(line.count("aktuális ISMERETLEN"),expired,index)
 
@@ -481,7 +481,7 @@ class FreshnessRegressionTests(unittest.TestCase):
                             self.assertIn(f"aktuális ISMERETLEN; előző mérés {value}% (reset előtt)",part)
                             self.assertNotIn("-szint",part)
                         else:
-                            prefix = "STOP-szint, " if value>=90 else "OPATLAN-szint, " if value>=80 else ""
+                            prefix = "STOP-szint, " if value>=90 else "FIGYELMEZTETÉS-szint, " if value>=80 else ""
                             self.assertIn(f"legalább {value}% ({prefix}nem friss)",part)
 
     def test_past_reset_never_calls_old_usage_a_lower_bound_or_work_permission(self):
@@ -493,7 +493,7 @@ class FreshnessRegressionTests(unittest.TestCase):
             self.assertEqual(line.count("előző mérés"),2)
             self.assertEqual(line.count("aktuális ISMERETLEN"),2)
             self.assertNotIn("legalább",line)
-            for label in ("OK","OPATLAN","STOP"):self.assertNotIn(label,line)
+            for label in ("OK","FIGYELMEZTETÉS","STOP"):self.assertNotIn(label,line)
 
     def test_24_hours_of_ten_minute_idle_polls_are_silent(self):
         self.write(rows=[row()]);output = self.root/"idle.json"

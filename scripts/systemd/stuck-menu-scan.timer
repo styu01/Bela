@@ -1,0 +1,12 @@
+# TEMPLATE only. No automatic installation, enabling or mode switch.
+[Unit]
+Description=Observe fleet menus every 30 minutes without a model
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+AccuracySec=30s
+Persistent=true
+Unit=stuck-menu-scan.service
+
+[Install]
+WantedBy=timers.target

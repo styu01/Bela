@@ -1,0 +1,12 @@
+# User-unit TEMPLATE only. Do not install or enable as part of implementation.
+[Unit]
+Description=Collect Gemini usage every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+AccuracySec=30s
+Persistent=true
+Unit=gemini-usage-collect.service
+
+[Install]
+WantedBy=timers.target

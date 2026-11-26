@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-line Claude admission hint from store/usage-latest.json.
 
-Exit 0: OK or OPATLAN; 2: STOP; 3: ISMERETLEN.
+Exit 0: OK or FIGYELMEZTETÉS; 2: STOP; 3: ISMERETLEN.
 """
 import json
 import math
@@ -15,12 +15,12 @@ FRESH_AFTER_SECONDS = 25 * 60
 
 
 def unknown():
-    print("USAGE ISMERETLEN")
+    print("USAGE styu01 Claude 5 órás/heti keret ISMERETLEN")
     return 3
 
 
 def valid_percent(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 100
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100 and math.isfinite(value)
 
 
 def snapshot_age_seconds(data, claude, now):
@@ -38,7 +38,10 @@ def snapshot_age_seconds(data, claude, now):
 
 def valid_future_reset(window, now):
     reset = window.get("resets_at")
-    return isinstance(reset, (int, float)) and not isinstance(reset, bool) and math.isfinite(reset) and reset > now.timestamp()
+    try:
+        return isinstance(reset, (int, float)) and not isinstance(reset, bool) and math.isfinite(reset) and reset > now.timestamp()
+    except OverflowError:
+        return False
 
 
 def main():
@@ -53,14 +56,14 @@ def main():
         seven_window = windows.get("seven_day") or {}
         five = five_window.get("used_percent")
         seven = seven_window.get("used_percent")
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
         return unknown()
     if age_seconds < 0 or age_seconds > FRESH_AFTER_SECONDS or not valid_percent(five) or not valid_percent(seven) or not valid_future_reset(five_window, now) or not valid_future_reset(seven_window, now):
         return unknown()
     # Display and threshold decisions share exactly the same rounded values.
     five, seven = round(five, 2), round(seven, 2)
-    status = "STOP" if max(five, seven) >= 90 else "OPATLAN" if max(five, seven) >= 80 else "OK"
-    print(f"USAGE 5h={five:g}% 7d={seven:g}% friss({int(age_seconds // 60)}p) {status}")
+    status = "STOP" if five >= 98 or seven >= 90 else "FIGYELMEZTETÉS" if five >= 90 or seven >= 80 else "OK"
+    print(f"USAGE styu01 Claude 5 órás keret={five:g}% heti keret={seven:g}% friss({int(age_seconds // 60)}p) {status}")
     return 2 if status == "STOP" else 0
 
 
