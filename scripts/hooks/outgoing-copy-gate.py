@@ -96,7 +96,11 @@ _PYTHON = re.compile(r"^python3?$", re.I)
 # teszt-hibakent jelenjen meg, ne incidenskent (Marveen, msg 14289).
 _NODEISH = re.compile(r"^(node|tsx|ts-node|deno|bun|npx)$", re.I)
 _GRAPHMAIL = re.compile(r"^graph-mail(\.ts|\.js)?$", re.I)
-_WRAPPER_SHELL = re.compile(r"^(sh|bash|zsh|dash)$", re.I)
+# WRAPSHELL1126: the ksh family (ksh = ksh93, mksh, lksh), busybox's ash, and the restricted variants all take
+# `-c STRING` with the sh option rules (measured on the real shells). 'busybox sh' already steps to 'sh' through the
+# launcher table. fish has its own argument rules: _FISH_SHELL / _fish_command_strings.
+_WRAPPER_SHELL = re.compile(r"^(sh|bash|zsh|dash|ksh|ksh93|mksh|lksh|ash|rbash|rzsh|rksh|rksh93|rmksh|rlksh)$", re.I)
+_FISH_SHELL = re.compile(r"^fish$", re.I)
 _CURLISH = re.compile(r"^(curl|wget|http)$", re.I)
 # Interpreter kod-string argumentum (python -c / node -e): az interpreternek
 # atadott kod MUVELET, nem tartalom -- a kod-szintu kuldes-hivasokra szurunk.
@@ -564,9 +568,15 @@ def _shell_string_is_send(s: str, depth: int) -> bool:
 
 
 _SHELL_LONG_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
+# WRAPSHELL1126: mksh/lksh also take a value after 'T' ('-T /dev/ttyN', '-T -'; in bash 'T' is a plain flag), and
+# 'ksh' may be mksh, so the whole ksh family reads it so. ksh93 RUNS its first operand as a command line when no
+# file of that name exists (measured: "ksh 'sendmail a@b.hu'" sends, "ksh 'nonexist foo'" says "nonexist: not
+# found"), so for ksh/ksh93 without -c the first operand is the command string.
+_KSH_FAMILY = re.compile(r"^r?(ksh|ksh93|mksh|lksh)$", re.I)
+_KSH93_OPERAND = re.compile(r"^r?ksh(93)?$", re.I)
 
 
-def _shell_command_string(rest):
+def _shell_command_string(rest, prog: str = "sh"):
     """The command string of `sh|bash|zsh|dash [options] -c STRING`, or None (SHCLUSTER1126).
 
     The shell takes the first NON-option argument as the string once -c was given anywhere among the options, and
@@ -576,6 +586,7 @@ def _shell_command_string(rest):
     options, a lone '+' is skipped. Before this, only a bare '-c' token followed directly by the string was seen:
     'bash -lc "sendmail x"' and 'sh -ec "sendmail x"' passed both gates while bash ran them.
     Mirrored in email-send-gate.mjs (shellCommandString)."""
+    value_chars = "oOT" if _KSH_FAMILY.match(prog) else "oO"
     saw_c, i = False, 0
     while i < len(rest):
         t = rest[i]
@@ -597,10 +608,68 @@ def _shell_command_string(rest):
             if t[0] == "-" and "c" in t[1:]:
                 saw_c = True
             # SHCLUSTERFIX1126: each o/O of the word swallows one following argument ('-euxo pipefail -c ...').
-            i += 1 + sum(1 for ch in t[1:] if ch in "oO")
+            i += 1 + sum(1 for ch in t[1:] if ch in value_chars)
             continue
         break
-    return rest[i] if saw_c and i < len(rest) else None
+    if i >= len(rest):
+        return None
+    return rest[i] if saw_c or _KSH93_OPERAND.match(prog) else None
+
+
+# WRAPSHELL1126: the strings fish runs: the value of every -c / -C (alone, in a cluster, or attached: '-c"x"',
+# '-Nc x'), '--command' / '--init-command' with '=' or the next argument, including the unique prefixes getopt
+# accepts ('--comm', '--init'). Options end at the first non-option or '--'. Measured on fish 4.2.1. Mirrors
+# fishCommandStrings in email-send-gate.mjs.
+_FISH_SHORT_VALUE = "cCdopfD"
+_FISH_LONG = ("command", "init-command", "debug", "debug-output", "debug-stack-frames", "profile", "profile-startup",
+              "features", "interactive", "login", "no-config", "no-execute", "private", "print-rusage-self",
+              "print-debug-categories", "version", "help")
+_FISH_LONG_VALUE = frozenset({"command", "init-command", "debug", "debug-output", "debug-stack-frames", "profile",
+                              "profile-startup", "features"})
+_FISH_SPLIT = re.compile("[\\s;|&()'\"<>{}$`]+")
+
+
+def _fish_command_strings(rest):
+    out = []
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t == "--":
+            break
+        if t.startswith("--"):
+            name, eq, value = t[2:].partition("=")
+            hits = [name] if name in _FISH_LONG else [lg for lg in _FISH_LONG if lg.startswith(name)]
+            # An ambiguous prefix that could be --command / --init-command is read as one (conservative).
+            runs = any(lg in ("command", "init-command") for lg in hits)
+            takes = any(lg in _FISH_LONG_VALUE for lg in hits)
+            val = None
+            if eq:
+                val = value
+            elif takes:
+                val = rest[i + 1] if i + 1 < len(rest) else None
+                i += 1
+            if runs and val is not None:
+                out.append(val)
+            i += 1
+            continue
+        if len(t) > 1 and t[0] == "-":
+            i += 1
+            for k in range(1, len(t)):
+                ch = t[k]
+                if ch not in _FISH_SHORT_VALUE:
+                    continue
+                val = None
+                if k + 1 < len(t):
+                    val = t[k + 1:]
+                elif i < len(rest):
+                    val = rest[i]
+                    i += 1
+                if ch in "cC" and val is not None:
+                    out.append(val)
+                break
+            continue
+        break
+    return out
 
 
 def _head_is_send(toks, depth: int) -> bool:
@@ -646,7 +715,7 @@ def _head_is_send(toks, depth: int) -> bool:
     if _WRAPPER_SHELL.match(prog):
         # SHCLUSTER1126: the command string is located the way the shell does it (_shell_command_string), so an
         # option cluster that carries c ('bash -lc ...', 'sh -ec ...') counts; it used to need a bare '-c' token.
-        cmd_string = _shell_command_string(rest)
+        cmd_string = _shell_command_string(rest, prog)
         if cmd_string is not None:
             # SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
             # "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash
@@ -656,6 +725,19 @@ def _head_is_send(toks, depth: int) -> bool:
                 if cmd_string.strip():
                     return True
             elif is_send_invocation(cmd_string, _depth=depth + 1):
+                return True
+    if _FISH_SHELL.match(prog):
+        # WRAPSHELL1126: every -c / -C string fish would run. fish syntax is not sh syntax ('echo (sendmail x)' is a
+        # command substitution there), so a sender NAMED anywhere in the string is a send (conservative; 0 fish
+        # calls in the measured fleet corpus), on top of the sh-syntax reading. Same depth bound as the sh family.
+        for fs in _fish_command_strings(rest):
+            if depth >= 3:
+                if fs.strip():
+                    return True
+                continue
+            if _segment_names_sender([w for w in _FISH_SPLIT.split(fs) if w]):
+                return True
+            if is_send_invocation(fs, _depth=depth + 1):
                 return True
     # interpreter kod-string: python -c / node -e / --eval, ami kuldest hiv
     if _PYTHON.match(prog) or _NODEISH.match(prog):

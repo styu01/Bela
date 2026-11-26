@@ -80,7 +80,11 @@ const SENDPY = /^send\.py$/i
 const PYTHON = /^python3?$/i
 const NODEISH = /^(node|tsx|ts-node|deno|bun|npx)$/i
 const GRAPHMAIL = /^graph-mail(\.ts|\.js)?$/i
-const WRAPPER_SHELL = /^(sh|bash|zsh|dash)$/i
+// WRAPSHELL1126: the ksh family (ksh = ksh93, mksh, lksh), busybox's ash, and the restricted variants all take
+// `-c STRING` with the sh option rules (measured on the real shells). 'busybox sh' already steps to 'sh' through
+// the launcher table. fish has its own argument rules: FISH_SHELL / fishCommandStrings.
+const WRAPPER_SHELL = /^(sh|bash|zsh|dash|ksh|ksh93|mksh|lksh|ash|rbash|rzsh|rksh|rksh93|rmksh|rlksh)$/i
+const FISH_SHELL = /^fish$/i
 const CURLISH = /^(curl|wget|http)$/i
 const RESEND_TARGET = /^(https?:\/\/)?([^/@\s]*\.)?api\.resend\.com(\/|$)/i
 const CODE_SEND = /\bsmtplib\b|SMTP\s*\(|\bsendMail\s*\(|\bsendEmail\b|\bmail\.send\b/i
@@ -367,8 +371,15 @@ function shellStringIsSend(s, depth) {
 // next argument as its value, in order. '--rcfile FILE', '--init-file FILE' (bash) and '--emulate NAME' (zsh) take a
 // value, every other '--long' option stands alone, '--' and a lone '-' end the options, a lone '+' is skipped.
 // Mirrors _shell_command_string in outgoing-copy-gate.py.
+// WRAPSHELL1126: mksh/lksh also take a value after 'T' ('-T /dev/ttyN', '-T -'; in bash 'T' is a plain flag), and
+// 'ksh' may be mksh, so the whole ksh family reads it so. ksh93 RUNS its first operand as a command line when no
+// file of that name exists (measured: "ksh 'sendmail a@b.hu'" sends, "ksh 'nonexist foo'" says "nonexist: not
+// found"), so for ksh/ksh93 without -c the first operand is the command string.
 const SHELL_LONG_WITH_VALUE = new Set(['--rcfile', '--init-file', '--emulate'])
-function shellCommandString(rest) {
+const KSH_FAMILY = /^r?(ksh|ksh93|mksh|lksh)$/i
+const KSH93_OPERAND = /^r?ksh(93)?$/i
+function shellCommandString(rest, prog = 'sh') {
+  const valueChars = KSH_FAMILY.test(prog) ? 'oOT' : 'oO'
   let sawC = false
   let i = 0
   while (i < rest.length) {
@@ -382,12 +393,61 @@ function shellCommandString(rest) {
     if (t.length > 1 && (t[0] === '-' || t[0] === '+')) {
       if (t[0] === '-' && t.slice(1).includes('c')) sawC = true
       // SHCLUSTERFIX1126: each o/O of the word swallows one following argument ('-euxo pipefail -c ...').
-      i += 1 + [...t.slice(1)].filter((ch) => ch === 'o' || ch === 'O').length
+      i += 1 + [...t.slice(1)].filter((ch) => valueChars.includes(ch)).length
       continue
     }
     break
   }
-  return sawC && i < rest.length ? rest[i] : null
+  if (i >= rest.length) return null
+  return sawC || KSH93_OPERAND.test(prog) ? rest[i] : null
+}
+
+// WRAPSHELL1126: the strings fish runs: the value of every -c / -C (alone, in a cluster, or attached: '-c"x"',
+// '-Nc x'), '--command' / '--init-command' with '=' or the next argument, including the unique prefixes getopt
+// accepts ('--comm', '--init'). Options end at the first non-option or '--'. Measured on fish 4.2.1.
+const FISH_SHORT_VALUE = 'cCdopfD'
+const FISH_LONG = ['command', 'init-command', 'debug', 'debug-output', 'debug-stack-frames', 'profile',
+  'profile-startup', 'features', 'interactive', 'login', 'no-config', 'no-execute', 'private', 'print-rusage-self',
+  'print-debug-categories', 'version', 'help']
+const FISH_LONG_VALUE = new Set(['command', 'init-command', 'debug', 'debug-output', 'debug-stack-frames', 'profile',
+  'profile-startup', 'features'])
+function fishCommandStrings(rest) {
+  const out = []
+  let i = 0
+  while (i < rest.length) {
+    const t = rest[i]
+    if (t === '--') break
+    if (t.startsWith('--')) {
+      const eq = t.indexOf('=')
+      const name = eq < 0 ? t.slice(2) : t.slice(2, eq)
+      const exact = FISH_LONG.includes(name)
+      const hits = exact ? [name] : FISH_LONG.filter((l) => l.startsWith(name))
+      // An ambiguous prefix that could be --command / --init-command is read as one (conservative).
+      const runs = hits.some((l) => l === 'command' || l === 'init-command')
+      const takes = hits.some((l) => FISH_LONG_VALUE.has(l))
+      let val = null
+      if (eq >= 0) val = t.slice(eq + 1)
+      else if (takes) { val = i + 1 < rest.length ? rest[i + 1] : null; i++ }
+      if (runs && val !== null) out.push(val)
+      i++
+      continue
+    }
+    if (t.length > 1 && t[0] === '-') {
+      i++
+      for (let k = 1; k < t.length; k++) {
+        const ch = t[k]
+        if (!FISH_SHORT_VALUE.includes(ch)) continue
+        let val = null
+        if (k + 1 < t.length) val = t.slice(k + 1)
+        else if (i < rest.length) { val = rest[i]; i++ }
+        if ((ch === 'c' || ch === 'C') && val !== null) out.push(val)
+        break
+      }
+      continue
+    }
+    break
+  }
+  return out
 }
 
 function headIsSend(toks, depth) {
@@ -424,7 +484,7 @@ function headIsSend(toks, depth) {
   if (WRAPPER_SHELL.test(prog)) {
     // SHCLUSTER1126: the command string is located the way the shell does it (shellCommandString), so an
     // option cluster that carries c ('bash -lc ...', 'sh -ec ...') counts; it used to need a bare '-c' token.
-    const cmdString = shellCommandString(rest)
+    const cmdString = shellCommandString(rest, prog)
     if (cmdString !== null) {
       // SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
       // "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash runs
@@ -432,6 +492,16 @@ function headIsSend(toks, depth) {
       // head-depth bound and an eval at the same bound.
       if (depth >= 3) { if (cmdString.trim()) return true }
       else if (isSendInvocation(cmdString, depth + 1)) return true
+    }
+  }
+  if (FISH_SHELL.test(prog)) {
+    // WRAPSHELL1126: every -c / -C string fish would run. fish syntax is not sh syntax ('echo (sendmail x)' is a
+    // command substitution there), so a sender NAMED anywhere in the string is a send (conservative; 0 fish calls
+    // in the measured fleet corpus), on top of the sh-syntax reading. Same depth bound as the sh family.
+    for (const s of fishCommandStrings(rest)) {
+      if (depth >= 3) { if (s.trim()) return true; continue }
+      if (segmentNamesSender(s.split(/[\s;|&()'"<>{}$`]+/).filter(Boolean))) return true
+      if (isSendInvocation(s, depth + 1)) return true
     }
   }
   if (PYTHON.test(prog) || NODEISH.test(prog)) {

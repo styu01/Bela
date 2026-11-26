@@ -1170,6 +1170,156 @@
       "name": "LAUNCHGATE1126: control: a string launcher's own head does not make the sender-token layer refuse a never-exec command",
       "cmd": "flock lk.f grep sendmail /dev/null",
       "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: ksh (ksh93) runs a -c string",
+      "cmd": "ksh -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: ksh93 by name, with a cluster",
+      "cmd": "ksh93 -lc \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: mksh runs a -c string",
+      "cmd": "mksh -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: lksh runs a -c string",
+      "cmd": "lksh -ec \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: mksh -T takes a value (measured: '-T -' detaches and runs the string)",
+      "cmd": "mksh -T - -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: busybox sh (steps to sh through the launcher table)",
+      "cmd": "busybox sh -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: busybox ash",
+      "cmd": "busybox ash -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: ash (Alpine /bin/ash)",
+      "cmd": "ash -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: a restricted shell still runs -c",
+      "cmd": "rbash -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish -c",
+      "cmd": "fish -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish --command=",
+      "cmd": "fish --command=\"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish accepts a unique prefix of --command",
+      "cmd": "fish --comm \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish -C runs its string before -c",
+      "cmd": "fish -C \"sendmail a\" -c true",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish --init-command",
+      "cmd": "fish --init-command \"sendmail a\" -c true",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish runs every -c, not only the first",
+      "cmd": "fish -c \"echo hi\" -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish -c inside a cluster",
+      "cmd": "fish -Nc \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish command substitution (cmd)",
+      "cmd": "fish -c \"echo (sendmail a)\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: fish begin; ...; end block",
+      "cmd": "fish -c \"begin; sendmail a; end\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: PINNED conservative cost: a sender only NAMED in a fish string is refused (fish syntax is not parsed)",
+      "cmd": "fish -c \"echo sendmail\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: control: fish -c takes the NEXT argument, the rest is $argv (fish runs ls)",
+      "cmd": "fish -c ls \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: '-cN' gives -c the value N (fish runs N)",
+      "cmd": "fish -cN \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: fish options end at the script name",
+      "cmd": "fish script.fish -c \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: fish options end at --",
+      "cmd": "fish -- -c \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: fish with a non-sender",
+      "cmd": "fish -c \"git status\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: ksh93 runs its first operand as a command line when no such file exists (measured)",
+      "cmd": "ksh 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: ksh93 operand after an option",
+      "cmd": "ksh93 -x \"cd /tmp && sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPSHELL1126: control: ksh running a script file",
+      "cmd": "ksh deploy.ksh arg",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: mksh does not run its operand as a command line (measured)",
+      "cmd": "mksh \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: ksh with a non-sender",
+      "cmd": "ksh -lc \"ls -la\"",
+      "expected": false
+    },
+    {
+      "name": "WRAPSHELL1126: control: in bash 'T' is a plain flag, the string is still found",
+      "cmd": "bash -T -c \"ls\"",
+      "expected": false
     }
   ]
 }
