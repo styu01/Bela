@@ -263,6 +263,7 @@ const READ_ONLY_SUBCOMMANDS = new Map([
 ])
 // git global options that cannot make git run a program: '-C DIR', '--git-dir', '--work-tree', '--no-pager'... ;
 // '-c', '--config-env' and '--exec-path' can (core.pager, alias.X='!cmd', diff.external), so they are not here.
+// ENVPREFIX1126: '-p' / '--paginate' (run the pager) are not safe either.
 const GIT_SAFE_GLOBAL = new Set(['--no-pager', '-P', '--bare', '--no-optional-locks', '--literal-pathspecs',
   '--no-replace-objects', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs'])
 const GIT_SAFE_GLOBAL_VALUE = new Set(['-C', '--git-dir', '--work-tree', '--namespace'])
@@ -289,6 +290,13 @@ function readOnlyHead(h) {
     while (i < h.length && h[i].startsWith('-')) i++
   }
   if (i >= h.length || !subs.has(h[i])) return false
+  // ENVPREFIX1126: options that make a read-only git subcommand run a program: --ext-diff (diff.external /
+  // GIT_EXTERNAL_DIFF), and 'git add -e / -i / -p' (the editor, the interactive loop).
+  if (prog === 'git') {
+    const args = h.slice(i + 1)
+    if (args.some((t) => t === '--ext-diff')) return false
+    if (h[i] === 'add' && args.some((t) => ['--edit', '--interactive', '--patch'].includes(t) || (/^-[A-Za-z]+$/.test(t) && /[eip]/.test(t)))) return false
+  }
   // 'git grep -O<prog>' / '--open-files-in-pager[=<prog>]' (any unique prefix) runs <prog> on the hits (measured).
   if (prog === 'git' && h[i] === 'grep' && h.slice(i + 1).some((t) =>
     (/^-[A-Za-z]*O/.test(t) && !t.startsWith('--')) || (t.startsWith('--o') && 'open-files-in-pager'.startsWith(t.slice(2).split('=')[0])))) return false
@@ -381,7 +389,27 @@ function commandHeads(toksIn, d = 0, positionalsDone = false) {
   })]
 }
 
+// ENVPREFIX1126 (PROGI msg 6001): an assignment in command position runs its value through the program it
+// configures: 'GIT_EXTERNAL_DIFF="sendmail a" git diff', 'GIT_EDITOR=... git add -e', 'PAGER=... man x'. Production
+// allowed these. The assignments in front of the command (and after 'env') whose value names a sender are a send.
+// Only variables that name a program to RUN count ('env A=sendmail ls' runs no sender: WRAPGATE1126 control).
+const RUNNER_VAR = /^(?:GIT_[A-Z_]*(?:DIFF|EDITOR|PAGER|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND)|[A-Z_]*PAGER|[A-Z_]*EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|[A-Z_]*ASKPASS|BASH_ENV|ENV|PROMPT_COMMAND|SHELL)=/
+function prefixAssignments(toks) {
+  const out = []
+  let i = 0
+  for (;;) {
+    while (i < toks.length && ENV_ASSIGN.test(toks[i])) out.push(toks[i++])
+    if (i < toks.length && basename(toks[i]) === 'env') {
+      i++
+      while (i < toks.length && (toks[i].startsWith('-') || ENV_ASSIGN.test(toks[i]))) { if (ENV_ASSIGN.test(toks[i])) out.push(toks[i]); i++ }
+      continue
+    }
+    return out
+  }
+}
+
 function segmentIsSend(toksIn, depth) {
+  if (prefixAssignments(toksIn).some((a) => RUNNER_VAR.test(a) && CODE_SENDER_LIT.test(a.slice(a.indexOf('=') + 1)))) return true
   const heads = commandHeads(toksIn)
   if (heads.some((h) => headIsSend(h, depth))) return true
   return senderTokenLayer(toksIn, heads)
@@ -401,7 +429,10 @@ function senderTokenLayer(toks, heads) {
   // A wrapper head (kept only so a string launcher's -c STRING is seen) is represented by its stepped heads.
   const hs = heads.filter((h) => h && h.length)
     .filter((h) => { const p = basename(h[0]); return p !== 'eval' && p !== 'find' && !WRAPPERS.has(p) })
-  return hs.length > 0 && !hs.every((h) => NON_EXEC_PROGS.has(basename(h[0])) || readOnlyHead(h))
+  // ENVPREFIX1126: no read-only exemption when the segment carries any assignment (GIT_EXTERNAL_DIFF, GIT_EDITOR,
+  // PAGER... can make the 'read-only' command run a program; PROGI's PoC: 'GIT_EXTERNAL_DIFF=... git log -p --ext-diff').
+  const anyAssign = toks.some((t) => ENV_ASSIGN.test(t))
+  return hs.length > 0 && !hs.every((h) => NON_EXEC_PROGS.has(basename(h[0])) || (!anyAssign && readOnlyHead(h)))
 }
 
 // The value of `-<short>` (alone, or last in a cluster like '-qc'), `--<long> X` or `--<long>=X`, anywhere.

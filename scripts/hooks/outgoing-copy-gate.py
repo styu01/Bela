@@ -471,6 +471,14 @@ def _read_only_head(h) -> bool:
             i += 1
     if i >= len(h) or h[i] not in subs:
         return False
+    # ENVPREFIX1126: --ext-diff, and 'git add -e / -i / -p' run a program (the external diff, the editor, the loop).
+    if prog == "git":
+        args = h[i + 1:]
+        if "--ext-diff" in args:
+            return False
+        if h[i] == "add" and any(t in ("--edit", "--interactive", "--patch")
+                                 or (re.match(r"-[A-Za-z]+$", t) and re.search(r"[eip]", t)) for t in args):
+            return False
     # 'git grep -O<prog>' / '--open-files-in-pager[=<prog>]' (any unique prefix) runs <prog> on the hits (measured).
     if prog == "git" and h[i] == "grep" and any(
             (re.match(r"-[A-Za-z]*O", t) and not t.startswith("--"))
@@ -592,7 +600,31 @@ def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
     return heads
 
 
+# Only variables that name a program to RUN count ('env A=sendmail ls' runs no sender: WRAPGATE1126 control).
+_RUNNER_VAR = re.compile(r"^(?:GIT_[A-Z_]*(?:DIFF|EDITOR|PAGER|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND)|[A-Z_]*PAGER|[A-Z_]*EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|[A-Z_]*ASKPASS|BASH_ENV|ENV|PROMPT_COMMAND|SHELL)=")
+
+
+def _prefix_assignments(toks):
+    """ENVPREFIX1126 (PROGI msg 6001): the assignments in front of the command (and after 'env'). Their value runs
+    through the program they configure ('GIT_EXTERNAL_DIFF="sendmail a" git diff'). Mirrors prefixAssignments."""
+    out, i = [], 0
+    while True:
+        while i < len(toks) and _ENV_ASSIGN.match(toks[i]):
+            out.append(toks[i])
+            i += 1
+        if i < len(toks) and _basename(toks[i]) == "env":
+            i += 1
+            while i < len(toks) and (toks[i].startswith("-") or _ENV_ASSIGN.match(toks[i])):
+                if _ENV_ASSIGN.match(toks[i]):
+                    out.append(toks[i])
+                i += 1
+            continue
+        return out
+
+
 def _segment_is_send(toks, depth: int) -> bool:
+    if any(_RUNNER_VAR.match(a) and _CODE_SENDER_LIT.search(a.split("=", 1)[1]) for a in _prefix_assignments(toks)):
+        return True
     heads = _command_heads(toks)
     if any(_head_is_send(h, depth) for h in heads):
         return True
@@ -621,7 +653,11 @@ def _sender_token_layer(toks, heads) -> bool:
     # A wrapper head (kept only so a string launcher's -c STRING is seen) is represented by its stepped heads.
     hs = [h for h in heads
           if h and _basename(h[0]) not in ("eval", "find") and _basename(h[0]) not in _WRAPPERS]
-    return bool(hs) and not all(_basename(h[0]) in _NON_EXEC_PROGS or _read_only_head(h) for h in hs)
+    # ENVPREFIX1126: no read-only exemption when the segment carries any assignment (GIT_EXTERNAL_DIFF, GIT_EDITOR,
+    # PAGER... can make the 'read-only' command run a program).
+    any_assign = any(_ENV_ASSIGN.match(t) for t in toks)
+    return bool(hs) and not all(_basename(h[0]) in _NON_EXEC_PROGS or (not any_assign and _read_only_head(h))
+                                for h in hs)
 
 
 def _launcher_string(rest, short: str, longs) -> "str | None":

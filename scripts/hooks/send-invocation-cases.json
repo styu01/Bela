@@ -1750,6 +1750,61 @@
       "name": "READONLYSUB1126: control: npm view after an option",
       "cmd": "npm --json view sendmail",
       "expected": false
+    },
+    {
+      "name": "ENVPREFIX1126: GIT_EXTERNAL_DIFF naming the sender in front of git diff (measured)",
+      "cmd": "GIT_EXTERNAL_DIFF='sendmail a' git diff",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: the same after env (measured)",
+      "cmd": "env GIT_EXTERNAL_DIFF='sendmail a' git diff",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: GIT_EDITOR naming the sender for git add -e (measured)",
+      "cmd": "GIT_EDITOR='sendmail a' git add -e f.txt",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: PROGI PoC: an assignment takes the read-only exemption away",
+      "cmd": "GIT_EXTERNAL_DIFF='sendmail a' git log -p --ext-diff --grep sendmail",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: --ext-diff is not read-only",
+      "cmd": "git log --grep sendmail --ext-diff -p",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: git -p (paginate) is not read-only",
+      "cmd": "git -p log --grep sendmail",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: git add -p is not read-only",
+      "cmd": "git add -p sendmail",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: PINNED: any assignment takes the exemption away (conservative)",
+      "cmd": "LC_ALL=C git log --grep sendmail",
+      "expected": true
+    },
+    {
+      "name": "ENVPREFIX1126: control: an assignment that names no sender",
+      "cmd": "PAGER=less git log --grep x",
+      "expected": false
+    },
+    {
+      "name": "ENVPREFIX1126: control: read-only git log without an assignment",
+      "cmd": "git log --grep sendmail --oneline",
+      "expected": false
+    },
+    {
+      "name": "ENVPREFIX1126: control: git add -n (dry run) stays read-only",
+      "cmd": "git add -n sendmail",
+      "expected": false
     }
   ]
 }
