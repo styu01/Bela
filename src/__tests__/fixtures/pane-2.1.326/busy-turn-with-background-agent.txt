@@ -1,0 +1,10 @@
+✢ Warping… (2m 39s · ↓ 11.2k tokens)
+  ⎿  Tip: Use /btw to ask a side question without interrupting Claude
+
+───────────────────────────────────────────────────────────────────── KisProgi ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell · esc to inte…
+
+  ● main
+  ◯ general-purpose  Idle wait for pane fixture            7s · ↓ 69.8k tokens
