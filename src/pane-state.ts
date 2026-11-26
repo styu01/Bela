@@ -84,9 +84,8 @@ const FOOTER_TRUNCATED_RX = /(?:[A-Za-z][\w-]* ){1,3}on · [^\n]*·[^\n]*…\s*$
 // LOCAL SAFETY ADAPTATION (measured on Claude Code 2.1.326, 2026-11-26): a BUSY pane's footer is clipped the same
 // way, "⏵⏵ bypass permissions on · install gh for PR status · 1 shell · esc to inte…" (this agent's own pane, mid
 // tool call). Upstream's pattern alone would read that as an idle footer, and between two spinner frames the pane
-// would read idle, i.e. ready for a delivery INTO a live turn. A clipped last item that could be the start of
-// "esc to interrupt" therefore does NOT count as an idle footer.
-const BUSY_FOOTER_ITEM = 'esc to interrupt'
+// would read idle, i.e. ready for a delivery INTO a live turn. Such a footer therefore does NOT count as an idle
+// footer; CLIPIDLEONLY1126 (isClippedIdleFooter below) narrowed it further to idle-only last items.
 
 // VAGTECHIDLE1009 (upstream 004c994d): an idle footer whose only tail is a background-shell count
 // ("⏵⏵ bypass permissions on · 3 shells", "... · 1 shell · 1 monitor") has none of the hint words IDLE_FOOTER_RX
