@@ -330,6 +330,16 @@
       "name": "MAINGATENLCOMMENT1104 (Bence 69701): a # right after the ) of a $(...) is part of the word",
       "cmd": "echo $(echo a)#x; sendmail a@b.hu",
       "expected": true
+    },
+    {
+      "name": "MAINGATENLCOMMENT1104 (PROGI review): a # after an escaped space is part of the word, the send after it runs",
+      "cmd": "echo a\\ #b; sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "MAINGATENLCOMMENT1104 (PROGI review): a # after an escaped ; is part of the word too",
+      "cmd": "echo a\\;#b; sendmail a@b.hu",
+      "expected": true
     }
   ]
 }

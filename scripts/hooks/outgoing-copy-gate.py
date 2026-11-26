@@ -225,13 +225,16 @@ def _mask_subshell_markers(cmd: str) -> str:
     to the newline (the newline itself still becomes `;`). shlex's own comment handling is off (_segments_tokens):
     after this mask there is no newline left, so a shlex comment ran to the end of the command and swallowed the next
     line's send; an apostrophe inside a comment flipped this mask into quote mode; and shlex starts a comment at a `#`
-    inside a word (`echo a#b; sendmail x` lost the send). The word-start set matches the JS twin's
-    stripShellComments (whitespace and ;&|())."""
+    inside a word (`echo a#b; sendmail x` lost the send). The word-start set is whitespace and ;&|( plus a ) that
+    does not close a $( ; a character escaped with a backslash never starts a word (`echo a\\ #b; sendmail x` runs the
+    send in bash). The JS twin (email-send-gate.mjs) does not strip comments at all, which is the conservative side:
+    it reads a commented-out send as a send."""
     out = []
     q = None  # None | "'" | '"'
     i, n = 0, len(cmd)
     parens = []  # Bence 69701: "s" for an open $( , "p" for a plain ( -- which ) closes a command substitution
     subst_close_at = -1
+    escaped_at = -1  # index of the last character escaped by an unquoted backslash
     while i < n:
         ch = cmd[i]
         if q:
@@ -243,9 +246,12 @@ def _mask_subshell_markers(cmd: str) -> str:
         if ch in "'\"":
             q = ch; out.append(ch); i += 1; continue
         if ch == "\\" and i + 1 < n:
+            escaped_at = i + 1
             out.append(cmd[i:i + 2]); i += 2; continue
         # a ) that closes a $( ends no word: `$(echo a)#x` is one word (Bence 69701)
-        if ch == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|(" or (cmd[i - 1] == ")" and subst_close_at != i - 1)):
+        # An escaped separator (`a\ #b`, `a\;#b`) is part of the word, so the # after it is no comment.
+        if ch == "#" and escaped_at != i - 1 and (
+                i == 0 or cmd[i - 1] in " \t\n;&|(" or (cmd[i - 1] == ")" and subst_close_at != i - 1)):
             while i < n and cmd[i] != "\n":
                 i += 1
             continue

@@ -34,6 +34,10 @@ for cmd, want, what in [
     ("echo $(echo a)#x; sendmail a@b.hu", True, "a # right after the ) of a $(...) is part of the word (Bence 69701)"),
     ("echo $(echo a) #x; sendmail a@b.hu", False, "control: after a space it is a comment"),
     ("echo $( (echo a) )#x; sendmail a@b.hu", True, "a plain ( ) nested inside the $( ): the outer ) still closes the $("),
+    ("echo a\\ #b; sendmail a@b.hu", True, "a # after an escaped space is no comment (bash runs the send; PROGI review)"),
+    ("echo a\\\t#b; sendmail a@b.hu", True, "a # after an escaped tab is no comment"),
+    ("echo a\\;#b; sendmail a@b.hu", True, "a # after an escaped ; is no comment"),
+    ("echo a\\\\ #b; sendmail a@b.hu", False, "control: an escaped BACKSLASH, then a real space: the # is a comment again"),
 ]:
     got = ocg.is_send_invocation(cmd)
     check(f"{what}: {cmd!r} -> {want}", got is want, f"got {got}")
