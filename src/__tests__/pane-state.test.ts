@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   detectPaneState,
+  detectsModelConsentDialog,
   detectPermissionMode,
   detectsThinkingBlockError,
   detectsBlockingMenu,
@@ -2408,5 +2409,138 @@ describe('detectPaneState on a live 2.1.326 busy pane past one minute (TURN_ELAP
     expect(pane).toContain('esc to inte…')
     expect(detectPaneState(pane)).toBe('busy')
     expect(isReadyForPrompt(pane)).toBe(false)
+  })
+})
+
+describe('truncated idle footer (tmux width clipping)', () => {
+  // tmux clips the footer to the pane width and marks the cut with `…`, so on
+  // a narrow pane the `← for agents` tail never arrives whole. Before the fix
+  // this read 'unknown' and every idle-waiting consumer stalled on it.
+  const CLIPPED_FOOTER = '  ⏵⏵ bypass permissions on · install gh for PR status · 3 shells · ← for agen…'
+  const IDLE_TRUNCATED_TAIL = modeFooter(CLIPPED_FOOTER)
+  const IDLE_TRUNCATED_EARLIER = modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 3 sh…')
+  const TRUNCATED_SINGLE_SEP = modeFooter('  ez egy mondat ami valamin dolgozik on · es itt megszakad…')
+  // A prose line that happens to carry the footer shape and end in `…`.
+  const PROSE_CLIPPED = '  the reviewer turned it on · then off · and then it was cut…'
+
+  it('reads a footer clipped mid-tail as idle', () => {
+    expect(detectPaneState(IDLE_TRUNCATED_TAIL)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_TRUNCATED_TAIL)).toBe(true)
+  })
+
+  it('reads a footer clipped one segment earlier as idle', () => {
+    expect(detectPaneState(IDLE_TRUNCATED_EARLIER)).toBe('idle')
+  })
+
+  it('reads idle when blank rows follow the clipped footer', () => {
+    expect(detectPaneState(IDLE_TRUNCATED_TAIL + '\n\n\n')).toBe('idle')
+  })
+
+  it('refuses a clipped line carrying only one separator', () => {
+    expect(detectPaneState(TRUNCATED_SINGLE_SEP)).toBe('unknown')
+  })
+
+  it('does not let the truncation rule override a busy spinner', () => {
+    const busy = IDLE_TRUNCATED_TAIL + '\n✻ Accomplishing… (3m 8s · ↓ 9.3k tokens · esc to interrupt)'
+    expect(detectPaneState(busy)).toBe('busy')
+  })
+
+  it('does not count a clipped footer that is not the last line', () => {
+    const above = [CLIPPED_FOOTER, '', SEP, '❯ ', SEP, '  some status line'].join('\n')
+    expect(detectPaneState(above)).toBe('unknown')
+  })
+
+  // #1743 review: with the rule applied to the whole pane, a clipped footer
+  // or `…` prose in the scrollback ABOVE an open dialog made the pane read idle,
+  // and delivery could type a message plus Enter into a prompt with "1. Yes"
+  // preselected. Each fixture is a real dialog with such a line on top.
+  const PERMISSION_DIALOG = [
+    ' Bash command',
+    '   rm -rf ./build',
+    '   Remove the build directory',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    "   2. Yes, and don't ask again for rm commands in /home/marveen/marveen",
+    '   3. No, and tell Claude what to do differently (esc)',
+    '',
+    ' Esc to cancel',
+  ].join('\n')
+  const EDIT_PERMISSION_DIALOG = [
+    ' ../../home/marveen/.claude/bond-teszt.txt',
+    ' Do you want to make this edit to bond-teszt.txt?',
+    ' ❯ 1. Yes',
+    '   2. Yes, and allow Claude to edit its own settings for this session',
+    '   3. No',
+    '',
+    ' Esc to cancel · Tab to amend',
+  ].join('\n')
+  const MENU = [
+    '   Manage MCP servers',
+    '   ❯ claude.ai Canva · ✔ connected · 39 tools',
+    '',
+    '   ↑/↓ to navigate · Enter to confirm · Esc to cancel',
+  ].join('\n')
+  const CONSENT = [
+    '  Fable 5 now uses usage credits',
+    '    1. Continue with Fable 5',
+    '  ❯ 2. Switch to Sonnet 5 and continue',
+    '  Enter to confirm · Esc to cancel',
+  ].join('\n')
+
+  for (const [name, line] of [['clipped footer', CLIPPED_FOOTER], ['clipped prose', PROSE_CLIPPED]] as const) {
+    it(`a ${name} above a command-permission prompt does not hide it`, () => {
+      const pane = line + '\n' + PERMISSION_DIALOG
+      expect(detectPaneState(pane)).not.toBe('idle')
+      expect(isReadyForPrompt(pane)).toBe(false)
+      expect(detectsPermissionDialog(pane)).toBe(true)
+      expect(detectsBlockingMenu(pane)).toBe(true)
+    })
+
+    it(`a ${name} above an edit-permission prompt does not hide it`, () => {
+      const pane = line + '\n' + EDIT_PERMISSION_DIALOG
+      expect(isReadyForPrompt(pane)).toBe(false)
+      expect(detectsPermissionDialog(pane)).toBe(true)
+    })
+
+    it(`a ${name} above a blocking menu does not hide it`, () => {
+      const pane = line + '\n' + MENU
+      expect(isReadyForPrompt(pane)).toBe(false)
+      expect(detectsBlockingMenu(pane)).toBe(true)
+    })
+
+    it(`a ${name} above the usage-credit consent dialog does not hide it`, () => {
+      const pane = line + '\n' + CONSENT
+      expect(isReadyForPrompt(pane)).toBe(false)
+      expect(detectsModelConsentDialog(pane)).toBe(true)
+    })
+  }
+})
+
+// LOCAL SAFETY ADAPTATION of upstream 4bae4ae5, from a live Claude Code 2.1.326 capture (agent-kisprogi, 80
+// columns, mid tool call): a BUSY pane's footer is clipped the same way as an idle one,
+// "⏵⏵ bypass permissions on · install gh for PR status · 1 shell · esc to inte…". Between two spinner frames that
+// line is the only busy signal; read as a clipped IDLE footer it would license a delivery into a live turn.
+describe('a tmux-clipped BUSY footer is never read as idle (local, live 2.1.326 capture)', () => {
+  const live = readFileSync(join(__dirname, 'fixtures', 'pane-2.1.326', 'busy-long-turn-truncated-footer.txt'), 'utf-8')
+  // The same capture without its spinner line: the frame-level window where only the footer is drawn.
+  const noSpinner = live.split('\n').filter((l) => !/\(\d+m \d+s · ↓/.test(l)).join('\n')
+
+  it('the live capture without its spinner line is not idle and not ready for a prompt', () => {
+    expect(noSpinner).toContain('esc to inte…')
+    expect(noSpinner).not.toMatch(/↓ [\d.]+k tokens/)
+    expect(detectPaneState(noSpinner)).not.toBe('idle')
+    expect(isReadyForPrompt(noSpinner)).toBe(false)
+  })
+
+  for (const tail of ['e', 'esc', 'esc to', 'esc to inte', 'esc to interrup']) {
+    it(`a footer clipped at "· ${tail}…" is not an idle footer`, () => {
+      const pane = modeFooter(`  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell · ${tail}…`)
+      expect(detectPaneState(pane)).not.toBe('idle')
+    })
+  }
+
+  it('control: an idle footer clipped inside another item is still idle', () => {
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell · ↓ to mana…'))).toBe('idle')
   })
 })

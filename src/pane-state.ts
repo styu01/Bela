@@ -77,6 +77,40 @@ export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 // `← for agents` is the FleetView tail on current builds; older tails kept.
 const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage|← for agents))|\? for shortcuts/
 
+// tmux clips the footer at the pane width with a trailing ellipsis (upstream 4bae4ae5): on an 80-column pane with
+// extra footer items the idle footer reads e.g. "⏵⏵ bypass permissions on · install gh for PR status · 1 shell · ↓ to…".
+// Accepted ONLY as the last non-empty line (where the live footer is drawn), see idleFooterIndex.
+const FOOTER_TRUNCATED_RX = /(?:[A-Za-z][\w-]* ){1,3}on · [^\n]*·[^\n]*…\s*$/
+// LOCAL SAFETY ADAPTATION (measured on Claude Code 2.1.326, 2026-11-26): a BUSY pane's footer is clipped the same
+// way, "⏵⏵ bypass permissions on · install gh for PR status · 1 shell · esc to inte…" (this agent's own pane, mid
+// tool call). Upstream's pattern alone would read that as an idle footer, and between two spinner frames the pane
+// would read idle, i.e. ready for a delivery INTO a live turn. A clipped last item that could be the start of
+// "esc to interrupt" therefore does NOT count as an idle footer.
+const BUSY_FOOTER_ITEM = 'esc to interrupt'
+
+function isClippedIdleFooter(line: string): boolean {
+  if (!FOOTER_TRUNCATED_RX.test(line)) return false
+  const tail = line.replace(/…\s*$/, '').split('·').pop()!.trim()
+  return !(tail.length > 0 && BUSY_FOOTER_ITEM.startsWith(tail))
+}
+
+/**
+ * Index of the idle footer line, or -1. The full footer may sit anywhere the callers already accepted it; the
+ * tmux-clipped form counts ONLY as the last non-empty line, which is where the live footer is drawn. A dialog
+ * replaces the input box and footer, so its last line is the dialog's own hint, never a clipped footer.
+ */
+function idleFooterIndex(lines: string[]): number {
+  const full = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  if (full >= 0) return full
+  let last = lines.length - 1
+  while (last >= 0 && lines[last].trim() === '') last--
+  return last >= 0 && isClippedIdleFooter(lines[last]) ? last : -1
+}
+
+function hasIdleFooter(lines: string[]): boolean {
+  return idleFooterIndex(lines) >= 0
+}
+
 // Positive busy signals. ANY match anywhere in the pane means the turn
 // is mid-flight, even if the footer looks idle for a frame.
 //
@@ -517,6 +551,7 @@ export function detectsThinkingBlockError(pane: string): boolean {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (IDLE_FOOTER_RX.test(lines[i])) { footerIdx = i; break }
   }
+  if (footerIdx < 0) footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return false
   const start = Math.max(0, footerIdx - ERROR_LIVE_TAIL_LINES)
   const tail = lines.slice(start, footerIdx)
@@ -576,7 +611,7 @@ export function detectsBlockingMenu(pane: string): boolean {
   const lines = pane.split('\n')
   const footerRegion = liveTailRegion(lines, MENU_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(lines)) return false
   return MENU_NAV_RX.test(footerRegion) || MENU_ESC_RX.test(footerRegion)
 }
 
@@ -629,7 +664,7 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
-  if (IDLE_FOOTER_RX.test(pane)) return null
+  if (hasIdleFooter(lines)) return null
   for (const g of FIRST_RUN_GATES) {
     if (!g.rx.test(pane)) continue
     // The welcome banner also heads the NORMAL fresh-session layout (logo +
@@ -704,7 +739,7 @@ export function detectsPermissionDialog(pane: string): boolean {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(lines)) return false
   return PERMISSION_AMEND_RX.test(footerRegion)
     || (PERMISSION_QUESTION_RX.test(pane) && PERMISSION_YES_RX.test(pane))
 }
@@ -718,7 +753,7 @@ export function detectsModelConsentDialog(pane: string): boolean {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(lines)) return false
   return MODEL_CONSENT_TITLE_RX.test(pane)
     && MODEL_CONSENT_CONTINUE_RX.test(pane)
     && MODEL_CONSENT_CONFIRM_RX.test(footerRegion)
@@ -804,7 +839,7 @@ export function detectPaneState(
   // defer rather than pile a second prompt on.
   if (detectsPastePlaceholder(pane)) return 'busy'
 
-  if (!IDLE_FOOTER_RX.test(pane)) {
+  if (!hasIdleFooter(paneLines)) {
     // Footer-less fresh-session / welcome-screen: a PARKED \u276F input box still
     // means the agent has a delivered message waiting to submit. Classify it
     // 'typing' (not 'unknown') so the stuck-input recovery stack can see and
@@ -823,7 +858,7 @@ export function detectPaneState(
   // Scan UPWARDS from the footer so we stay inside the live box and
   // don't pick up historical ❯ lines from scrollback.
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx >= 0) {
     let bottomSep = -1
     for (let i = footerIdx - 1; i >= 0; i--) {
@@ -924,7 +959,7 @@ function liveInputBoxFooterless(lines: string[]): string | null {
 
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return liveInputBoxFooterless(lines)
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
@@ -1038,7 +1073,7 @@ export function shouldRetrySubmit(
 
   // Without an idle footer the pane is either not Claude Code or in an
   // unknown render state. Be conservative and skip.
-  if (!IDLE_FOOTER_RX.test(pane)) return false
+  if (!hasIdleFooter(pane.split('\n'))) return false
 
   const inputBox = liveInputBox(pane)
   if (inputBox == null) return false
