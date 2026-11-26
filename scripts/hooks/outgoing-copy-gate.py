@@ -1470,6 +1470,18 @@ def audit(text: str):
 # the sibling email gate once denied plain mailbox READS (MANAGEOP904).
 MANAGE_EMAIL_OUTBOUND_OPS = {"send", "reply", "replyall", "forward"}
 
+# The fields of a Gmail-connector forward that hold no text of ours (recipients and ids), and the only value shapes
+# they may have for the bare-forward exemption below: a string or a list of strings. A nested object (an id given as
+# {"text": ...}, a recipient as {"name": ..., "email": ...}) can carry text, so it does not count as an address.
+_FORWARD_ADDRESS_FIELDS = frozenset({
+    "to", "cc", "bcc", "from", "messageId", "message_id", "messageIds", "threadId", "thread_id", "id", "userId",
+})
+
+
+def _is_address_value(v) -> bool:
+    return isinstance(v, str) or (isinstance(v, list) and all(isinstance(x, str) for x in v))
+
+
 # Dedicated (non-multiplexed) outbound tools: the draft tools and the Gmail
 # connector's three separate send-shaped tools. Kept in step with the matcher
 # this hook is registered under in settings.json.
@@ -1478,11 +1490,6 @@ MANAGE_EMAIL_OUTBOUND_OPS = {"send", "reply", "replyall", "forward"}
 # before Gmail, and `(^|__)gmail__` never matched it, so its sends fell through
 # to sys.exit(0) with no audit (measured 2026-08-30, 2026-09-08). Anything
 # ending in "gmail__<send-shaped tool>" is a send now, whatever the prefix.
-# The fields of a forward that hold no text of ours (recipients and ids).
-_FORWARD_ADDRESS_FIELDS = frozenset({
-    "to", "cc", "bcc", "from", "messageId", "message_id", "messageIds", "threadId", "thread_id", "id", "userId",
-})
-
 EMAIL_TOOL_RE = re.compile(
     r"(send_email|create_draft|draft_email|update_draft"
     r"|gmail__(reply|reply_all|send_message|forward)$)",
@@ -1724,7 +1731,8 @@ def main():
         # only when every filled field is a recipient or an id, so a note in a field
         # the collector does not know still ends in the loud fail-closed block.
         if re.search(r"gmail__forward$", tool, re.I) and all(
-                k in _FORWARD_ADDRESS_FIELDS for k, v in tool_input.items() if v not in (None, "", [], {})):
+                k in _FORWARD_ADDRESS_FIELDS and _is_address_value(v)
+                for k, v in tool_input.items() if v not in (None, "", [], {})):
             sys.exit(0)
         text, unreadable = collect_mcp_body(tool_input), None
     elif tool == "Bash":

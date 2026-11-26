@@ -84,6 +84,10 @@ RUNS = [
     ("mcp__claude_ai_Gmail__forward", {"messageId": "abc", "to": ["x@y.hu"], "body": GOOD}, 0),
     # a note in a field the collector does not know must not ride the bare-forward exemption
     ("mcp__claude_ai_Gmail__forward", {"messageId": "abc", "to": ["x@y.hu"], "note": BAD}, 2),
+    # the exemption accepts only a string or a list of strings in an address/id field (PROGI re-review)
+    ("mcp__claude_ai_Gmail__forward", {"messageId": "abc", "to": "x@y.hu", "cc": None}, 0),
+    ("mcp__claude_ai_Gmail__forward", {"messageId": {"text": BAD}, "to": ["x@y.hu"]}, 2),
+    ("mcp__claude_ai_Gmail__forward", {"messageId": "abc", "to": [{"name": "Anna \u2014 x", "email": "x@y.hu"}]}, 2),
     ("mcp__claude_ai_Gmail__reply", {"messageId": "abc", "body": BAD}, 2),
     ("mcp__claude_ai_Gmail__reply", {"messageId": "abc", "body": GOOD}, 0),
     ("mcp__claude_ai_Gmail__send_message", {"to": ["x@y.hu"], "subject": "Ajánlat", "body": EM}, 2),
