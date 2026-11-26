@@ -1243,15 +1243,26 @@ def _stdin_shell_texts(cmd: str):
                 run.append(t[3:])
         j = k - 1
         left = []
+        feeders = []
         while j >= 0 and is_pipe(segs[j][1]):
             left.insert(0, " ".join(segs[j][0]))
+            feeders.insert(0, segs[j][0])
             j -= 1
+        # GROUPPIPE1126 (PROGI msg 6034): '{ echo X; } | bash' -- collect the group back to its opening '{'.
+        if feeders and feeders[0] == ["}"]:
+            while j >= 0:
+                left.insert(0, " ".join(segs[j][0]))
+                feeders.insert(0, segs[j][0])
+                if segs[j][0] and segs[j][0][0] == "{":
+                    break
+                j -= 1
         if left:
             piped.append(" | ".join(left))
-            lhs = _command_heads(segs[k - 1][0])
-            lh = lhs[0] if lhs else None
-            if lh and _basename(lh[0]) in ("echo", "printf"):
-                run.append(" ".join(t for t in lh[1:] if not re.match(r"-[neE]+$", t)))
+            for f in feeders:
+                lhs = _command_heads(f)
+                lh = lhs[0] if lhs else None
+                if lh and _basename(lh[0]) in ("echo", "printf"):
+                    run.append(" ".join(t for t in lh[1:] if not re.match(r"-[neE]+$", t)))
     for m in _HEREDOC.finditer(cmd):
         line_start = cmd.rfind("\n", 0, m.start()) + 1
         try:

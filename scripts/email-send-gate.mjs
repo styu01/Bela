@@ -881,11 +881,24 @@ function stdinShellTexts(cmd) {
     let j = k - 1
     const left = []
     const isPipe = (sep) => sep.endsWith('|') && !sep.endsWith('||')
-    while (j >= 0 && isPipe(segs[j][1])) { left.unshift(segs[j][0].join(' ')); j-- }
+    const feeders = []
+    while (j >= 0 && isPipe(segs[j][1])) { left.unshift(segs[j][0].join(' ')); feeders.unshift(segs[j][0]); j-- }
+    // GROUPPIPE1126 (PROGI msg 6034): '{ echo X; } | bash' -- the segment before the pipe is the closing '}', the
+    // group's commands sit in the segments back to the one that opens with '{'. They all feed the shell.
+    if (feeders.length && feeders[0].length === 1 && feeders[0][0] === '}') {
+      while (j >= 0) {
+        left.unshift(segs[j][0].join(' '))
+        feeders.unshift(segs[j][0])
+        if (segs[j][0][0] === '{') break
+        j--
+      }
+    }
     if (left.length) {
       piped.push(left.join(' | '))
-      const lh = commandHeads(segs[k - 1][0])[0]
-      if (lh && (basename(lh[0]) === 'echo' || basename(lh[0]) === 'printf')) run.push(lh.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' '))
+      for (const f of feeders) {
+        const lh = commandHeads(f)[0]
+        if (lh && (basename(lh[0]) === 'echo' || basename(lh[0]) === 'printf')) run.push(lh.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' '))
+      }
     }
   }
   // a heredoc fed to a stdin shell: its body is the command text

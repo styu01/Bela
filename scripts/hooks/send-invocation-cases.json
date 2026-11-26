@@ -1915,6 +1915,36 @@
       "name": "INTERPSTDIN1126: control: python -c attached ('-c'...') reads no program from stdin",
       "cmd": "python3 -c'print(1)' <<< 'import os; os.system(\"sendmail a\")'",
       "expected": false
+    },
+    {
+      "name": "GROUPPIPE1126: a { } group piped into bash",
+      "cmd": "{ echo 'sendmail a@b.hu'; } | bash",
+      "expected": true
+    },
+    {
+      "name": "GROUPPIPE1126: a group with several commands piped into sh",
+      "cmd": "{ echo ls; echo 'sendmail a@b.hu'; } | sh",
+      "expected": true
+    },
+    {
+      "name": "GROUPPIPE1126: a group echo literal is parsed (quotes split the name)",
+      "cmd": "{ echo 'send\"\"mail a@b.hu'; } | bash",
+      "expected": true
+    },
+    {
+      "name": "GROUPPIPE1126: control: a group of a non-sender piped into bash",
+      "cmd": "{ echo ls; } | bash",
+      "expected": false
+    },
+    {
+      "name": "GROUPPIPE1126: a ( ) subshell piped into bash",
+      "cmd": "( echo 'sendmail a@b.hu' ) | bash",
+      "expected": true
+    },
+    {
+      "name": "GROUPPIPE1126: control: a group piped into grep",
+      "cmd": "{ echo hi; } | grep -c sendmail",
+      "expected": false
     }
   ]
 }
