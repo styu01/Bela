@@ -5,6 +5,7 @@ import { formatBacklogTimestamp } from './backlog-timestamp.js'
 import { resolveAgentChannelStateDir } from './voice-directive.js'
 import {
   getPendingMessages,
+  getMessageStatus,
   markMessageDelivered,
   markMessageDone,
   markMessageFailed,
@@ -748,6 +749,22 @@ export async function runMessageRouterTick(): Promise<void> {
       }
 
       try {
+        // RE-READ before sending (TICKVAKSAG916, upstream 9fb22e5d). The work set of this tick is a SNAPSHOT
+        // taken at the top (getPendingMessages into an array); session lookups, the readiness gate and voice STT
+        // (which can hold a tick for up to 65 s on its own) all run from that copy, and with up to
+        // MAX_MESSAGES_PER_TICK rows sent serially the gap between reading a row and sending it is the length of
+        // the tick. Anything that closed the row in that gap (a PUT /api/messages/:id, an operator fix, a
+        // concurrent path) was invisible, and the message went out anyway. One indexed lookup of one column,
+        // placed as late as possible. A row that is no longer 'pending', or gone, is skipped and NOT re-closed:
+        // it already has a terminal state and usually a reason.
+        const liveStatus = getMessageStatus(msg.id)
+        if (liveStatus !== 'pending') {
+          logger.info(
+            { id: msg.id, from: msg.from_agent, to: msg.to_agent, liveStatus },
+            'message-router: row is no longer pending at send time, skipping delivery',
+          )
+          continue
+        }
         // channel-inbound carries the STT-applied deliveryContent; the agent
         // wrap (trusted/untrusted) carries the raw content. Single-source frame.
         // msgId passed so receiving agents can write back via PUT /api/messages/:id.
