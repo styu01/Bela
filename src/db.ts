@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, statSync } from 'node:fs'
-import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL, APP_TZ } from './config.js'
+import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL, APP_TZ, MAIN_AGENT_ID } from './config.js'
 import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
@@ -1279,12 +1279,19 @@ export function saveMemory(
   chatId: string,
   content: string,
   sector: 'semantic' | 'episodic',
-  topicKey?: string
+  topicKey?: string,
+  // Owner of the row. The column default is the literal 'marveen', but every
+  // per-agent reader filters on `agent_id = ?`, so on an install whose main
+  // agent id is anything else a row that relied on the default was invisible
+  // to that agent's views and search.
+  agentId: string = MAIN_AGENT_ID
 ): void {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(
-    'INSERT INTO memories (chat_id, topic_key, content, sector, salience, created_at, accessed_at) VALUES (?, ?, ?, ?, 1.0, ?, ?)'
-  ).run(chatId, topicKey ?? null, content, sector, now, now)
+    'INSERT INTO memories (chat_id, topic_key, content, sector, salience, created_at, accessed_at, agent_id) VALUES (?, ?, ?, ?, 1.0, ?, ?, ?)'
+  ).run(chatId, topicKey ?? null, content, sector, now, now, agentId)
+  // The row now lands in the owner's list, so a cached copy of that list is stale.
+  memoryCacheInvalidate(agentId)
 }
 
 // Build a safe FTS5 MATCH expression from a free-form user query.
