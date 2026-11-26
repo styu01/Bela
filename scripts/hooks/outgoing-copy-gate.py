@@ -601,7 +601,8 @@ def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
 
 
 # Only variables that name a program to RUN count ('env A=sendmail ls' runs no sender: WRAPGATE1126 control).
-_RUNNER_VAR = re.compile(r"^(?:GIT_[A-Z_]*(?:DIFF|EDITOR|PAGER|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND)|[A-Z_]*PAGER|[A-Z_]*EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|[A-Z_]*ASKPASS|BASH_ENV|ENV|PROMPT_COMMAND|SHELL)=")
+# ENVFORMS1126 (PROGI msg 6034): GIT_CONFIG_VALUE_n and GIT_CONFIG_PARAMETERS carry git config (an alias '!cmd').
+_RUNNER_VAR = re.compile(r"^(?:GIT_CONFIG_VALUE_\d+|GIT_CONFIG_PARAMETERS|GIT_[A-Z_]*(?:DIFF|EDITOR|PAGER|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND)|[A-Z_]*PAGER|[A-Z_]*EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|[A-Z_]*ASKPASS|BASH_ENV|ENV|PROMPT_COMMAND|SHELL)=")
 
 
 def _prefix_assignments(toks):
@@ -612,11 +613,17 @@ def _prefix_assignments(toks):
         while i < len(toks) and _ENV_ASSIGN.match(toks[i]):
             out.append(toks[i])
             i += 1
+        # ENVFORMS1126: after the declaration builtins, and after env's value-taking options.
+        if i < len(toks) and toks[i] in ("export", "declare", "typeset", "readonly", "local"):
+            out.extend(t for t in toks[i + 1:] if _ENV_ASSIGN.match(t))
+            return out
         if i < len(toks) and _basename(toks[i]) == "env":
             i += 1
             while i < len(toks) and (toks[i].startswith("-") or _ENV_ASSIGN.match(toks[i])):
                 if _ENV_ASSIGN.match(toks[i]):
                     out.append(toks[i])
+                if toks[i] in ("-u", "--unset", "-C", "--chdir"):
+                    i += 1
                 i += 1
             continue
         return out

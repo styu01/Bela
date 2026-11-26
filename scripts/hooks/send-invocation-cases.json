@@ -2040,6 +2040,46 @@
       "name": "SUBOUTRUN1126: control: an unquoted eval of a harmless output",
       "cmd": "eval $(echo true)",
       "expected": false
+    },
+    {
+      "name": "ENVFORMS1126: export of a runner variable naming the sender",
+      "cmd": "echo x >> f.txt; export GIT_EXTERNAL_DIFF='sendmail a'; git diff",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS1126: declare -x of a runner variable",
+      "cmd": "echo x >> f.txt; declare -x GIT_EXTERNAL_DIFF='sendmail a'; git diff",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS1126: env -u V before the assignment",
+      "cmd": "echo x >> f.txt; env -u HOME GIT_EXTERNAL_DIFF='sendmail a' git diff",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS1126: GIT_CONFIG_COUNT/KEY_n/VALUE_n alias '!'",
+      "cmd": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.z GIT_CONFIG_VALUE_0='!sendmail a' git z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS1126: GIT_CONFIG_PARAMETERS alias '!'",
+      "cmd": "GIT_CONFIG_PARAMETERS=\"'alias.z=!sendmail a'\" git z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS1126: control: export of PATH",
+      "cmd": "export PATH=/usr/bin:$PATH; ls",
+      "expected": false
+    },
+    {
+      "name": "ENVFORMS1126: control: export of a non-runner variable named like the sender",
+      "cmd": "export A=sendmail; echo $A",
+      "expected": false
+    },
+    {
+      "name": "ENVFORMS1126: control: env -u alone",
+      "cmd": "env -u HOME ls",
+      "expected": false
     }
   ]
 }

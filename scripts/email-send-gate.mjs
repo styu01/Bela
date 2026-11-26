@@ -393,15 +393,29 @@ function commandHeads(toksIn, d = 0, positionalsDone = false) {
 // configures: 'GIT_EXTERNAL_DIFF="sendmail a" git diff', 'GIT_EDITOR=... git add -e', 'PAGER=... man x'. Production
 // allowed these. The assignments in front of the command (and after 'env') whose value names a sender are a send.
 // Only variables that name a program to RUN count ('env A=sendmail ls' runs no sender: WRAPGATE1126 control).
-const RUNNER_VAR = /^(?:GIT_[A-Z_]*(?:DIFF|EDITOR|PAGER|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND)|[A-Z_]*PAGER|[A-Z_]*EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|[A-Z_]*ASKPASS|BASH_ENV|ENV|PROMPT_COMMAND|SHELL)=/
+// ENVFORMS1126 (PROGI msg 6034): GIT_CONFIG_VALUE_n (with GIT_CONFIG_COUNT/KEY_n) and GIT_CONFIG_PARAMETERS carry
+// git config, e.g. an alias '!cmd'.
+const RUNNER_VAR = /^(?:GIT_CONFIG_VALUE_\d+|GIT_CONFIG_PARAMETERS|GIT_[A-Z_]*(?:DIFF|EDITOR|PAGER|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND)|[A-Z_]*PAGER|[A-Z_]*EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|[A-Z_]*ASKPASS|BASH_ENV|ENV|PROMPT_COMMAND|SHELL)=/
+// ENVFORMS1126: also after the declaration builtins ('export X=...', 'declare -x X=...': the value is used by a
+// later command of the same shell), and after env's value-taking options ('env -u V X=...').
+const DECL_BUILTINS = new Set(['export', 'declare', 'typeset', 'readonly', 'local'])
 function prefixAssignments(toks) {
   const out = []
   let i = 0
   for (;;) {
     while (i < toks.length && ENV_ASSIGN.test(toks[i])) out.push(toks[i++])
+    if (i < toks.length && DECL_BUILTINS.has(toks[i])) {
+      i++
+      while (i < toks.length) { if (ENV_ASSIGN.test(toks[i])) out.push(toks[i]); i++ }
+      return out
+    }
     if (i < toks.length && basename(toks[i]) === 'env') {
       i++
-      while (i < toks.length && (toks[i].startsWith('-') || ENV_ASSIGN.test(toks[i]))) { if (ENV_ASSIGN.test(toks[i])) out.push(toks[i]); i++ }
+      while (i < toks.length && (toks[i].startsWith('-') || ENV_ASSIGN.test(toks[i]))) {
+        if (ENV_ASSIGN.test(toks[i])) out.push(toks[i])
+        if (['-u', '--unset', '-C', '--chdir'].includes(toks[i])) i++
+        i++
+      }
       continue
     }
     return out
