@@ -946,7 +946,170 @@ def _dquote_substitutions(cmd: str):
     return out
 
 
+# STDINSHELL1126 (PROGI msg 6001): a shell that reads its commands from STDIN runs text the segment rules never see:
+# 'echo "sendmail a" | sh', 'printf ... | bash -s', 'git log --format=%s | sh', 'bash <<< "sendmail a"',
+# 'source /dev/stdin <<< ...' and the body of 'bash <<EOF ... EOF'. Mirrors stdinShellTexts in email-send-gate.mjs.
+_STDIN_FILES = frozenset({"/dev/stdin", "-", "/proc/self/fd/0", "/dev/fd/0"})
+
+
+def _without_redirections(rest):
+    out = []
+    i = 0
+    while i < len(rest):
+        m = _REDIR_RX.match(rest[i])
+        if m:
+            i += 2 if m.group(1) == "" else 1
+            continue
+        out.append(rest[i])
+        i += 1
+    return out
+
+
+def _is_stdin_shell_head(h) -> bool:
+    if not h:
+        return False
+    prog = _basename(h[0])
+    rest = _without_redirections(h[1:])
+    if prog in ("source", "."):
+        return bool(rest) and rest[0] in _STDIN_FILES
+    if _FISH_SHELL.match(prog):
+        if _fish_command_strings(rest):
+            return False
+        return not any(not t.startswith("-") for t in rest)
+    if not _WRAPPER_SHELL.match(prog):
+        return False
+    if _shell_command_string(rest, prog) is not None:
+        return False
+    value_chars = "oOT" if _KSH_FAMILY.match(prog) else "oO"
+    saw_s, i = False, 0
+    while i < len(rest):
+        t = rest[i]
+        if t in ("--", "-"):
+            i += 1
+            break
+        if t == "+":
+            i += 1
+            continue
+        if t in _SHELL_LONG_WITH_VALUE:
+            i += 2
+            continue
+        if t.startswith("--"):
+            i += 1
+            continue
+        if len(t) > 1 and t[0] in "-+":
+            if t[0] == "-" and "s" in t[1:]:
+                saw_s = True
+            i += 1 + sum(1 for ch in t[1:] if ch in value_chars)
+            continue
+        break
+    return saw_s or i >= len(rest) or rest[i] in _STDIN_FILES
+
+
+def _segments_with_separators(cmd: str):
+    """[(tokens, separator that ENDED the segment)], the tokenizer of _segments_tokens; an empty segment (a run of
+    operators) adds its separator to the previous one."""
+    import shlex
+    lex = shlex.shlex(_mask_subshell_markers(_HEREDOC.sub(r"\1", cmd)), posix=True, punctuation_chars="();|&")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    out, cur = [], []
+    for tok in lex:
+        if tok and set(tok) <= set("();|&"):
+            if not cur and out:
+                out[-1][1] += tok
+            else:
+                out.append([cur, tok])
+            cur = []
+        else:
+            cur.append(tok)
+    if cur or not out:
+        out.append([cur, ""])
+    return out
+
+
+def _stdin_shell_texts(cmd: str):
+    """(run, piped): command texts a stdin shell runs, and the pipeline texts it reads (judged by name only)."""
+    run, piped = [], []
+    try:
+        segs = _segments_with_separators(cmd)
+    except ValueError:
+        return run, piped
+
+    def is_pipe(sep):
+        return sep.endswith("|") and not sep.endswith("||")
+
+    for k, (toks, _sep) in enumerate(segs):
+        if not toks:
+            continue
+        heads = _command_heads(toks)
+        if not heads or not _is_stdin_shell_head(heads[0]):
+            continue
+        for i, t in enumerate(toks):
+            if t == "<<<" and i + 1 < len(toks):
+                run.append(toks[i + 1])
+            elif t.startswith("<<<") and len(t) > 3:
+                run.append(t[3:])
+        j = k - 1
+        left = []
+        while j >= 0 and is_pipe(segs[j][1]):
+            left.insert(0, " ".join(segs[j][0]))
+            j -= 1
+        if left:
+            piped.append(" | ".join(left))
+            lhs = _command_heads(segs[k - 1][0])
+            lh = lhs[0] if lhs else None
+            if lh and _basename(lh[0]) in ("echo", "printf"):
+                run.append(" ".join(t for t in lh[1:] if not re.match(r"-[neE]+$", t)))
+    for m in _HEREDOC.finditer(cmd):
+        line_start = cmd.rfind("\n", 0, m.start()) + 1
+        try:
+            head_segs = _segments_tokens(cmd[line_start:m.start()])
+        except ValueError:
+            continue
+        if not head_segs:
+            continue
+        hs = _command_heads(head_segs[-1])
+        body = m.group(0)[len(m.group(1)) + 1:len(m.group(0)) - len(m.group(2))]
+        if hs and _is_stdin_shell_head(hs[0]):
+            run.append(body)
+            continue
+        # 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
+        try:
+            hl = _segments_with_separators(cmd[line_start:m.start() + len(m.group(1))])
+        except ValueError:
+            continue
+        f = len(hl) - 1
+        while f >= 0 and not any(t.startswith("<<") for t in hl[f][0]):
+            f -= 1
+        if f < 0:
+            continue
+        g, shell_after = f, False
+        while g < len(hl) - 1 and is_pipe(hl[g][1]):
+            g += 1
+            gh = _command_heads(hl[g][0])
+            if gh and _is_stdin_shell_head(gh[0]):
+                shell_after = True
+                break
+        if not shell_after:
+            continue
+        fh = _command_heads(hl[f][0])
+        if fh and fh[0] and _basename(fh[0][0]) == "cat":
+            run.append(body)
+        else:
+            piped.append(body)
+    return run, piped
+
+
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
+    run, piped = _stdin_shell_texts(cmd)
+    if any(_CODE_SENDER_LIT.search(t) for t in piped):
+        return True
+    for text in run:
+        if _depth >= 3:
+            if text.strip():
+                return True
+        elif is_send_invocation(text, _depth=_depth + 1):
+            return True
     for inner in _dquote_substitutions(cmd):
         if _depth >= 3:
             if inner.strip():

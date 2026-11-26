@@ -1542,6 +1542,111 @@
       "expected": false
     },
     {
+      "name": "STDINSHELL1126: echo text piped into sh",
+      "cmd": "echo 'sendmail a@b.hu' | sh",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: echo text piped into bash",
+      "cmd": "echo 'sendmail a@b.hu' | bash",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: printf piped into bash -s",
+      "cmd": "printf '%s\\n' 'sendmail a@b.hu' | bash -s",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: here-string to bash",
+      "cmd": "bash <<< 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: here-string to sh",
+      "cmd": "sh <<< 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: source /dev/stdin with a here-string",
+      "cmd": "source /dev/stdin <<< 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: quoted heredoc body run by bash",
+      "cmd": "bash <<'EOF'\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: unquoted heredoc body with a list",
+      "cmd": "bash <<EOF\ncd /tmp && sendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: PINNED: a pipeline that names the sender feeding a shell (its output is made at run time)",
+      "cmd": "git log --grep sendmail --format=%s | sh",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: control: echo of a non-sender into sh",
+      "cmd": "echo 'ls' | sh",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: control: a bash heredoc whose body only names the sender",
+      "cmd": "bash <<'EOF'\necho sendmail\ngrep -c sendmail /dev/null\nEOF",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: control: a python heredoc is not a shell",
+      "cmd": "python3 - <<'EOF'\nprint('sendmail')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: control: bash running a script ignores the here-string",
+      "cmd": "bash script.sh <<< 'sendmail a'",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: control: bash -c reads no commands from stdin",
+      "cmd": "echo 'sendmail a' | bash -c 'cat'",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: control: '||' is not a pipe",
+      "cmd": "echo x || bash",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: the echo text is parsed as a command line (quotes split the name)",
+      "cmd": "echo 'send\"\"mail a@b.hu' | sh",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: bash -s with positional arguments still reads stdin",
+      "cmd": "echo 'sendmail a@b.hu' | bash -s x y",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: control: '||' runs bash only if echo fails, so the echo output is not its input",
+      "cmd": "echo sendmail || bash",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: a heredoc fed to cat and piped into bash (measured)",
+      "cmd": "cat <<'EOF' | bash\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "STDINSHELL1126: control: a heredoc fed to cat and piped into grep",
+      "cmd": "cat <<'EOF' | grep -c x\nsendmail a@b.hu\nEOF",
+      "expected": false
+    },
+    {
+      "name": "STDINSHELL1126: the cat-fed heredoc body is parsed as commands (quotes split the name)",
+      "cmd": "cat <<'EOF' | bash\nsend\"\"mail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
       "name": "EXECVEC1126: a git '!' alias is parsed as a command line (quotes split the name, measured)",
       "cmd": "git -c alias.z='!send\"\"mail a@b.hu' z",
       "expected": true

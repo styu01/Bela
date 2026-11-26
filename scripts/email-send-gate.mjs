@@ -624,7 +624,143 @@ function dquoteSubstitutions(cmd) {
   return out
 }
 
+// STDINSHELL1126 (PROGI msg 6001): a shell that reads its commands from STDIN runs text the segment rules never see:
+// 'echo "sendmail a" | sh', 'printf ... | bash -s', 'git log --format=%s | sh' (the commit subject becomes a
+// command), 'bash <<< "sendmail a"', 'source /dev/stdin <<< ...' and the body of 'bash <<EOF ... EOF'. Mirrors
+// _stdin_shell_* in outgoing-copy-gate.py.
+const STDIN_FILES = new Set(['/dev/stdin', '-', '/proc/self/fd/0', '/dev/fd/0'])
+// Drop redirection words (and the separate target of a bare operator) so they are not read as a script operand.
+function withoutRedirections(rest) {
+  const out = []
+  for (let i = 0; i < rest.length; i++) {
+    const m = REDIR_RX.exec(rest[i])
+    if (m) { if (m[1] === '') i++; continue }
+    out.push(rest[i])
+  }
+  return out
+}
+// True when this head is a shell that takes its commands from stdin: no -c string, and no script operand (or -s).
+function isStdinShellHead(h) {
+  if (!h || !h.length) return false
+  const prog = basename(h[0])
+  const rest = withoutRedirections(h.slice(1))
+  if (prog === 'source' || prog === '.') return STDIN_FILES.has(rest[0])
+  if (FISH_SHELL.test(prog)) {
+    if (fishCommandStrings(rest).length) return false
+    return !rest.some((t) => !t.startsWith('-'))
+  }
+  if (!WRAPPER_SHELL.test(prog)) return false
+  if (shellCommandString(rest, prog) !== null) return false
+  const valueChars = KSH_FAMILY.test(prog) ? 'oOT' : 'oO'
+  let sawS = false
+  let i = 0
+  while (i < rest.length) {
+    const t = rest[i]
+    if (t === '--' || t === '-') { i++; break }
+    if (t === '+') { i++; continue }
+    if (SHELL_LONG_WITH_VALUE.has(t)) { i += 2; continue }
+    if (t.startsWith('--')) { i++; continue }
+    if (t.length > 1 && (t[0] === '-' || t[0] === '+')) {
+      if (t[0] === '-' && t.slice(1).includes('s')) sawS = true
+      i += 1 + [...t.slice(1)].filter((ch) => valueChars.includes(ch)).length
+      continue
+    }
+    break
+  }
+  return sawS || i >= rest.length || STDIN_FILES.has(rest[i])
+}
+// [segment tokens, separator that ENDED it] -- the tokenizer above, keeping '|' apart from '||' and the rest.
+function segmentsWithSeparators(cmd) {
+  const s = maskSubshellMarkers(cmd.replace(HEREDOC_RE, '$1'))
+  const out = []
+  let cur = []
+  let tok = ''
+  let hasTok = false
+  let q = null
+  const pushTok = () => { if (hasTok) { cur.push(tok); tok = ''; hasTok = false } }
+  // An empty segment (a run of operators, ')|') adds its separator to the previous one, as the python twin's shlex
+  // returns such a run as one token.
+  const pushSeg = (sep) => { pushTok(); if (!cur.length && out.length) out[out.length - 1][1] += sep; else out.push([cur, sep]); cur = [] }
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (q) {
+      if (ch === '\\' && q === '"' && i + 1 < s.length) { tok += s[++i]; continue }
+      if (ch === q) { q = null; continue }
+      tok += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') { q = ch; hasTok = true; continue }
+    if (ch === '\\' && i + 1 < s.length) { tok += s[++i]; hasTok = true; continue }
+    if (ch === ' ' || ch === '\t') { pushTok(); continue }
+    if (ch === '|' && s[i + 1] === '|') { pushSeg('||'); i++; continue }
+    if ('|&;()'.includes(ch)) { pushSeg(ch); continue }
+    tok += ch
+    hasTok = true
+  }
+  if (q) throw new Error('unbalanced quote')
+  pushSeg('')
+  return out
+}
+// The command texts a stdin shell would run, plus the texts it reads from a pipe (judged by name only: the output
+// is made at run time). Returns { run: [...], piped: [...] }.
+function stdinShellTexts(cmd) {
+  const run = []
+  const piped = []
+  let segs
+  try { segs = segmentsWithSeparators(cmd) } catch { return { run, piped } }
+  for (let k = 0; k < segs.length; k++) {
+    const [toks] = segs[k]
+    if (!toks.length) continue
+    const head = commandHeads(toks)[0]
+    if (!isStdinShellHead(head)) continue
+    // here-string: '<<<' WORD or '<<<WORD'
+    for (let i = 0; i < toks.length; i++) {
+      if (toks[i] === '<<<' && i + 1 < toks.length) run.push(toks[i + 1])
+      else if (toks[i].startsWith('<<<') && toks[i].length > 3) run.push(toks[i].slice(3))
+    }
+    // a pipe into it: the whole pipeline to its left
+    let j = k - 1
+    const left = []
+    const isPipe = (sep) => sep.endsWith('|') && !sep.endsWith('||')
+    while (j >= 0 && isPipe(segs[j][1])) { left.unshift(segs[j][0].join(' ')); j-- }
+    if (left.length) {
+      piped.push(left.join(' | '))
+      const lh = commandHeads(segs[k - 1][0])[0]
+      if (lh && (basename(lh[0]) === 'echo' || basename(lh[0]) === 'printf')) run.push(lh.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' '))
+    }
+  }
+  // a heredoc fed to a stdin shell: its body is the command text
+  for (const m of cmd.matchAll(HEREDOC_RE)) {
+    const lineStart = cmd.lastIndexOf('\n', m.index) + 1
+    let headSegs
+    try { headSegs = segmentsTokens(cmd.slice(lineStart, m.index)) } catch { continue }
+    const last = headSegs[headSegs.length - 1]
+    const body = m[0].slice(m[1].length + 1, m[0].length - m[2].length)
+    if (last && isStdinShellHead(commandHeads(last)[0])) { run.push(body); continue }
+    // 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
+    let hs
+    try { hs = segmentsWithSeparators(cmd.slice(lineStart, m.index + m[1].length)) } catch { continue }
+    const isPipe = (sep) => sep.endsWith('|') && !sep.endsWith('||')
+    let f = hs.length - 1
+    while (f >= 0 && !hs[f][0].some((t) => t.startsWith('<<'))) f--
+    if (f < 0 || !last) continue
+    let g = f
+    let shellAfter = false
+    while (g < hs.length - 1 && isPipe(hs[g][1])) { g++; if (isStdinShellHead(commandHeads(hs[g][0])[0])) { shellAfter = true; break } }
+    if (!shellAfter) continue
+    const feeder = commandHeads(hs[f][0])[0]
+    if (feeder && basename(feeder[0]) === 'cat') run.push(body)
+    else piped.push(body)
+  }
+  return { run, piped }
+}
+
 export function isSendInvocation(cmd, depth = 0) {
+  const stdin = stdinShellTexts(cmd)
+  if (stdin.piped.some((t) => CODE_SENDER_LIT.test(t))) return true
+  for (const text of stdin.run) {
+    if (depth >= 3) { if (text.trim()) return true } else if (isSendInvocation(text, depth + 1)) return true
+  }
   for (const inner of dquoteSubstitutions(cmd)) {
     if (depth >= 3) { if (inner.trim()) return true } else if (isSendInvocation(inner, depth + 1)) return true
   }
