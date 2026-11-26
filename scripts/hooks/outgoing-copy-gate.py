@@ -970,13 +970,63 @@ def sender_named_only(cmd: str) -> bool:
         _TOKEN_LAYER_ON = True
 
 
+def _heredoc_substitutions(cmd: str):
+    """HEREDOCSUB1126 (PROGI msg 6028, BELA msg 6029): the body of an UNQUOTED heredoc ('<<EOF', not '<<'EOF'' /
+    '<<"EOF"' / '<<\\EOF') is expanded for ANY command. Quotes inside such a body are plain characters, so only \\,
+    `...` and $(...) count. Mirrors heredocSubstitutions in email-send-gate.mjs."""
+    out = []
+    for m in _HEREDOC.finditer(cmd):
+        if re.match(r"<<-?\s*['\"\\]", m.group(1)):
+            continue
+        body = m.group(0)[len(m.group(1)) + 1:len(m.group(0)) - len(m.group(2))]
+        n = len(body)
+        i = 0
+        while i < n:
+            ch = body[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "`":
+                j = i + 1
+                while j < n and body[j] != "`":
+                    if body[j] == "\\":
+                        j += 1
+                    j += 1
+                out.append(body[i + 1:j])
+                i = j + 1
+                continue
+            if ch == "$" and i + 1 < n and body[i + 1] == "(":
+                j, level, iq = i + 2, 1, None
+                while j < n and level > 0:
+                    c = body[j]
+                    if iq:
+                        if c == "\\" and iq == '"':
+                            j += 1
+                        elif c == iq:
+                            iq = None
+                    elif c in ("'", '"'):
+                        iq = c
+                    elif c == "\\":
+                        j += 1
+                    elif c == "(":
+                        level += 1
+                    elif c == ")":
+                        level -= 1
+                    j += 1
+                out.append(body[i + 2:j - 1] if level == 0 else body[i + 2:j])
+                i = j
+                continue
+            i += 1
+    return out
+
+
 def _dquote_substitutions(cmd: str):
     """DQSUB1126 (PROGI msg 6001): the bodies of every $(...) and `...` inside DOUBLE quotes. bash runs them; the mask
     keeps quoted text as content, so 'echo "$(sendmail a)"' and 'X="$(sendmail a)"' passed both gates. Single quotes
     stay literal; heredoc bodies are cut first, like the tokenizer does. Mirrors dquoteSubstitutions in
     email-send-gate.mjs."""
     s = _HEREDOC.sub(r"\1", cmd)
-    out = []
+    out = _heredoc_substitutions(cmd)
     q = None
     i = 0
     n = len(s)

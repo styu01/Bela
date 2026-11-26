@@ -1647,6 +1647,51 @@
       "expected": true
     },
     {
+      "name": "HEREDOCSUB1126: $(...) in an unquoted heredoc body fed to cat",
+      "cmd": "cat <<EOF\nhello $(sendmail a@b.hu)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCSUB1126: backticks in an unquoted heredoc body",
+      "cmd": "cat <<EOF > /dev/null\n`sendmail a@b.hu`\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCSUB1126: an unquoted heredoc feeding python still expands $(...) first",
+      "cmd": "python3 - <<EOF\nprint('$(sendmail a@b.hu)')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCSUB1126: <<- with a list inside $(...)",
+      "cmd": "cat <<-EOF\n\t$(cd /tmp && sendmail a)\n\tEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCSUB1126: control: a quoted heredoc body is data",
+      "cmd": "cat <<'EOF'\n$(sendmail a@b.hu)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCSUB1126: control: an escaped \\$( in the body",
+      "cmd": "cat <<EOF\n\\$(sendmail a@b.hu)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCSUB1126: control: a body $(...) with a non-sender",
+      "cmd": "cat <<EOF\n$(echo sendmail)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCSUB1126: control: the sender name as plain body text",
+      "cmd": "cat <<EOF\nthe word sendmail here\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCSUB1126: single quotes inside a heredoc body do not protect $(...)",
+      "cmd": "cat <<EOF\n'$(sendmail a)'\nEOF",
+      "expected": true
+    },
+    {
       "name": "EXECVEC1126: a git '!' alias is parsed as a command line (quotes split the name, measured)",
       "cmd": "git -c alias.z='!send\"\"mail a@b.hu' z",
       "expected": true

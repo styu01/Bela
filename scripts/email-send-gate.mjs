@@ -660,9 +660,48 @@ function headIsSend(toks, depth) {
 // both gates while bash ran the send. This returns the bodies of every $(...) and `...` that sit inside double
 // quotes (single quotes stay literal; heredoc bodies are cut first, like the tokenizer does). Mirrors
 // _dquote_substitutions in outgoing-copy-gate.py.
+// HEREDOCSUB1126 (PROGI msg 6028, BELA msg 6029): the body of an UNQUOTED heredoc ('<<EOF', not '<<'EOF'' /
+// '<<"EOF"' / '<<\\EOF') is expanded for ANY command: 'cat <<EOF ... $(sendmail a) ... EOF' runs the send. Quotes
+// inside such a body are plain characters, so only \\, `...` and $(...) count. Mirrors _heredoc_substitutions.
+function heredocSubstitutions(cmd) {
+  const out = []
+  for (const m of cmd.matchAll(HEREDOC_RE)) {
+    if (/^<<-?\s*['"\\]/.test(m[1])) continue
+    const body = m[0].slice(m[1].length + 1, m[0].length - m[2].length)
+    for (let i = 0; i < body.length; i++) {
+      const ch = body[i]
+      if (ch === '\\') { i++; continue }
+      if (ch === '`') {
+        let j = i + 1
+        while (j < body.length && body[j] !== '`') { if (body[j] === '\\') j++; j++ }
+        out.push(body.slice(i + 1, j))
+        i = j
+        continue
+      }
+      if (ch === '$' && body[i + 1] === '(') {
+        let j = i + 2
+        let level = 1
+        let iq = null
+        while (j < body.length && level > 0) {
+          const c = body[j]
+          if (iq) { if (c === '\\' && iq === '"') j++; else if (c === iq) iq = null }
+          else if (c === "'" || c === '"') iq = c
+          else if (c === '\\') j++
+          else if (c === '(') level++
+          else if (c === ')') level--
+          j++
+        }
+        out.push(body.slice(i + 2, level === 0 ? j - 1 : j))
+        i = j - 1
+      }
+    }
+  }
+  return out
+}
+
 function dquoteSubstitutions(cmd) {
   const s = cmd.replace(HEREDOC_RE, '$1')
-  const out = []
+  const out = heredocSubstitutions(cmd)
   let q = null
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]
