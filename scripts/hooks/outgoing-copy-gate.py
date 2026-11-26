@@ -118,12 +118,30 @@ _CODE_EXECISH = re.compile(
     re.I,
 )
 _CODE_SENDER_LIT = re.compile(r"sendmail|msmtp|swaks|send\.py", re.I)
+# EXECVEC1126 (PROGI msg 5993, measured): perl -e/-E, ruby -e and php -r/-B/-R/-E run code that can start the
+# sender ('system("sendmail a")', qx, backticks, %x, open "|...", shell_exec, passthru) or send by library
+# (Net::SMTP, MIME::Lite, php mail(), ruby net/smtp). Same naive-shape rule as _code_string_sends, with the process
+# starters and mail libraries of these languages, applied to EVERY argument (no per-language option parsing).
+# No left word boundary on the starters: an attached code argument ('-esystem(...)') glues the option letter on.
+_SCRIPT_INTERP = re.compile(r"^(perl|perl5[\d.]*|ruby|ruby[\d.]+|jruby|php|php[\d.]+)$", re.I)
+_SCRIPT_EXECISH = re.compile(r"system\b|qx\b|`|%x|exec\b|open\b|shell_exec|passthru|proc_open|popen|Open3|spawn\b", re.I)
+_SCRIPT_MAIL_LIB = re.compile(
+    r"Net::SMTP|Mail::Sendmail|MIME::Lite|Email::Sender|Mail::Mailer|net/smtp|\bmail\s*\(|PHPMailer|Swift_"
+    r"|\bMail\.(new|deliver)\b|Pony\.mail|ActionMailer", re.I)
+# EXECVEC1126: vi-family editors run ex commands from '-c CMD', '--cmd CMD' and '+CMD' ('!sendmail a',
+# 'call system(...)', measured with vim). A command that names a sender is a send.
+_EDITOR = re.compile(r"^(vim|vi|nvim|ex|view|vimdiff|gvim|rvim|evim|nvi)$", re.I)
 
 
 def _code_string_sends(code: str) -> bool:
     if _CODE_SEND.search(code):
         return True
     return bool(_CODE_EXECISH.search(code) and _CODE_SENDER_LIT.search(code))
+
+
+def _script_code_sends(code: str) -> bool:
+    return (_code_string_sends(code) or bool(_SCRIPT_MAIL_LIB.search(code))
+            or bool(_SCRIPT_EXECISH.search(code) and _CODE_SENDER_LIT.search(code)))
 # Token-ELEJERE horgonyzott cel-minta: egy URL-argumentum vagy csupasz
 # domain/utvonal illik ra; egy JSON-payload ('{...api.resend.com...}') nem.
 _RESEND_TARGET = re.compile(r"^(https?://)?([^/@\s]*\.)?api\.resend\.com(/|$|\s|$)", re.I)
@@ -672,6 +690,55 @@ def _fish_command_strings(rest):
     return out
 
 
+# EXECVEC1126: git runs a program from its global '-c KEY=VALUE' (alias.X='!cmd', core.sshCommand, core.pager,
+# diff.external...) and from 'git grep -O<prog>' / '--open-files-in-pager=<prog>' (measured: all send). A '!' alias
+# is a shell command line; any other value that names a sender is a send. Only the options BEFORE the subcommand
+# are global ('git grep -c X' is a count flag). Mirrors gitRunsSender in email-send-gate.mjs.
+_GIT_GLOBAL_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"})
+
+
+def _git_runs_sender(rest, depth: int) -> bool:
+    values = []
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        t = rest[i]
+        if t == "-c":
+            if i + 1 < len(rest):
+                values.append(rest[i + 1])
+            i += 2
+            continue
+        if t.startswith("-c") and not t.startswith("--"):
+            values.append(t[2:])
+            i += 1
+            continue
+        if t in _GIT_GLOBAL_VALUE:
+            i += 2
+            continue
+        i += 1
+    for kv in values:
+        key, _, val = kv.partition("=")
+        if _CODE_SENDER_LIT.search(val):
+            return True
+        if re.match(r"alias\.", key, re.I) and val.startswith("!"):
+            if depth >= 3:
+                if val[1:].strip():
+                    return True
+            elif is_send_invocation(val[1:], _depth=depth + 1):
+                return True
+    if i < len(rest) and rest[i] == "grep":
+        for t in rest[i + 1:]:
+            if t == "--":
+                break
+            prog = None
+            if re.match(r"-[A-Za-z]*O", t) and not t.startswith("--"):
+                prog = t[t.index("O") + 1:]
+            elif t.startswith("--o") and "open-files-in-pager".startswith(t[2:].split("=", 1)[0]) and "=" in t:
+                prog = t.split("=", 1)[1]
+            if prog and _CODE_SENDER_LIT.search(prog):
+                return True
+    return False
+
+
 def _head_is_send(toks, depth: int) -> bool:
     if toks is None:  # the depth bound was hit on a wrapper: audit it
         return True
@@ -739,6 +806,22 @@ def _head_is_send(toks, depth: int) -> bool:
                 return True
             if is_send_invocation(fs, _depth=depth + 1):
                 return True
+    if _SCRIPT_INTERP.match(prog) and any(_script_code_sends(a) for a in rest):
+        return True
+    if _EDITOR.match(prog):
+        for i, t in enumerate(rest):
+            cmd = (rest[i + 1] if i + 1 < len(rest) else None) if t in ("-c", "--cmd") else (
+                t[1:] if t.startswith("+") else None)
+            if cmd and _CODE_SENDER_LIT.search(cmd):
+                return True
+    if prog == "git" and _git_runs_sender(rest, depth):
+        return True
+    # EXECVEC1126: curl speaks SMTP itself ('curl smtp://host --mail-rcpt a@b -T body').
+    if prog == "curl" and any(
+            re.match(r"(--url=)?smtps?://", t, re.I)
+            or (t == "--url" and i + 1 < len(rest) and re.match(r"smtps?://", rest[i + 1], re.I))
+            for i, t in enumerate(rest)):
+        return True
     # interpreter kod-string: python -c / node -e / --eval, ami kuldest hiv
     if _PYTHON.match(prog) or _NODEISH.match(prog):
         for i, t in enumerate(rest):

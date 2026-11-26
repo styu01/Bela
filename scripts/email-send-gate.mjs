@@ -94,6 +94,19 @@ const CODE_SEND = /\bsmtplib\b|SMTP\s*\(|\bsendMail\s*\(|\bsendEmail\b|\bmail\.s
 const CODE_EXECISH = /\bsubprocess\b|os\.system|\bpopen\b|child_process|\bexec[A-Za-z]*\s*\(|\bspawn[A-Za-z]*\s*\(/i
 const CODE_SENDER_LIT = /sendmail|msmtp|swaks|send\.py/i
 const codeStringSends = (code) => CODE_SEND.test(code) || (CODE_EXECISH.test(code) && CODE_SENDER_LIT.test(code))
+// EXECVEC1126 (PROGI msg 5993, measured): perl -e/-E, ruby -e and php -r/-B/-R/-E run code that can start the
+// sender ('system("sendmail a")', qx, backticks, %x, open "|...", shell_exec, passthru) or send by library
+// (Net::SMTP, MIME::Lite, php mail(), ruby net/smtp). Same naive-shape rule as codeStringSends, with the process
+// starters and mail libraries of these languages, applied to EVERY argument (no per-language option parsing).
+const SCRIPT_INTERP = /^(perl|perl5[\d.]*|ruby|ruby[\d.]+|jruby|php|php[\d.]+)$/i
+// No left word boundary: an attached code argument ('-esystem(...)', '-rsystem(...)') glues the option letter on.
+const SCRIPT_EXECISH = /system\b|qx\b|`|%x|exec\b|open\b|shell_exec|passthru|proc_open|popen|Open3|spawn\b/i
+const SCRIPT_MAIL_LIB = /Net::SMTP|Mail::Sendmail|MIME::Lite|Email::Sender|Mail::Mailer|net\/smtp|\bmail\s*\(|PHPMailer|Swift_|\bMail\.(new|deliver)\b|Pony\.mail|ActionMailer/i
+const scriptCodeSends = (code) => codeStringSends(code) || SCRIPT_MAIL_LIB.test(code) ||
+  (SCRIPT_EXECISH.test(code) && CODE_SENDER_LIT.test(code))
+// EXECVEC1126: vi-family editors run ex commands from '-c CMD', '--cmd CMD' and '+CMD' ('!sendmail a',
+// 'call system(...)', measured with vim). A command that names a sender is a send.
+const EDITOR = /^(vim|vi|nvim|ex|view|vimdiff|gvim|rvim|evim|nvi)$/i
 
 // Unquoted newline / backtick / `$(` become segment separators; quoted text is
 // untouched (it is content). Tracks quote state by hand -- no shell involved.
@@ -450,6 +463,42 @@ function fishCommandStrings(rest) {
   return out
 }
 
+// EXECVEC1126: git runs a program from its global '-c KEY=VALUE' (alias.X='!cmd', core.sshCommand, core.pager,
+// diff.external...) and from 'git grep -O<prog>' / '--open-files-in-pager=<prog>' (measured: all send). A '!' alias
+// is a shell command line; any other value that names a sender is a send. Only the options BEFORE the subcommand
+// are global ('git grep -c X' is a count flag).
+const GIT_GLOBAL_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'])
+function gitRunsSender(rest, depth) {
+  const values = []
+  let i = 0
+  while (i < rest.length && rest[i].startsWith('-')) {
+    const t = rest[i]
+    if (t === '-c') { if (i + 1 < rest.length) values.push(rest[i + 1]); i += 2; continue }
+    if (t.startsWith('-c') && !t.startsWith('--')) { values.push(t.slice(2)); i++; continue }
+    if (GIT_GLOBAL_VALUE.has(t)) { i += 2; continue }
+    i++
+  }
+  for (const kv of values) {
+    const eq = kv.indexOf('=')
+    const key = eq < 0 ? kv : kv.slice(0, eq)
+    const val = eq < 0 ? '' : kv.slice(eq + 1)
+    if (CODE_SENDER_LIT.test(val)) return true
+    if (/^alias\./i.test(key) && val.startsWith('!')) {
+      if (depth >= 3) { if (val.slice(1).trim()) return true } else if (isSendInvocation(val.slice(1), depth + 1)) return true
+    }
+  }
+  if (rest[i] === 'grep') {
+    for (const t of rest.slice(i + 1)) {
+      if (t === '--') break
+      let prog = null
+      if (/^-[A-Za-z]*O/.test(t) && !t.startsWith('--')) prog = t.slice(t.indexOf('O') + 1)
+      else if (t.startsWith('--o') && 'open-files-in-pager'.startsWith(t.slice(2).split('=')[0]) && t.includes('=')) prog = t.slice(t.indexOf('=') + 1)
+      if (prog && CODE_SENDER_LIT.test(prog)) return true
+    }
+  }
+  return false
+}
+
 function headIsSend(toks, depth) {
   if (toks === null) return true // a wrapper at the depth bound: the real command is out of sight, refuse
   if (!toks.length) return false
@@ -504,6 +553,18 @@ function headIsSend(toks, depth) {
       if (isSendInvocation(s, depth + 1)) return true
     }
   }
+  if (SCRIPT_INTERP.test(prog) && rest.some((a) => scriptCodeSends(a))) return true
+  if (EDITOR.test(prog)) {
+    for (let i = 0; i < rest.length; i++) {
+      const t = rest[i]
+      const cmd = (t === '-c' || t === '--cmd') ? rest[i + 1] : t.startsWith('+') ? t.slice(1) : null
+      if (cmd && CODE_SENDER_LIT.test(cmd)) return true
+    }
+  }
+  if (prog === 'git' && gitRunsSender(rest, depth)) return true
+  // EXECVEC1126: curl speaks SMTP itself ('curl smtp://host --mail-rcpt a@b -T body').
+  if (prog === 'curl' && rest.some((t, i) => /^(--url=)?smtps?:\/\//i.test(t) ||
+    (t === '--url' && /^smtps?:\/\//i.test(rest[i + 1] || '')))) return true
   if (PYTHON.test(prog) || NODEISH.test(prog)) {
     for (let i = 0; i < rest.length; i++) {
       if ((rest[i] === '-c' || rest[i] === '-e' || rest[i] === '--eval') &&

@@ -1320,6 +1320,156 @@
       "name": "WRAPSHELL1126: control: in bash 'T' is a plain flag, the string is still found",
       "cmd": "bash -T -c \"ls\"",
       "expected": false
+    },
+    {
+      "name": "EXECVEC1126: perl -e system()",
+      "cmd": "perl -e 'system(\"sendmail a@b.hu\")'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: perl -E with backticks",
+      "cmd": "perl -E 'say `sendmail a@b.hu`'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: perl attached -e'code'",
+      "cmd": "perl -e'system(\"sendmail a@b.hu\")'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: perl pipe open",
+      "cmd": "perl -e 'open(my $f, \"|sendmail a@b.hu\"); print $f 1'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: perl Net::SMTP",
+      "cmd": "perl -MNet::SMTP -e 'Net::SMTP->new(\"h\")'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: ruby -e system()",
+      "cmd": "ruby -e 'system(\"sendmail a@b.hu\")'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: ruby %x()",
+      "cmd": "ruby -e '%x(sendmail a@b.hu)'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: php -r shell_exec()",
+      "cmd": "php -r 'shell_exec(\"sendmail a@b.hu\");'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: php -r mail() (php hands it to sendmail_path, measured)",
+      "cmd": "php -r 'mail(\"a@b.hu\",\"s\",\"b\");'",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: php -B begin code",
+      "cmd": "php -B 'system(\"sendmail a@b.hu\");' -R 1",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: vim -c '!cmd'",
+      "cmd": "vim -es -c '!sendmail a@b.hu' -c q",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: vim +cmd",
+      "cmd": "vim -es '+!sendmail a@b.hu' +q",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: vim --cmd",
+      "cmd": "vim -es --cmd 'call system(\"sendmail a@b.hu\")' -c q",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: ex -c",
+      "cmd": "ex -s -c '!sendmail a@b.hu' -c q",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: git -c alias '!cmd'",
+      "cmd": "git -c alias.z='!sendmail a@b.hu' z",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: git -c alias, a shell function",
+      "cmd": "git -c alias.z='!f(){ cd /tmp && sendmail a@b.hu; }; f' z",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: git -c core.sshCommand",
+      "cmd": "git -c core.sshCommand=sendmail fetch ssh://h/x",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: git grep -O<prog> runs <prog> on the hits (measured)",
+      "cmd": "git grep -Osendmail x",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: git grep --open-files-in-pager=<prog> (measured)",
+      "cmd": "git grep --open-files-in-pager=sendmail x",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: a unique prefix of --open-files-in-pager",
+      "cmd": "git grep --open=sendmail x",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: curl smtp://",
+      "cmd": "curl smtp://mail.example.com --mail-rcpt a@b.hu -T body.txt",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: curl --url smtps://",
+      "cmd": "curl --url smtps://mail.example.com:465 --mail-rcpt a@b.hu -T body.txt",
+      "expected": true
+    },
+    {
+      "name": "EXECVEC1126: control: perl matching the name as a pattern (no process start)",
+      "cmd": "perl -ne 'print if /sendmail/' /var/log/mail.log",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: control: perl / ruby / php without a sender",
+      "cmd": "perl -e 'print 1'; ruby -e 'puts 1'; php -r 'echo 1;'",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: control: vim -c with a harmless command",
+      "cmd": "vim -es -c 'set nu' -c q notes.txt",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: control: git grep -c is a count flag, not a config value",
+      "cmd": "git grep -c 'sendmail|msmtp' src/",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: control: git -c with a harmless value",
+      "cmd": "git -c color.ui=never status",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: control: git grep -O with the default pager",
+      "cmd": "git grep -O pattern",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: control: curl over https",
+      "cmd": "curl -s https://example.com/smtp/",
+      "expected": false
+    },
+    {
+      "name": "EXECVEC1126: a git '!' alias is parsed as a command line (quotes split the name, measured)",
+      "cmd": "git -c alias.z='!send\"\"mail a@b.hu' z",
+      "expected": true
     }
   ]
 }
