@@ -199,6 +199,29 @@ const WRAPPERS = new Map([
 ])
 const HEAD_DEPTH = 8
 
+// ENVSPLIT1126: [string, index after it] for `env ... -S STRING ...` / `--split-string[=]STRING` / an option
+// cluster ending in S ('-iS STRING', '-SSTRING'), or null. env splits STRING into words and runs them as the
+// command, followed by the remaining arguments: 'env -S "sendmail x"' sends (measured with bash), and the wrapper
+// table only consumed STRING as the value of -S. Mirrors _env_split_string in outgoing-copy-gate.py.
+function envSplitString(toks) {
+  let i = 1
+  while (i < toks.length) {
+    const t = toks[i]
+    if (t === '--') return null
+    if (t === '-S' || t === '--split-string') return i + 1 < toks.length ? [toks[i + 1], i + 2] : null
+    if (t.startsWith('--split-string=')) return [t.slice('--split-string='.length), i + 1]
+    if (t.startsWith('-') && !t.startsWith('--') && t.slice(1).includes('S')) {
+      const k = t.indexOf('S', 1)
+      if (t.slice(k + 1)) return [t.slice(k + 1), i + 1]
+      return i + 1 < toks.length ? [toks[i + 1], i + 2] : null
+    }
+    if (t === '-u' || t === '-C' || t === '--unset' || t === '--chdir') { i += 2; continue }
+    if (t.startsWith('-') || ENV_ASSIGN.test(t)) { i++; continue }
+    return null
+  }
+  return null
+}
+
 function commandHeads(toksIn, d = 0, positionalsDone = false) {
   let toks = toksIn
   for (;;) {
@@ -213,6 +236,17 @@ function commandHeads(toksIn, d = 0, positionalsDone = false) {
   if (d >= HEAD_DEPTH) return (WRAPPERS.has(w) || w === 'function' || w === 'coproc') ? [null] : [toks]
   if (w === 'function') return commandHeads(toks.slice(2), d + 1)
   if (w === 'coproc') return [...commandHeads(toks.slice(1), d + 1), ...commandHeads(toks.slice(2), d + 1)]
+  // ENVSPLIT1126: the -S string is a command line of its own; its words plus the remaining arguments are one more
+  // candidate head. The ordinary wrapper stepping below still runs too, so nothing that matched before is lost.
+  let splitHeads = []
+  if (w === 'env') {
+    const es = envSplitString(toks)
+    if (es !== null) {
+      let words
+      try { words = segmentsTokens(es[0]).flat() } catch { words = es[0].split(/\s+/).filter(Boolean) }
+      splitHeads = commandHeads([...words, ...toks.slice(es[1])], d + 1)
+    }
+  }
   const spec = WRAPPERS.get(w)
   if (!spec) return [toks]
   const [shortVal, longVal, positionalsSpec] = spec
@@ -240,11 +274,11 @@ function commandHeads(toksIn, d = 0, positionalsDone = false) {
   starts.unshift(i)
   // GNU getopt permutes: options may also follow the positional ('timeout 2 -- sendmail x', 'timeout 2 -s KILL
   // sendmail x' both run sendmail). After the positionals the flag loop runs once more for the same wrapper.
-  return starts.flatMap((s) => {
+  return [...splitHeads, ...starts.flatMap((s) => {
     const after = toks.slice(s + positionals)
     if (positionals && after.length && after[0].startsWith('-')) return commandHeads([toks[0], ...after], d + 1, true)
     return commandHeads(after, d + 1)
-  })
+  })]
 }
 
 function segmentIsSend(toksIn, depth) {

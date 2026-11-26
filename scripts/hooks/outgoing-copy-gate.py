@@ -364,6 +364,35 @@ _WRAPPERS = {
 _HEAD_DEPTH = 8
 
 
+def _env_split_string(toks):
+    """ENVSPLIT1126: (string, index after it) for `env ... -S STRING ...` / `--split-string[=]STRING` / an option
+    cluster ending in S ('-iS STRING', '-SSTRING'), or None. env splits STRING into words and runs them as the
+    command, followed by the remaining arguments: 'env -S "sendmail x"' sends (measured with bash), and the wrapper
+    table only consumed STRING as the value of -S."""
+    i = 1
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            return None
+        if t in ("-S", "--split-string"):
+            return (toks[i + 1], i + 2) if i + 1 < len(toks) else None
+        if t.startswith("--split-string="):
+            return t.split("=", 1)[1], i + 1
+        if t.startswith("-") and not t.startswith("--") and "S" in t[1:]:
+            k = t.index("S", 1)
+            if t[k + 1:]:
+                return t[k + 1:], i + 1
+            return (toks[i + 1], i + 2) if i + 1 < len(toks) else None
+        if t in ("-u", "-C", "--unset", "--chdir"):
+            i += 2
+            continue
+        if t.startswith("-") or _ENV_ASSIGN.match(t):
+            i += 1
+            continue
+        return None
+    return None
+
+
 def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
     """Every token list that can be the real command of this segment, after the
     leading assignments, command-position keywords and wrappers are stepped over."""
@@ -390,6 +419,17 @@ def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
         return _command_heads(toks[2:], _d + 1)
     if w == "coproc":
         return _command_heads(toks[1:], _d + 1) + _command_heads(toks[2:], _d + 1)
+    # ENVSPLIT1126: the -S string is a command line of its own; its words plus the remaining arguments are one more
+    # candidate head. The ordinary wrapper stepping below still runs too, so nothing that matched before is lost.
+    split_heads = []
+    if w == "env":
+        es = _env_split_string(toks)
+        if es is not None:
+            try:
+                words = [t for seg in _segments_tokens(es[0]) for t in seg]
+            except ValueError:
+                words = es[0].split()
+            split_heads = _command_heads(words + list(toks[es[1]:]), _d + 1)
     spec = _WRAPPERS.get(w)
     if spec is None:
         return [toks]
@@ -418,7 +458,7 @@ def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
             continue
         break
     starts.insert(0, i)
-    heads = []
+    heads = list(split_heads)
     for s in starts:
         after = toks[s + positionals:]
         # WRAPGATE1126: GNU getopt permutes, so options may also follow the positional ('timeout 2 -- sendmail x',

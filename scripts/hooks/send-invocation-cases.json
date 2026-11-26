@@ -855,6 +855,56 @@
       "name": "REDIRHEAD1126: control: a real background & after a &> redirection",
       "cmd": "ls &>/dev/null & echo sendmail",
       "expected": false
+    },
+    {
+      "name": "ENVSPLIT1126: the -S string is a command line",
+      "cmd": "env -S 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: -S with an unquoted word, the rest are its arguments",
+      "cmd": "env -S sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: --split-string=",
+      "cmd": "env --split-string='sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: an option cluster ending in S",
+      "cmd": "env -iS 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: -S with the string attached",
+      "cmd": "env -S'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: a wrapper inside the -S string",
+      "cmd": "env -S 'timeout 2 sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: -S after a value-taking -u",
+      "cmd": "env -u X -S 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "ENVSPLIT1126: control: the -S string only names the sender",
+      "cmd": "env -S 'echo sendmail'",
+      "expected": false
+    },
+    {
+      "name": "ENVSPLIT1126: control: a non-sender",
+      "cmd": "env -S 'ls'",
+      "expected": false
+    },
+    {
+      "name": "ENVSPLIT1126: control: after --, -S is the program name",
+      "cmd": "env -- -S sendmail",
+      "expected": false
     }
   ]
 }
