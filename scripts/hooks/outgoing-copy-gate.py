@@ -827,8 +827,12 @@ _TECH_SUFFIXED = r"""
       | \d+(?:[.:,]\d+)*-[^\W\d_]+   # szam + magyar toldalek (8:09-es, 2-es, 17:06-kor)
       | \b[A-ZÁÉÍÓÖŐÚÜŰ][^\W\d_]*-[a-záéíóöőúüű]{1,4}\b   # tulajdonnev + toldalek (Chrome-ot, Drive-ra)
       | \blevel\s+\d+\b            # angol "level 1" (autonomia-szint, log-szint)
-      | \b[a-z]+(?:-[a-z]+){1,4}\b    # kotojeles kisbetus azonosito (feladat- es skill-nevek)
+      | (?:(?<![\w-])--)?\b[a-z]+(?:-[a-z]+){1,4}\b    # kotojeles kisbetus azonosito (feladat- es skill-nevek), --flag alakban is
 """
+# FLAGDASH1030 (upstream 7e9782cf): a kotojeles azonosito-ag korabban a '--select-release-current' flagnek csak a szo
+# reszet vagta ki, a vezeto '--' ket szokoz kozott maradt, es a dupla-kotojel szabaly proza-gondolatjelnek szamolta.
+# Az opcionalis '--' elotag az egesz flaget viszi. A valodi ' -- ' prozaban tovabbra is szamit: az elotag utan
+# kozvetlenul betu kell, a proza-gondolatjel utan szokoz van.
 TECHNICAL = re.compile(_TECH_COMMON + "|" + _TECH_SUFFIXED, re.X)
 NAME_MASK = re.compile(_TECH_COMMON, re.X)
 
