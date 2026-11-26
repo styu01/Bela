@@ -33,6 +33,7 @@ import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
+import { selectTickWindow } from './message-router-window.js'
 import { readFleetPauseState, shouldHoldForFleetPause, type FleetPauseState } from './usage-fleet-pause.js'
 
 // A message that cannot be delivered within this window (target session never
@@ -470,7 +471,7 @@ export async function runMessageRouterTick(): Promise<void> {
     // rest roll to the next 5s tick. Bounds a single tick's wall-time so a
     // backlog (e.g. after a delivery stall) can never make one tick run long
     // and starve the event loop -- the slow-tick half of the progressive-hang
-    // pattern. Ordering is preserved (oldest first) so nothing is starved.
+    // pattern. Which rows enter the window: see selectTickWindow below.
     //
     // Federated (slash-qualified) recipients are split out FIRST: they must
     // never reach the local path (agentSessionName / readAgentRemoteHost would
@@ -480,7 +481,17 @@ export async function runMessageRouterTick(): Promise<void> {
     const localPending: AgentMessage[] = []
     const federatedPending: AgentMessage[] = []
     for (const m of allPending) (isQualifiedId(m.to_agent) ? federatedPending : localPending).push(m)
-    const pending = localPending.slice(0, MAX_MESSAGES_PER_TICK)
+    // The window is chosen FAIRLY across recipients (selectTickWindow, upstream 85c11575): the globally oldest
+    // rows of busy recipients used to fill it and starve every other recipient, idle ones included. Each
+    // recipient's own rows stay oldest first.
+    // LOCAL ADAPTATION: selectTickWindow leaves the main agent's rows out (it drains its own inbox), but in this
+    // fork a main-agent row in the window is what fires the [inbox-wakeup] nudge below. So the OLDEST main-agent
+    // row, if any, rides in front of the window and takes exactly one slot; the rest of the window is fair.
+    const mainHead = localPending.find((m) => m.to_agent === MAIN_AGENT_ID)
+    const pending = [
+      ...(mainHead ? [mainHead] : []),
+      ...selectTickWindow(localPending, MAX_MESSAGES_PER_TICK - (mainHead ? 1 : 0), MAIN_AGENT_ID),
+    ]
     const now = Date.now()
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.

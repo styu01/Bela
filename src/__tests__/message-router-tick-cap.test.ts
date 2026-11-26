@@ -8,7 +8,7 @@
 //
 // Since card 2922e380, sessionExistsOnHost is called once per unique receiver
 // in the pre-pass and cached for the main loop (not once per message). The work
-// cap is verified by the slice() bound: at most MAX_MESSAGES_PER_TICK messages
+// cap is verified by the tick-window bound (selectTickWindow): at most MAX_MESSAGES_PER_TICK messages
 // enter the loop per tick, regardless of backlog size.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
