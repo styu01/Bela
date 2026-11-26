@@ -2295,6 +2295,36 @@
       "name": "HEREDOCDELIM1126: control: EOF inside a <<'EOF2' body is no terminator",
       "cmd": "cat <<'EOF2'\nsendmail a@b.hu\nEOF\nEOF2",
       "expected": false
+    },
+    {
+      "name": "SUBOUTRUN1126: eval runs the output of echo of an adjacent-quoted sender name",
+      "cmd": "eval \"$(echo 'send''mail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: eval runs the output of echo of a backslash-split sender name",
+      "cmd": "eval \"$(echo send\\\\mail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: sh -c runs the output of printf of a part-quoted sender name",
+      "cmd": "sh -c \"$(printf '%s' send'mail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: eval runs the output of echo -e of an adjacent-quoted sender name",
+      "cmd": "eval \"$(echo -e 'send''mail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: control: eval of echo date",
+      "cmd": "eval \"$(echo 'date')\"",
+      "expected": false
+    },
+    {
+      "name": "SUBOUTRUN1126: control: sh -c of printf ls",
+      "cmd": "sh -c \"$(printf '%s' 'ls')\"",
+      "expected": false
     }
   ]
 }
