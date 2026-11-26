@@ -92,7 +92,12 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       results = searchMemories(q, ALLOWED_CHAT_ID, limit)
       if (results.length === 0) {
         const db2 = getDb()
-        results = db2.prepare('SELECT * FROM memories WHERE content LIKE ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, limit) as Memory[]
+        // MEMKWSEARCH1018: keywords joins the fallback here, as it already does on the
+        // agent-scoped branch above. fts5 indexes content AND keywords, the agent branch
+        // searches both, and this one searched content alone -- so a row findable with
+        // ?agent= was invisible without it. A zero that looks like a real answer is the
+        // whole cost of this bug, which is why the fix is the parity, not a new mode.
+        results = db2.prepare('SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, `%${q}%`, limit) as Memory[]
       }
     } else if (agentId) {
       // Category goes into the query, not a post-filter: see getAgentMemories.

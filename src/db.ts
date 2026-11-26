@@ -1381,7 +1381,7 @@ export function searchMemories(query: string, chatId: string, limit = 3): Memory
       .prepare(
         `SELECT m.*, f.rank AS rank FROM memories m
          JOIN memories_fts f ON m.id = f.rowid
-         WHERE f.content MATCH ? AND m.chat_id = ?
+         WHERE f.memories_fts MATCH ? AND m.chat_id = ?
          ORDER BY rank
          LIMIT ?`
       )
