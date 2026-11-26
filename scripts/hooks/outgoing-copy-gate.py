@@ -1182,45 +1182,291 @@ def _is_stdin_shell_head(h) -> bool:
     return saw_s or i >= len(rest) or rest[i] in _STDIN_FILES
 
 
-# Calibrated on the fleet's real python heredocs (2255; the plain _code_string_sends rule refused 5, all scripts
-# that EDIT or TEST mail code, the mail words inside string literals): blank string literals line by line, then a
-# line sends when a mail call stands OUTSIDE strings, or a process starter stands outside strings and that same
-# line names a sender. Mirrors interpCodeSends in email-send-gate.mjs.
-_TRIPLE_STR = re.compile(r"'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\"")
-_LINE_STR = re.compile(r"'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`")
+# INTERPSTDIN2 (PROGI msg 6049, BELA msg 6050): the code rule for a program read from stdin is whole-program and
+# language-aware: _blank_python / _blank_js blank string literals and comments (keeping f-string {...} and template
+# ${...} expressions as code); a mail call outside strings sends, else a process starter / dynamic exec outside
+# strings anywhere plus a sender name or mail call anywhere in the program sends (a call split over lines and a
+# command passed in a variable used to pass). Mirrors interpCodeSends / blankPython / blankJs in email-send-gate.mjs.
+_INTERP_EXECISH = re.compile(
+    r"subprocess|\.system\s*\(|\bpopen\b|child_process|\bexec[A-Za-z]*\s*\(|_exec[A-Za-z]*\s*\(|\bspawn[A-Za-z]*\s*\("
+    r"|\beval\s*\(|__import__|\bexecSync\b|\bexecFile\b|\bspawnSync\b", re.I)
 
 
-def _blank_strings(code: str) -> str:
-    keep = lambda m: re.sub(r"[^\n]", " ", m.group(0))
-    return _LINE_STR.sub(keep, _TRIPLE_STR.sub(keep, code))
+def _is_ident_char(c) -> bool:
+    return bool(c) and (c.isascii() and (c.isalnum() or c in "_$"))
 
 
-def _interp_code_sends(code: str) -> bool:
-    bare = _blank_strings(code).split("\n")
-    orig = code.split("\n")
-    return any(_CODE_SEND.search(l) or (_CODE_EXECISH.search(l) and _CODE_SENDER_LIT.search(orig[i] if i < len(orig) else ""))
-               for i, l in enumerate(bare))
+def _blank_python(code: str) -> str:
+    out = list(code)
+    n = len(code)
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    def scan(i, stop):
+        depth = 0
+        while i < n:
+            c = code[i]
+            if c == "#":
+                e = code.find("\n", i)
+                e = n if e < 0 else e
+                blank(i, e)
+                i = e
+                continue
+            if c in "'\"":
+                i = string(i)
+                continue
+            if stop:
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    if depth == 0 and c == stop:
+                        return i
+                    depth -= 1
+            i += 1
+        return n
+
+    def string(i):
+        q = code[i]
+        p = i
+        while p > 0 and code[p - 1] in "rRbBuUfF" and i - p < 2:
+            p -= 1
+        is_f = p < i and not _is_ident_char(code[p - 1] if p > 0 else "") and any(ch in "fF" for ch in code[p:i])
+        triple = code.startswith(q * 3, i)
+        k = i + (3 if triple else 1)
+        seg = i
+        while k < n:
+            ch = code[k]
+            if ch == "\\":
+                k += 2
+                continue
+            if (code.startswith(q * 3, k) if triple else ch == q):
+                k += 3 if triple else 1
+                break
+            if not triple and ch == "\n":
+                break
+            if is_f and ch == "{":
+                if k + 1 < n and code[k + 1] == "{":
+                    k += 2
+                    continue
+                blank(seg, k + 1)
+                k = scan(k + 1, "}")
+                seg = k
+                k += 1
+                continue
+            k += 1
+        blank(seg, min(k, n))
+        return k
+
+    scan(0, None)
+    return "".join(out)
+
+
+def _blank_js(code: str) -> str:
+    out = list(code)
+    n = len(code)
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    def prev_sig(i):
+        p = i - 1
+        while p >= 0 and code[p] in " \t":
+            p -= 1
+        return "" if p < 0 else code[p]
+
+    def scan(i, stop):
+        depth = 0
+        while i < n:
+            c = code[i]
+            nx = code[i + 1] if i + 1 < n else ""
+            if c == "/" and nx == "/":
+                e = code.find("\n", i)
+                e = n if e < 0 else e
+                blank(i, e)
+                i = e
+                continue
+            if c == "/" and nx == "*":
+                e = code.find("*/", i + 2)
+                e = n if e < 0 else e + 2
+                blank(i, e)
+                i = e
+                continue
+            ps = prev_sig(i)
+            if c == "/" and (ps == "" or ps in "\n(,=:[!&|?{};+-*%<>~^"):
+                k, cls = i + 1, False
+                while k < n and code[k] != "\n":
+                    if code[k] == "\\":
+                        k += 2
+                        continue
+                    if code[k] == "[":
+                        cls = True
+                    elif code[k] == "]":
+                        cls = False
+                    elif code[k] == "/" and not cls:
+                        break
+                    k += 1
+                blank(i, k + 1)
+                i = k + 1
+                continue
+            if c in "'\"":
+                k = i + 1
+                while k < n and code[k] != c and code[k] != "\n":
+                    k += 2 if code[k] == "\\" else 1
+                blank(i, k + 1)
+                i = k + 1
+                continue
+            if c == "`":
+                k, seg = i + 1, i
+                while k < n and code[k] != "`":
+                    if code[k] == "\\":
+                        k += 2
+                        continue
+                    if code[k] == "$" and k + 1 < n and code[k + 1] == "{":
+                        blank(seg, k + 2)
+                        k = scan(k + 2, "}")
+                        seg = k
+                        k += 1
+                        continue
+                    k += 1
+                blank(seg, k + 1)
+                i = k + 1
+                continue
+            if stop:
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    if depth == 0 and c == stop:
+                        return i
+                    depth -= 1
+            i += 1
+        return n
+
+    scan(0, None)
+    return "".join(out)
+
+
+def _interp_code_sends(code: str, lang: str = "py") -> bool:
+    bare = _blank_js(code) if lang == "js" else _blank_python(code)
+    if _CODE_SEND.search(bare):
+        return True
+    return bool(_INTERP_EXECISH.search(bare) and (_CODE_SENDER_LIT.search(code) or _CODE_SEND.search(code)))
+
+
+_STDIN_EXEC = re.compile(r"\b(?:exec|eval|compile|runpy|Function|runInThisContext|runInNewContext)\b")
+_STDIN_READ = re.compile(r"stdin|/dev/fd/0|readFileSync\s*\(\s*(?:0\b|['\"]/dev/stdin)|\binput\s*\(")
+
+
+def _code_runs_stdin(code) -> bool:
+    return isinstance(code, str) and bool(_STDIN_EXEC.search(code)) and bool(_STDIN_READ.search(code))
+
+
+_NODE_PROG = re.compile(r"^(node|nodejs)$", re.I)
+_NODE_WITH_VALUE = frozenset({
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions",
+    "--input-type", "--title", "--env-file", "--inspect-port", "--debug-port", "--redirect-warnings", "--disable-warning",
+    "--watch-path", "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-filename",
+    "--secure-heap", "--secure-heap-min", "--stack-trace-limit", "--unhandled-rejections", "--trace-event-categories"})
+
+
+def _stdin_interpreter_lang(h):
+    """INTERPSTDIN1126 / INTERPSTDIN2: 'py' / 'js' when this head is python / node taking its PROGRAM from stdin (real
+    option parsing: -X/-W values, -c/-e code that execs stdin, /dev/stdin), else None. Mirrors stdinInterpreterLang."""
+    if not h:
+        return None
+    prog = _basename(h[0])
+    is_py = bool(_PYTHON.match(prog) or re.match(r"python3\.\d+$", prog, re.I))
+    if not is_py and not _NODE_PROG.match(prog):
+        return None
+    lang = "py" if is_py else "js"
+    rest = _without_redirections(h[1:])
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t == "--":
+            return lang if i + 1 >= len(rest) or rest[i + 1] in _STDIN_FILES else None
+        if t == "-":
+            return lang
+        if is_py:
+            if t.startswith("--"):
+                if t.startswith("--help") or t == "--version":
+                    return None
+                if t == "--check-hash-based-pycs":
+                    i += 1
+                i += 1
+                continue
+            if t.startswith("-"):
+                k = 1
+                while k < len(t):
+                    ch = t[k]
+                    if ch == "c":
+                        code = t[k + 1:] if k + 1 < len(t) else (rest[i + 1] if i + 1 < len(rest) else None)
+                        return lang if _code_runs_stdin(code) else None
+                    if ch in "mhV?":
+                        return None
+                    if ch in "XW":
+                        if k + 1 >= len(t):
+                            i += 1
+                        break
+                    k += 1
+                i += 1
+                continue
+        else:
+            if t in ("-e", "--eval", "-p", "--print"):
+                return lang if _code_runs_stdin(rest[i + 1] if i + 1 < len(rest) else None) else None
+            if re.match(r"--(eval|print)=", t):
+                return lang if _code_runs_stdin(t[t.index("=") + 1:]) else None
+            if re.match(r"-[A-Za-z]{2,}$", t) and re.search(r"[ep]", t):
+                return lang if _code_runs_stdin(rest[i + 1] if i + 1 < len(rest) else None) else None
+            if t in ("-c", "--check", "-h", "--help", "-v", "--version"):
+                return None
+            if t in _NODE_WITH_VALUE:
+                i += 2
+                continue
+            if t.startswith("-"):
+                i += 1
+                continue
+        return lang if t in _STDIN_FILES else None
+    return lang
 
 
 def _is_stdin_interpreter_head(h) -> bool:
-    """INTERPSTDIN1126 (PROGI msg 6034): python / node reading their PROGRAM from stdin. That text is code, judged by
-    _code_string_sends, never by name. Mirrors isStdinInterpreterHead in email-send-gate.mjs."""
-    if not h:
-        return False
-    prog = _basename(h[0])
-    is_py = bool(_PYTHON.match(prog) or re.match(r"python3\.\d+$", prog, re.I))
-    if not is_py and prog != "node":
-        return False
-    rest = _without_redirections(h[1:])
-    run_flags = ("-c", "-m") if is_py else ("-e", "--eval", "-p", "--print")
-    for t in rest:
-        if t in run_flags or (is_py and re.match(r"-[A-Za-z]*[cm]", t) and not t.startswith("--")):
-            return False
-        if t == "-":
-            return True
-        if not t.startswith("-"):
-            return False
-    return True
+    return _stdin_interpreter_lang(h) is not None
+
+
+def _pipe_feeders(segs, k):
+    """The feeders of segment k through pipes, plus (GROUPPIPE1126) a '{ ...; }' group closing right before the pipe.
+    Returns (left texts, feeder token lists). Mirrors pipeFeeders."""
+    def is_pipe(sep):
+        return sep.endswith("|") and not sep.endswith("||")
+    j = k - 1
+    left, feeders = [], []
+    while j >= 0 and is_pipe(segs[j][1]):
+        left.insert(0, " ".join(segs[j][0]))
+        feeders.insert(0, segs[j][0])
+        j -= 1
+    # GROUPPIPE1126 (PROGI msg 6034): '{ echo X; } | bash' -- collect the group back to its opening '{'.
+    if feeders and feeders[0] == ["}"]:
+        while j >= 0:
+            left.insert(0, " ".join(segs[j][0]))
+            feeders.insert(0, segs[j][0])
+            if segs[j][0] and segs[j][0][0] == "{":
+                break
+            j -= 1
+    return left, feeders
+
+
+def _echo_literal(toks):
+    """echo / printf arguments as the text they print (-n/-e/-E dropped); None for any other command."""
+    hs = _command_heads(toks) if toks else []
+    h = hs[0] if hs else None
+    if not h or _basename(h[0]) not in ("echo", "printf"):
+        return None
+    return " ".join(t for t in h[1:] if not re.match(r"-[neE]+$", t))
 
 
 def _segments_with_separators(cmd: str):
@@ -1268,31 +1514,46 @@ def _stdin_shell_texts(cmd: str):
             phs = _command_heads(base) if base else []
             ph = phs[0] if phs else None
             pp = _basename(ph[0]) if ph else ""
-            if pp in ("source", ".") or ((_WRAPPER_SHELL.match(pp) or _FISH_SHELL.match(pp))
-                                         and _shell_command_string(_without_redirections(ph[1:]), pp) is None):
+            pl = _stdin_interpreter_lang(ph)
+            if pl or pp in ("source", ".") or ((_WRAPPER_SHELL.match(pp) or _FISH_SHELL.match(pp))
+                                               and _shell_command_string(_without_redirections(ph[1:]), pp) is None):
                 body, depth, m2 = [], 1, k + 1
                 while m2 < len(segs) and depth > 0:
                     body.append(segs[m2][0])
                     depth += segs[m2][1].count("(") - segs[m2][1].count(")")
                     m2 += 1
-                piped.append(" ; ".join(" ".join(b) for b in body))
-                for b in body:
-                    bhs = _command_heads(b) if b else []
-                    bh = bhs[0] if bhs else None
-                    if bh and _basename(bh[0]) in ("echo", "printf"):
-                        run.append(" ".join(t for t in bh[1:] if not re.match(r"-[neE]+$", t)))
+                if pl:
+                    # INTERPSTDIN2: 'python3 <(echo ...)': an echo/printf literal is the program (code rule), any other
+                    # command makes it at run time (name rule on its text).
+                    for b in body:
+                        lit = _echo_literal(b)
+                        if lit is not None:
+                            code.append((lit, pl))
+                        else:
+                            piped.append(" ".join(b))
+                else:
+                    piped.append(" ; ".join(" ".join(b) for b in body))
+                    for b in body:
+                        lit = _echo_literal(b)
+                        if lit is not None:
+                            run.append(lit)
         heads = _command_heads(toks)
-        if heads and _is_stdin_interpreter_head(heads[0]):
+        lang = _stdin_interpreter_lang(heads[0]) if heads else None
+        if lang:
             for i, t in enumerate(toks):
                 if t == "<<<" and i + 1 < len(toks):
-                    code.append(toks[i + 1])
+                    code.append((toks[i + 1], lang))
                 elif t.startswith("<<<") and len(t) > 3:
-                    code.append(t[3:])
-            if k > 0 and is_pipe(segs[k - 1][1]):
-                lhs = _command_heads(segs[k - 1][0])
-                lh = lhs[0] if lhs else None
-                if lh and _basename(lh[0]) in ("echo", "printf"):
-                    code.append(" ".join(lh[1:]))
+                    code.append((t[3:], lang))
+            # INTERPSTDIN2: the whole pipeline (and a '{ }' group) to its left feeds it: echo/printf literals are the
+            # program (code rule), another feeder makes it at run time (name rule); 'cat <<EOF' is read below.
+            _, feeders = _pipe_feeders(segs, k)
+            for f in feeders:
+                lit = _echo_literal(f)
+                if lit is not None:
+                    code.append((lit, lang))
+                else:
+                    piped.append(" ".join(f))
             continue
         if not heads or not _is_stdin_shell_head(heads[0]):
             continue
@@ -1301,28 +1562,13 @@ def _stdin_shell_texts(cmd: str):
                 run.append(toks[i + 1])
             elif t.startswith("<<<") and len(t) > 3:
                 run.append(t[3:])
-        j = k - 1
-        left = []
-        feeders = []
-        while j >= 0 and is_pipe(segs[j][1]):
-            left.insert(0, " ".join(segs[j][0]))
-            feeders.insert(0, segs[j][0])
-            j -= 1
-        # GROUPPIPE1126 (PROGI msg 6034): '{ echo X; } | bash' -- collect the group back to its opening '{'.
-        if feeders and feeders[0] == ["}"]:
-            while j >= 0:
-                left.insert(0, " ".join(segs[j][0]))
-                feeders.insert(0, segs[j][0])
-                if segs[j][0] and segs[j][0][0] == "{":
-                    break
-                j -= 1
+        left, feeders = _pipe_feeders(segs, k)
         if left:
             piped.append(" | ".join(left))
             for f in feeders:
-                lhs = _command_heads(f)
-                lh = lhs[0] if lhs else None
-                if lh and _basename(lh[0]) in ("echo", "printf"):
-                    run.append(" ".join(t for t in lh[1:] if not re.match(r"-[neE]+$", t)))
+                lit = _echo_literal(f)
+                if lit is not None:
+                    run.append(lit)
     for m in _HEREDOC.finditer(cmd):
         line_start = cmd.rfind("\n", 0, m.start()) + 1
         try:
@@ -1336,10 +1582,12 @@ def _stdin_shell_texts(cmd: str):
         if hs and _is_stdin_shell_head(hs[0]):
             run.append(body)
             continue
-        if hs and _is_stdin_interpreter_head(hs[0]):
-            code.append(body)
+        last_lang = _stdin_interpreter_lang(hs[0]) if hs else None
+        if last_lang:
+            code.append((body, last_lang))
             continue
-        # 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
+        # 'cat <<EOF | bash' / 'cat <<EOF | python3': the heredoc feeds a command whose output is piped into a stdin
+        # shell or interpreter on the same line (INTERPSTDIN2: through any pipe chain).
         try:
             hl = _segments_with_separators(cmd[line_start:m.start() + len(m.group(1))])
         except ValueError:
@@ -1349,20 +1597,39 @@ def _stdin_shell_texts(cmd: str):
             f -= 1
         if f < 0:
             continue
-        g, shell_after = f, False
+        g, sink = f, None
         while g < len(hl) - 1 and is_pipe(hl[g][1]):
             g += 1
-            gh = _command_heads(hl[g][0])
-            if gh and _is_stdin_shell_head(gh[0]):
-                shell_after = True
+            ghs = _command_heads(hl[g][0])
+            gh = ghs[0] if ghs else None
+            if gh and _is_stdin_shell_head(gh):
+                sink = "sh"
                 break
-        if not shell_after:
+            gl = _stdin_interpreter_lang(gh)
+            if gl:
+                sink = gl
+                break
+        # INTERPSTDIN2: 'python3 < <(cat <<EOF ... EOF)', 'source <(cat <<EOF ... EOF)': the heredoc-fed command
+        # opens a process substitution that a stdin shell / interpreter reads as its program.
+        if not sink and f > 0 and hl[f - 1][1] == "(" and hl[f - 1][0] and hl[f - 1][0][-1] == "<":
+            base = hl[f - 1][0][:-1]
+            if base and base[-1] == "<":
+                base = base[:-1]
+            phs = _command_heads(base) if base else []
+            ph = phs[0] if phs else None
+            pp = _basename(ph[0]) if ph else ""
+            sink = _stdin_interpreter_lang(ph) or ("sh" if (pp in ("source", ".") or (
+                (_WRAPPER_SHELL.match(pp) or _FISH_SHELL.match(pp))
+                and _shell_command_string(_without_redirections(ph[1:]), pp) is None)) else None)
+        if not sink:
             continue
-        fh = _command_heads(hl[f][0])
-        if fh and fh[0] and _basename(fh[0][0]) == "cat":
+        fhs = _command_heads(hl[f][0])
+        if not (fhs and fhs[0] and _basename(fhs[0][0]) == "cat"):
+            piped.append(body)
+        elif sink == "sh":
             run.append(body)
         else:
-            piped.append(body)
+            code.append((body, sink))
     return run, piped, code
 
 
@@ -1370,7 +1637,7 @@ def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
     run, piped, code = _stdin_shell_texts(cmd)
     if any(_CODE_SENDER_LIT.search(t) for t in piped):
         return True
-    if any(_interp_code_sends(t) for t in code):
+    if any(_interp_code_sends(t, lang) for t, lang in code):
         return True
     for text in run:
         if _depth >= 3:

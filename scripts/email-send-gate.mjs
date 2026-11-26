@@ -826,36 +826,209 @@ function isStdinShellHead(h) {
   return sawS || i >= rest.length || STDIN_FILES.has(rest[i])
 }
 // INTERPSTDIN1126 (PROGI msg 6034): python / node reading their PROGRAM from stdin ('python3 - <<EOF',
-// 'python3 <<< "..."', 'node <<< "...execSync(...)"', 'echo ... | python3'): that text is code, judged by the
-// python -c / node -e rule (codeStringSends), never by name (a heredoc script that mentions a sender is data).
-// Calibrated on the fleet's real python heredocs (2255; the plain codeStringSends rule refused 5 of them, all
-// scripts that EDIT or TEST mail code, so the mail words sat inside string literals): string literals are blanked
-// line by line first, then a line sends when a mail call stands OUTSIDE strings (CODE_SEND), or a process starter
-// stands outside strings and that same line names a sender. Mirrors _interp_code_sends.
-function blankStrings(code) {
-  const keepNl = (m) => m.replace(/[^\n]/g, ' ')
-  return code
-    .replace(/'''[\s\S]*?'''|"""[\s\S]*?"""/g, keepNl)
-    .replace(/'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, keepNl)
+// 'python3 <<< "..."', 'node <<< "...execSync(...)"', 'echo ... | python3'): that text is code, judged by a code
+// rule, never by the command-name rule (a heredoc script that mentions a sender is data).
+// INTERPSTDIN2 (PROGI msg 6049, BELA msg 6050): the code rule is now whole-program and language-aware.
+// - A language scanner (blankPython / blankJs) blanks string literals and comments, keeping f-string {...} and
+//   template ${...} expressions as code. The old per-line regexes mis-read "'''" inside a plain string, a backtick
+//   in a Python comment, an f-string call and a JS comment, and hid real code that way.
+// - interpCodeSends: a mail call outside strings (CODE_SEND) sends; else a process starter or dynamic exec
+//   outside strings (INTERP_EXECISH) anywhere in the program, plus a sender name or mail call ANYWHERE in it
+//   (strings included), sends. The old same-line condition missed a call split over lines
+//   ('subprocess.run(\n["sendmail", ...])') and a command passed in a variable ('c = "sendmail a"; os.system(c)').
+//   Measured on the fleet's real interpreter-stdin texts (PROGI msg 6049: 2703): the only refusals are our own
+//   gate-test harnesses (scripts that run subprocesses and name the sender); a script that only edits or prints
+//   mail code stays allowed. A script that runs a subprocess AND names the sender for another purpose is refused:
+//   the stated limit below.
+// - stdinInterpreterLang: real option parsing, so '-X utf8', '-W ignore', '-Ximporttime', '-Wignore', '/dev/stdin'
+//   and '/dev/fd/0' keep the stdin reading, and a -c / -e code that execs stdin ('exec(sys.stdin.read())',
+//   'eval(require("fs").readFileSync(0))') makes stdin the program too.
+// Mirrors _interp_code_sends / _blank_python / _blank_js / _stdin_interpreter_lang in outgoing-copy-gate.py.
+const INTERP_EXECISH = /subprocess|\.system\s*\(|\bpopen\b|child_process|\bexec[A-Za-z]*\s*\(|_exec[A-Za-z]*\s*\(|\bspawn[A-Za-z]*\s*\(|\beval\s*\(|__import__|\bexecSync\b|\bexecFile\b|\bspawnSync\b/i
+const isIdentChar = (c) => c !== undefined && /[A-Za-z0-9_$]/.test(c)
+// Python: returns the code with string-literal text and comments turned into spaces (newlines kept, same length).
+function blankPython(code) {
+  const out = code.split('')
+  const n = code.length
+  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' ' }
+  // scan code from i; with a stop char, return at that char on bracket depth 0 (an f-string's closing '}')
+  function scan(i, stop) {
+    let depth = 0
+    while (i < n) {
+      const c = code[i]
+      if (c === '#') { let e = code.indexOf('\n', i); if (e < 0) e = n; blank(i, e); i = e; continue }
+      if (c === "'" || c === '"') { i = str(i); continue }
+      if (stop) {
+        if (c === '(' || c === '[' || c === '{') depth++
+        else if (c === ')' || c === ']' || c === '}') { if (depth === 0 && c === stop) return i; depth-- }
+      }
+      i++
+    }
+    return n
+  }
+  function str(i) {
+    const q = code[i]
+    let p = i
+    while (p > 0 && /[rRbBuUfF]/.test(code[p - 1]) && i - p < 2) p--
+    const isF = p < i && !isIdentChar(code[p - 1]) && /[fF]/.test(code.slice(p, i))
+    const triple = code.startsWith(q + q + q, i)
+    let k = i + (triple ? 3 : 1)
+    let segStart = i
+    while (k < n) {
+      const ch = code[k]
+      if (ch === '\\') { k += 2; continue }
+      if (triple ? code.startsWith(q + q + q, k) : ch === q) { k += triple ? 3 : 1; break }
+      if (!triple && ch === '\n') break
+      if (isF && ch === '{') {
+        if (code[k + 1] === '{') { k += 2; continue }
+        blank(segStart, k + 1)
+        k = scan(k + 1, '}')
+        segStart = k
+        k++
+        continue
+      }
+      k++
+    }
+    blank(segStart, Math.min(k, n))
+    return k
+  }
+  scan(0, null)
+  return out.join('')
 }
-function interpCodeSends(code) {
-  const bare = blankStrings(code).split('\n')
-  const orig = code.split('\n')
-  return bare.some((l, i) => CODE_SEND.test(l) || (CODE_EXECISH.test(l) && CODE_SENDER_LIT.test(orig[i] || '')))
+// JavaScript: strings, template literal text (keeping ${...}), // and /* */ comments, and regex literals.
+function blankJs(code) {
+  const out = code.split('')
+  const n = code.length
+  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' ' }
+  const prevSig = (i) => { let p = i - 1; while (p >= 0 && (code[p] === ' ' || code[p] === '\t')) p--; return p < 0 ? '' : code[p] }
+  function scan(i, stop) {
+    let depth = 0
+    while (i < n) {
+      const c = code[i]
+      if (c === '/' && code[i + 1] === '/') { let e = code.indexOf('\n', i); if (e < 0) e = n; blank(i, e); i = e; continue }
+      if (c === '/' && code[i + 1] === '*') { let e = code.indexOf('*/', i + 2); e = e < 0 ? n : e + 2; blank(i, e); i = e; continue }
+      if (c === '/' && (prevSig(i) === '' || '\n(,=:[!&|?{};+-*%<>~^'.includes(prevSig(i)))) {
+        let k = i + 1
+        let cls = false
+        while (k < n && code[k] !== '\n') {
+          if (code[k] === '\\') { k += 2; continue }
+          if (code[k] === '[') cls = true
+          else if (code[k] === ']') cls = false
+          else if (code[k] === '/' && !cls) break
+          k++
+        }
+        blank(i, k + 1)
+        i = k + 1
+        continue
+      }
+      if (c === "'" || c === '"') {
+        let k = i + 1
+        while (k < n && code[k] !== c && code[k] !== '\n') k += code[k] === '\\' ? 2 : 1
+        blank(i, k + 1)
+        i = k + 1
+        continue
+      }
+      if (c === '`') {
+        let k = i + 1
+        let segStart = i
+        while (k < n && code[k] !== '`') {
+          if (code[k] === '\\') { k += 2; continue }
+          if (code[k] === '$' && code[k + 1] === '{') { blank(segStart, k + 2); k = scan(k + 2, '}'); segStart = k; k++; continue }
+          k++
+        }
+        blank(segStart, k + 1)
+        i = k + 1
+        continue
+      }
+      if (stop) {
+        if (c === '(' || c === '[' || c === '{') depth++
+        else if (c === ')' || c === ']' || c === '}') { if (depth === 0 && c === stop) return i; depth-- }
+      }
+      i++
+    }
+    return n
+  }
+  scan(0, null)
+  return out.join('')
 }
-function isStdinInterpreterHead(h) {
-  if (!h || !h.length) return false
+function interpCodeSends(code, lang) {
+  const bare = lang === 'js' ? blankJs(code) : blankPython(code)
+  if (CODE_SEND.test(bare)) return true
+  return INTERP_EXECISH.test(bare) && (CODE_SENDER_LIT.test(code) || CODE_SEND.test(code))
+}
+// A -c / -e program that executes what it reads from stdin makes stdin the program.
+const STDIN_EXEC = /\b(?:exec|eval|compile|runpy|Function|runInThisContext|runInNewContext)\b/
+const STDIN_READ = /stdin|\/dev\/fd\/0|readFileSync\s*\(\s*(?:0\b|['"]\/dev\/stdin)|\binput\s*\(/
+const codeRunsStdin = (code) => typeof code === 'string' && STDIN_EXEC.test(code) && STDIN_READ.test(code)
+const NODE_PROG = /^(node|nodejs)$/i
+const NODE_WITH_VALUE = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions',
+  '--input-type', '--title', '--env-file', '--inspect-port', '--debug-port', '--redirect-warnings', '--disable-warning',
+  '--watch-path', '--openssl-config', '--icu-data-dir', '--diagnostic-dir', '--report-dir', '--report-filename',
+  '--secure-heap', '--secure-heap-min', '--stack-trace-limit', '--unhandled-rejections', '--trace-event-categories'])
+// 'py' / 'js' when this head is python / node taking its PROGRAM from stdin; null otherwise.
+function stdinInterpreterLang(h) {
+  if (!h || !h.length) return null
   const prog = basename(h[0])
   const isPy = PYTHON.test(prog) || /^python3\.\d+$/i.test(prog)
-  if (!isPy && prog !== 'node') return false
+  if (!isPy && !NODE_PROG.test(prog)) return null
+  const lang = isPy ? 'py' : 'js'
   const rest = withoutRedirections(h.slice(1))
-  const runFlags = isPy ? ['-c', '-m'] : ['-e', '--eval', '-p', '--print']
-  for (const t of rest) {
-    if (runFlags.includes(t) || (isPy && /^-[A-Za-z]*[cm]/.test(t) && !t.startsWith('--'))) return false
-    if (t === '-') return true
-    if (!t.startsWith('-')) return false
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i]
+    if (t === '--') return i + 1 >= rest.length || STDIN_FILES.has(rest[i + 1]) ? lang : null
+    if (t === '-') return lang
+    if (isPy) {
+      if (t.startsWith('--')) {
+        if (t.startsWith('--help') || t === '--version') return null
+        if (t === '--check-hash-based-pycs') i++
+        continue
+      }
+      if (t.startsWith('-')) {
+        for (let k = 1; k < t.length; k++) {
+          const ch = t[k]
+          if (ch === 'c') return codeRunsStdin(k + 1 < t.length ? t.slice(k + 1) : rest[i + 1]) ? lang : null
+          if (ch === 'm' || ch === 'h' || ch === 'V' || ch === '?') return null
+          if (ch === 'X' || ch === 'W') { if (k + 1 >= t.length) i++; break }
+        }
+        continue
+      }
+    } else {
+      if (t === '-e' || t === '--eval' || t === '-p' || t === '--print') return codeRunsStdin(rest[i + 1]) ? lang : null
+      if (/^--(eval|print)=/.test(t)) return codeRunsStdin(t.slice(t.indexOf('=') + 1)) ? lang : null
+      if (/^-[A-Za-z]{2,}$/.test(t) && /[ep]/.test(t)) return codeRunsStdin(rest[i + 1]) ? lang : null
+      if (t === '-c' || t === '--check' || t === '-h' || t === '--help' || t === '-v' || t === '--version') return null
+      if (NODE_WITH_VALUE.has(t)) { i++; continue }
+      if (t.startsWith('-')) continue
+    }
+    return STDIN_FILES.has(t) ? lang : null
   }
-  return true
+  return lang
+}
+// The feeders of segment k through pipes: the pipeline to its left, and (GROUPPIPE1126) a '{ ...; }' group
+// closing right before the pipe, back to the segment that opens it. Returns [left texts, feeder token lists].
+function pipeFeeders(segs, k) {
+  let j = k - 1
+  const left = []
+  const feeders = []
+  const isPipe = (sep) => sep.endsWith('|') && !sep.endsWith('||')
+  while (j >= 0 && isPipe(segs[j][1])) { left.unshift(segs[j][0].join(' ')); feeders.unshift(segs[j][0]); j-- }
+  // GROUPPIPE1126 (PROGI msg 6034): '{ echo X; } | bash' -- the segment before the pipe is the closing '}', the
+  // group's commands sit in the segments back to the one that opens with '{'. They all feed the shell.
+  if (feeders.length && feeders[0].length === 1 && feeders[0][0] === '}') {
+    while (j >= 0) {
+      left.unshift(segs[j][0].join(' '))
+      feeders.unshift(segs[j][0])
+      if (segs[j][0][0] === '{') break
+      j--
+    }
+  }
+  return [left, feeders]
+}
+// echo / printf arguments as the text they print (the -n/-e/-E flags dropped); null for any other command.
+function echoLiteral(toks) {
+  const h = commandHeads(toks)[0]
+  if (!h || !(basename(h[0]) === 'echo' || basename(h[0]) === 'printf')) return null
+  return h.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' ')
 }
 
 // [segment tokens, separator that ENDED it] -- the tokenizer above, keeping '|' apart from '||' and the rest.
@@ -908,7 +1081,8 @@ function stdinShellTexts(cmd) {
       if (base[base.length - 1] === '<') base = base.slice(0, -1)
       const ph = commandHeads(base)[0]
       const pp = ph && ph.length ? basename(ph[0]) : ''
-      if (pp === 'source' || pp === '.' || ((WRAPPER_SHELL.test(pp) || FISH_SHELL.test(pp)) &&
+      const pl = stdinInterpreterLang(ph)
+      if (pl || pp === 'source' || pp === '.' || ((WRAPPER_SHELL.test(pp) || FISH_SHELL.test(pp)) &&
           shellCommandString(withoutRedirections(ph.slice(1)), pp) === null)) {
         const body = []
         let depth = 1
@@ -916,22 +1090,31 @@ function stdinShellTexts(cmd) {
           body.push(segs[m2][0])
           depth += (segs[m2][1].match(/\(/g) || []).length - (segs[m2][1].match(/\)/g) || []).length
         }
-        piped.push(body.map((b) => b.join(' ')).join(' ; '))
-        for (const b of body) {
-          const bh = commandHeads(b)[0]
-          if (bh && (basename(bh[0]) === 'echo' || basename(bh[0]) === 'printf')) run.push(bh.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' '))
+        if (pl) {
+          // INTERPSTDIN2: 'python3 <(echo ...)', 'python3 < <(echo ...)': an echo/printf literal is the program
+          // (code rule); any other command in it makes the program at run time (name rule on its text).
+          for (const b of body) { const lit = echoLiteral(b); if (lit !== null) code.push([lit, pl]); else piped.push(b.join(' ')) }
+        } else {
+          piped.push(body.map((b) => b.join(' ')).join(' ; '))
+          for (const b of body) { const lit = echoLiteral(b); if (lit !== null) run.push(lit) }
         }
       }
     }
     const head = commandHeads(toks)[0]
-    if (isStdinInterpreterHead(head)) {
+    const lang = stdinInterpreterLang(head)
+    if (lang) {
       for (let i = 0; i < toks.length; i++) {
-        if (toks[i] === '<<<' && i + 1 < toks.length) code.push(toks[i + 1])
-        else if (toks[i].startsWith('<<<') && toks[i].length > 3) code.push(toks[i].slice(3))
+        if (toks[i] === '<<<' && i + 1 < toks.length) code.push([toks[i + 1], lang])
+        else if (toks[i].startsWith('<<<') && toks[i].length > 3) code.push([toks[i].slice(3), lang])
       }
-      if (k > 0 && segs[k - 1][1].endsWith('|') && !segs[k - 1][1].endsWith('||')) {
-        const lh = commandHeads(segs[k - 1][0])[0]
-        if (lh && (basename(lh[0]) === 'echo' || basename(lh[0]) === 'printf')) code.push(lh.slice(1).join(' '))
+      // INTERPSTDIN2: the whole pipeline to its left feeds it ('echo ... | tee f | python3', '{ echo ...; } | python3'):
+      // echo/printf literals are the program (code rule); another feeder makes it at run time (name rule on its
+      // text, like a stdin shell's); a heredoc-fed 'cat' is read in the heredoc pass below.
+      const [, feeders] = pipeFeeders(segs, k)
+      for (const f of feeders) {
+        const lit = echoLiteral(f)
+        if (lit !== null) code.push([lit, lang])
+        else piped.push(f.join(' '))
       }
       continue
     }
@@ -942,27 +1125,10 @@ function stdinShellTexts(cmd) {
       else if (toks[i].startsWith('<<<') && toks[i].length > 3) run.push(toks[i].slice(3))
     }
     // a pipe into it: the whole pipeline to its left
-    let j = k - 1
-    const left = []
-    const isPipe = (sep) => sep.endsWith('|') && !sep.endsWith('||')
-    const feeders = []
-    while (j >= 0 && isPipe(segs[j][1])) { left.unshift(segs[j][0].join(' ')); feeders.unshift(segs[j][0]); j-- }
-    // GROUPPIPE1126 (PROGI msg 6034): '{ echo X; } | bash' -- the segment before the pipe is the closing '}', the
-    // group's commands sit in the segments back to the one that opens with '{'. They all feed the shell.
-    if (feeders.length && feeders[0].length === 1 && feeders[0][0] === '}') {
-      while (j >= 0) {
-        left.unshift(segs[j][0].join(' '))
-        feeders.unshift(segs[j][0])
-        if (segs[j][0][0] === '{') break
-        j--
-      }
-    }
+    const [left, feeders] = pipeFeeders(segs, k)
     if (left.length) {
       piped.push(left.join(' | '))
-      for (const f of feeders) {
-        const lh = commandHeads(f)[0]
-        if (lh && (basename(lh[0]) === 'echo' || basename(lh[0]) === 'printf')) run.push(lh.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' '))
-      }
+      for (const f of feeders) { const lit = echoLiteral(f); if (lit !== null) run.push(lit) }
     }
   }
   // a heredoc fed to a stdin shell: its body is the command text
@@ -973,8 +1139,10 @@ function stdinShellTexts(cmd) {
     const last = headSegs[headSegs.length - 1]
     const body = m[0].slice(m[1].length + 1, m[0].length - m[4].length)
     if (last && isStdinShellHead(commandHeads(last)[0])) { run.push(body); continue }
-    if (last && isStdinInterpreterHead(commandHeads(last)[0])) { code.push(body); continue }
-    // 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
+    const lastLang = last ? stdinInterpreterLang(commandHeads(last)[0]) : null
+    if (lastLang) { code.push([body, lastLang]); continue }
+    // 'cat <<EOF | bash' / 'cat <<EOF | python3': the heredoc feeds a command whose output is piped into a stdin
+    // shell or interpreter on the same line (INTERPSTDIN2: through any pipe chain, 'cat <<EOF | tee f | python3').
     let hs
     try { hs = segmentsWithSeparators(cmd.slice(lineStart, m.index + m[1].length)) } catch { continue }
     const isPipe = (sep) => sep.endsWith('|') && !sep.endsWith('||')
@@ -982,12 +1150,29 @@ function stdinShellTexts(cmd) {
     while (f >= 0 && !hs[f][0].some((t) => t.startsWith('<<'))) f--
     if (f < 0 || !last) continue
     let g = f
-    let shellAfter = false
-    while (g < hs.length - 1 && isPipe(hs[g][1])) { g++; if (isStdinShellHead(commandHeads(hs[g][0])[0])) { shellAfter = true; break } }
-    if (!shellAfter) continue
+    let sink = null
+    while (g < hs.length - 1 && isPipe(hs[g][1])) {
+      g++
+      const gh = commandHeads(hs[g][0])[0]
+      if (isStdinShellHead(gh)) { sink = 'sh'; break }
+      const gl = stdinInterpreterLang(gh)
+      if (gl) { sink = gl; break }
+    }
+    // INTERPSTDIN2: 'python3 < <(cat <<EOF ... EOF)', 'source <(cat <<EOF ... EOF)': the heredoc-fed command opens a
+    // process substitution that a stdin shell / interpreter reads as its program.
+    if (!sink && f > 0 && hs[f - 1][1] === '(' && hs[f - 1][0][hs[f - 1][0].length - 1] === '<') {
+      let base = hs[f - 1][0].slice(0, -1)
+      if (base[base.length - 1] === '<') base = base.slice(0, -1)
+      const ph = commandHeads(base)[0]
+      const pp = ph && ph.length ? basename(ph[0]) : ''
+      sink = stdinInterpreterLang(ph) || ((pp === 'source' || pp === '.' || ((WRAPPER_SHELL.test(pp) || FISH_SHELL.test(pp)) &&
+        shellCommandString(withoutRedirections(ph.slice(1)), pp) === null)) ? 'sh' : null)
+    }
+    if (!sink) continue
     const feeder = commandHeads(hs[f][0])[0]
-    if (feeder && basename(feeder[0]) === 'cat') run.push(body)
-    else piped.push(body)
+    if (!(feeder && basename(feeder[0]) === 'cat')) piped.push(body)
+    else if (sink === 'sh') run.push(body)
+    else code.push([body, sink])
   }
   return { run, piped, code }
 }
@@ -995,7 +1180,7 @@ function stdinShellTexts(cmd) {
 export function isSendInvocation(cmd, depth = 0) {
   const stdin = stdinShellTexts(cmd)
   if (stdin.piped.some((t) => CODE_SENDER_LIT.test(t))) return true
-  if (stdin.code.some((t) => interpCodeSends(t))) return true
+  if (stdin.code.some(([t, l]) => interpCodeSends(t, l))) return true
   for (const text of stdin.run) {
     if (depth >= 3) { if (text.trim()) return true } else if (isSendInvocation(text, depth + 1)) return true
   }

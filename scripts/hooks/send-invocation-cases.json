@@ -1907,9 +1907,9 @@
       "expected": true
     },
     {
-      "name": "INTERPSTDIN1126: control: a process starter and the sender name on DIFFERENT lines (a real fleet shape)",
+      "name": "INTERPSTDIN2: PINNED cost: a program that starts a process (exec) and names the sender on another line is refused (whole-program rule; on the real corpora only gate-test harnesses hit it)",
       "cmd": "python3 - <<'EOF'\nexec(compile('1', 'x', 'exec'))\nname = 'sendmail'\nprint(name)\nEOF",
-      "expected": false
+      "expected": true
     },
     {
       "name": "INTERPSTDIN1126: control: python -c attached ('-c'...') reads no program from stdin",
@@ -2325,6 +2325,356 @@
       "name": "SUBOUTRUN1126: control: sh -c of printf ls",
       "cmd": "sh -c \"$(printf '%s' 'ls')\"",
       "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: python3 - heredoc with os.system",
+      "cmd": "python3 - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 here-string",
+      "cmd": "python3 <<< \"import os; os.system('sendmail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: echo of code piped into python3",
+      "cmd": "echo \"import os; os.system('sendmail a@b.hu')\" | python3",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -u - heredoc",
+      "cmd": "python3 -u - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: node here-string with execSync",
+      "cmd": "node <<< \"require('child_process').execSync('sendmail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a call split over lines (subprocess.run(\\n[...]))",
+      "cmd": "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(\n    ['sendmail', 'a@b.hu'])\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: the command in a variable (c = ...; os.system(c))",
+      "cmd": "python3 - <<'EOF'\nimport os\nc = 'sendmail a@b.hu'\nos.system(c)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: an f-string expression calls os.system",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{os.system('sendmail a@b.hu')}\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: exec of a triple-quoted program",
+      "cmd": "python3 - <<'EOF'\nexec(\"\"\"\nimport os\nos.system('sendmail a@b.hu')\n\"\"\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a backtick in a Python comment hides no code",
+      "cmd": "python3 - <<'EOF'\n# `\nimport os; os.system('sendmail a@b.hu')\n# `\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a \"'''\" inside a plain string opens no triple string",
+      "cmd": "python3 - <<'EOF'\na = \"'''\"\nimport os; os.system('sendmail a@b.hu')\nb = \"'''\"\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -X utf8 -",
+      "cmd": "python3 -X utf8 - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -W ignore (value is no script)",
+      "cmd": "python3 -W ignore <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -Ximporttime - (attached -X value is no -c/-m)",
+      "cmd": "python3 -Ximporttime - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 /dev/stdin",
+      "cmd": "python3 /dev/stdin <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: cat heredoc piped into python3",
+      "cmd": "cat <<'EOF' | python3\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: echo piped through tee into python3",
+      "cmd": "echo \"import os; os.system('sendmail a@b.hu')\" | tee /dev/null | python3",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a { } group piped into python3",
+      "cmd": "{ echo \"import os; os.system('sendmail a@b.hu')\"; } | python3",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 < <(echo ...)",
+      "cmd": "python3 < <(echo \"import os; os.system('sendmail a@b.hu')\")",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 <(echo ...)",
+      "cmd": "python3 <(echo \"import os; os.system('sendmail a@b.hu')\")",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: env python3 - heredoc",
+      "cmd": "env python3 - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: timeout python3 - heredoc",
+      "cmd": "timeout 5 python3 - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -c that execs stdin, fed a heredoc",
+      "cmd": "python3 -c 'import sys; exec(sys.stdin.read())' <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: node heredoc, the command in a variable",
+      "cmd": "node - <<'EOF'\nconst cp = require('child_process')\nconst c = 'sendmail a@b.hu'\ncp.execSync(c)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 - heredoc then && true",
+      "cmd": "python3 - <<'EOF' && true\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: unquoted python3 heredoc",
+      "cmd": "python3 - <<EOF\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -Wignore -",
+      "cmd": "python3 -Wignore - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -I -u -B -",
+      "cmd": "python3 -I -u -B - <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -E -s -X dev -W ... /dev/stdin",
+      "cmd": "python3 -E -s -X dev -W error::DeprecationWarning /dev/stdin <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 /dev/fd/0",
+      "cmd": "python3 /dev/fd/0 <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -uc that execs stdin (cluster)",
+      "cmd": "python3 -uc 'import sys; exec(sys.stdin.read())' <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 -c that execs stdin, fed a here-string",
+      "cmd": "python3 -c 'import sys;exec(sys.stdin.read())' <<< \"import os; os.system('sendmail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: node -e that evals stdin, fed a heredoc",
+      "cmd": "node -e 'eval(require(\"fs\").readFileSync(0, \"utf8\"))' <<'EOF'\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: cat heredoc through tee into python3 -",
+      "cmd": "cat <<'EOF' | tee /dev/null | python3 -\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: cat heredoc piped into node",
+      "cmd": "cat <<'EOF' | node\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: printf of code piped into node",
+      "cmd": "printf \"%s\\n\" \"require('child_process').execSync('sendmail a@b.hu')\" | node",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a two-echo { } group piped into python3",
+      "cmd": "{ echo \"import os\"; echo \"os.system('sendmail a@b.hu')\"; } | python3",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: python3 < <(cat heredoc)",
+      "cmd": "python3 < <(cat <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF\n)",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: node < <(echo ...)",
+      "cmd": "node < <(echo \"require('child_process').execSync('sendmail a@b.hu')\")",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: os.system( split over lines",
+      "cmd": "python3 - <<'EOF'\nimport os\nos.system(\n  'sendmail a@b.hu'\n)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: the argv list in a variable passed to subprocess",
+      "cmd": "python3 - <<'EOF'\nimport subprocess as sp\ncmd = ['sendmail', 'a@b.hu']\nsp.run(cmd, input=b'x')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: the command passed through a function argument",
+      "cmd": "python3 - <<'EOF'\ndef f(c):\n    import os\n    os.system(c)\nf('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: __import__('os').system",
+      "cmd": "python3 - <<'EOF'\n__import__('os').system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: asyncio.create_subprocess_exec",
+      "cmd": "python3 - <<'EOF'\nimport asyncio\nasync def m():\n    p = await asyncio.create_subprocess_exec('sendmail', 'a@b.hu')\n    await p.wait()\nasyncio.run(m())\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: f-string building the command",
+      "cmd": "python3 - <<'EOF'\nimport os\nos.system(f\"{'sendmail'} a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a doubled-quote string and a quote in a comment",
+      "cmd": "python3 - <<'EOF'\nimport os\nx = 'it''s'  # don't\nos.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a raw string with an escaped quote",
+      "cmd": "python3 - <<'EOF'\nimport os\ns = r'a\\'b'\nos.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a JS regex literal holding a quote",
+      "cmd": "node - <<'EOF'\nconst re = /'/g\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a JS template ${...} expression runs execSync",
+      "cmd": "node - <<'EOF'\nconst t = `${require('child_process').execSync('sendmail a@b.hu')}`\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a quote inside a JS // comment",
+      "cmd": "node - <<'EOF'\n// '\nrequire('child_process').execSync('sendmail a@b.hu')\n// '\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a backtick inside a JS /* */ comment",
+      "cmd": "node - <<'EOF'\n/* ` */ require('child_process').execSync('sendmail a@b.hu') /* ` */\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: control: a heredoc that only EDITS mail code (the call inside a string)",
+      "cmd": "python3 - <<'EOF'\np = 'x.py'\ns = \"os.system('sendmail a@b.hu')\"\nprint(s.replace('a', 'b'))\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: a heredoc replacing the name in text",
+      "cmd": "python3 - <<'EOF'\nimport re\ns = open('/dev/null').read()\ns = s.replace(\"sendmail\", \"x\")\nprint(len(s))\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: the call only in a comment",
+      "cmd": "python3 - <<'EOF'\n# os.system('sendmail a@b.hu') would send\nprint(1)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: python3 -X utf8 - printing the name",
+      "cmd": "python3 -X utf8 - <<'EOF'\nprint('sendmail')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: python3 /dev/stdin printing the call text",
+      "cmd": "python3 /dev/stdin <<'EOF'\nprint(\"os.system('sendmail a@b.hu')\")\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: echo of a print piped into python3",
+      "cmd": "echo \"print('sendmail')\" | python3",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: cat heredoc of a print piped into python3",
+      "cmd": "cat <<'EOF' | python3\nprint('sendmail')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: node heredoc logging the name",
+      "cmd": "node - <<'EOF'\nconsole.log('sendmail')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: a node template literal holding the call text",
+      "cmd": "node - <<'EOF'\nconst s = `os.system('sendmail a@b.hu') ${1+1}`\nconsole.log(s)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: python3 -c ignores its heredoc",
+      "cmd": "python3 -c 'print(1)' <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: python3 running a script reads data from stdin",
+      "cmd": "python3 script_not_there.py <<'EOF'\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: python3 -m json.tool reads data",
+      "cmd": "python3 -m json.tool <<'EOF'\n{\"a\": \"sendmail a@b.hu\"}\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: a heredoc dumping the command as JSON",
+      "cmd": "python3 - <<'EOF'\nimport json\nd = {'cmd': \"sendmail a@b.hu\"}\nprint(json.dumps(d))\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: PINNED cost: runs a subprocess and prints the sender name (whole-program rule)",
+      "cmd": "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['true'])\nprint('sendmail')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: control: a Python docstring holding the call is data",
+      "cmd": "python3 - <<'EOF'\n\"\"\"\nimport os; os.system('sendmail a@b.hu')\n\"\"\"\nprint(1)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: control: a JS // comment holding the call is data",
+      "cmd": "node - <<'EOF'\n// require('child_process').execSync('sendmail a@b.hu')\nconsole.log(1)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN2: a backtick inside /* */ comments after code hides no call",
+      "cmd": "node - <<'EOF'\nconst a = 1 /* ` */; require('child_process').execSync('sendmail a@b.hu') /* ` */\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a backtick inside a JS regex literal opens no template",
+      "cmd": "node - <<'EOF'\nconst re = /`/g\nrequire('child_process').execSync('sendmail a@b.hu')\nconst q = /`/g\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: a backtick inside JS // comments opens no template",
+      "cmd": "node - <<'EOF'\n// `\nrequire('child_process').execSync('sendmail a@b.hu')\n// `\nEOF",
+      "expected": true
     }
   ]
 }
