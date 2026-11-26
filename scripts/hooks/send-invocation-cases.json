@@ -1995,6 +1995,51 @@
       "name": "PROCSUB1126: control: cat prints the substitution",
       "cmd": "cat <(echo 'sendmail a@b.hu')",
       "expected": false
+    },
+    {
+      "name": "SUBOUTRUN1126: sh -c runs the substitution output",
+      "cmd": "sh -c \"$(echo 'sendmail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: bash -c with a printf substitution",
+      "cmd": "bash -c \"$(printf '%s' 'sendmail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: eval runs the substitution output",
+      "cmd": "eval \"$(echo 'sendmail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: eval with backticks",
+      "cmd": "eval \"`echo 'sendmail a@b.hu'`\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: the echo literal is parsed (quotes split the name)",
+      "cmd": "eval \"$(echo 'send\"\"mail a@b.hu')\"",
+      "expected": true
+    },
+    {
+      "name": "SUBOUTRUN1126: control: eval of a harmless output",
+      "cmd": "eval \"$(echo ls)\"",
+      "expected": false
+    },
+    {
+      "name": "SUBOUTRUN1126: control: sh -c of a harmless output",
+      "cmd": "sh -c \"$(echo ls)\"",
+      "expected": false
+    },
+    {
+      "name": "SUBOUTRUN1126: control: echo of a substitution only prints",
+      "cmd": "echo \"$(echo sendmail)\"",
+      "expected": false
+    },
+    {
+      "name": "SUBOUTRUN1126: control: an unquoted eval of a harmless output",
+      "cmd": "eval $(echo true)",
+      "expected": false
     }
   ]
 }

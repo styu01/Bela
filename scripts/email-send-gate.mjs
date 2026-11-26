@@ -574,6 +574,22 @@ function gitRunsSender(rest, depth) {
   return false
 }
 
+// SUBOUTRUN1126 (PROGI msg 6034): 'sh -c "$(...)"' and 'eval "$(...)"' RUN the OUTPUT of the substitution. The
+// inner command ('echo "sendmail a"') is not a send by itself; its output is. A body that names a sender, or whose
+// echo/printf literal parses as a send, is a send. 'eval "$(ssh-agent -s)"' stays allowed.
+function substitutionOutputSends(str, depth) {
+  return dquoteSubstitutions(str, true).some((b) => {
+    if (CODE_SENDER_LIT.test(b)) return true
+    let segs
+    try { segs = segmentsTokens(b) } catch { return false }
+    return segs.some((t) => {
+      const h = commandHeads(t)[0]
+      return h && (basename(h[0]) === 'echo' || basename(h[0]) === 'printf') && depth < 3 &&
+        isSendInvocation(h.slice(1).filter((x) => !/^-[neE]+$/.test(x)).join(' '), depth + 1)
+    })
+  })
+}
+
 function headIsSend(toks, depth) {
   if (toks === null) return true // a wrapper at the depth bound: the real command is out of sight, refuse
   if (!toks.length) return false
@@ -603,12 +619,14 @@ function headIsSend(toks, depth) {
   // At the recursion bound the text is out of sight: refuse (fail-closed).
   if (prog === 'eval' && rest.length) {
     if (depth >= 3) return true
+    if (substitutionOutputSends(rest.join(' '), depth)) return true
     if (isSendInvocation(rest.join(' '), depth + 1)) return true
   }
   if (WRAPPER_SHELL.test(prog)) {
     // SHCLUSTER1126: the command string is located the way the shell does it (shellCommandString), so an
     // option cluster that carries c ('bash -lc ...', 'sh -ec ...') counts; it used to need a bare '-c' token.
     const cmdString = shellCommandString(rest, prog)
+    if (cmdString !== null && substitutionOutputSends(cmdString, depth)) return true
     if (cmdString !== null) {
       // SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
       // "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash runs
@@ -699,16 +717,16 @@ function heredocSubstitutions(cmd) {
   return out
 }
 
-function dquoteSubstitutions(cmd) {
+function dquoteSubstitutions(cmd, anyContext = false) {
   const s = cmd.replace(HEREDOC_RE, '$1')
-  const out = heredocSubstitutions(cmd)
+  const out = anyContext ? [] : heredocSubstitutions(cmd)
   let q = null
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]
     if (q === "'") { if (ch === "'") q = null; continue }
     if (ch === '\\' && i + 1 < s.length) { i++; continue }
-    if (q === null) { if (ch === "'" || ch === '"') q = ch; continue }
-    // inside double quotes
+    if (q === null) { if (ch === "'" || ch === '"') { q = ch; continue } if (!anyContext) continue }
+    // inside double quotes (or, with anyContext, unquoted too)
     if (ch === '"') { q = null; continue }
     if (ch === '`') {
       let j = i + 1

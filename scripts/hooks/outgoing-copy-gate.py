@@ -833,6 +833,25 @@ def _git_runs_sender(rest, depth: int) -> bool:
     return False
 
 
+def _substitution_output_sends(text: str, depth: int) -> bool:
+    """SUBOUTRUN1126 (PROGI msg 6034): 'sh -c "$(...)"' and 'eval "$(...)"' RUN the substitution's OUTPUT. A body that
+    names a sender, or whose echo/printf literal parses as a send, is a send. Mirrors substitutionOutputSends."""
+    for b in _dquote_substitutions(text, any_context=True):
+        if _CODE_SENDER_LIT.search(b):
+            return True
+        try:
+            segs = _segments_tokens(b)
+        except ValueError:
+            continue
+        for t in segs:
+            hs = _command_heads(t)
+            h = hs[0] if hs else None
+            if h and _basename(h[0]) in ("echo", "printf") and depth < 3 and is_send_invocation(
+                    " ".join(x for x in h[1:] if not re.match(r"-[neE]+$", x)), _depth=depth + 1):
+                return True
+    return False
+
+
 def _head_is_send(toks, depth: int) -> bool:
     if toks is None:  # the depth bound was hit on a wrapper: audit it
         return True
@@ -870,6 +889,8 @@ def _head_is_send(toks, depth: int) -> bool:
     if prog == "eval" and rest:
         if depth >= 3:
             return True
+        if _substitution_output_sends(" ".join(rest), depth):
+            return True
         if is_send_invocation(" ".join(rest), _depth=depth + 1):
             return True
     # burkolo hejj: a -c string-argumentum maga is parancs -- rekurzio
@@ -877,6 +898,8 @@ def _head_is_send(toks, depth: int) -> bool:
         # SHCLUSTER1126: the command string is located the way the shell does it (_shell_command_string), so an
         # option cluster that carries c ('bash -lc ...', 'sh -ec ...') counts; it used to need a bare '-c' token.
         cmd_string = _shell_command_string(rest, prog)
+        if cmd_string is not None and _substitution_output_sends(cmd_string, depth):
+            return True
         if cmd_string is not None:
             # SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
             # "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash
@@ -1020,13 +1043,13 @@ def _heredoc_substitutions(cmd: str):
     return out
 
 
-def _dquote_substitutions(cmd: str):
+def _dquote_substitutions(cmd: str, any_context: bool = False):
     """DQSUB1126 (PROGI msg 6001): the bodies of every $(...) and `...` inside DOUBLE quotes. bash runs them; the mask
     keeps quoted text as content, so 'echo "$(sendmail a)"' and 'X="$(sendmail a)"' passed both gates. Single quotes
     stay literal; heredoc bodies are cut first, like the tokenizer does. Mirrors dquoteSubstitutions in
     email-send-gate.mjs."""
     s = _HEREDOC.sub(r"\1", cmd)
-    out = _heredoc_substitutions(cmd)
+    out = [] if any_context else _heredoc_substitutions(cmd)
     q = None
     i = 0
     n = len(s)
@@ -1043,9 +1066,12 @@ def _dquote_substitutions(cmd: str):
         if q is None:
             if ch in ("'", '"'):
                 q = ch
-            i += 1
-            continue
-        if ch == '"':
+                i += 1
+                continue
+            if not any_context:
+                i += 1
+                continue
+        elif ch == '"':
             q = None
             i += 1
             continue
