@@ -96,7 +96,15 @@ const BUSY_FOOTER_ITEM = 'esc to interrupt'
 // takes exactly one space. The line must also START like the live footer (blanks and the mode glyph ⏵⏵ / ⏵ / ⏸):
 // this footer reads idle even without an input box above it, so a log line or a sentence in the footer slot that
 // ends in the same words must not match.
-const FOOTER_SHELL_TAIL_RX = /^\s*[\u23F5\u23F8]{1,2} (?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · \d+ shells?(?:(?: ·|,) \d+ monitors?)?\s*$/
+// MONITORTAIL1025 (upstream d1c03996, measured there on two builder panes): the count can be a MONITOR alone or
+// first, `⏵⏵ bypass permissions on · 1 monitor`, shell-less and hint-less, with an empty prompt above, while a Monitor
+// waits on a long run. That read 'unknown': the router held the bus and the not-ready path raised [session-stuck]
+// every 10 minutes on a live session. The tail is now one or more `N shell(s)` / `N monitor(s)` counters in any
+// order, joined as before (` · ` or a comma and one space); any other kind still stays 'unknown'.
+const FOOTER_COUNT = String.raw`\d+ (?:shells?|monitors?)`
+const FOOTER_SHELL_TAIL_RX = new RegExp(
+  String.raw`^\s*[\u23F5\u23F8]{1,2} (?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · ${FOOTER_COUNT}(?:(?: ·|,) ${FOOTER_COUNT})*\s*$`,
+)
 
 function isClippedIdleFooter(line: string): boolean {
   if (!FOOTER_TRUNCATED_RX.test(line)) return false
