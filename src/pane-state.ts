@@ -92,7 +92,11 @@ const BUSY_FOOTER_ITEM = 'esc to interrupt'
 // ("⏵⏵ bypass permissions on · 3 shells", "... · 1 shell · 1 monitor") has none of the hint words IDLE_FOOTER_RX
 // needs, so it read 'unknown' while background work runs. Accepted ONLY as the last non-empty line. A busy footer
 // always carries "· esc to interrupt" after the count, so it never matches this end-anchored shape.
-const FOOTER_SHELL_TAIL_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · \d+ shells?(?: · \d+ monitors?)?\s*$/
+// COMMATAIL1022 (upstream f64f3e1f): newer builds join the counts with a comma, "· 1 shell, 1 monitor"; the comma
+// takes exactly one space. The line must also START like the live footer (blanks and the mode glyph ⏵⏵ / ⏵ / ⏸):
+// this footer reads idle even without an input box above it, so a log line or a sentence in the footer slot that
+// ends in the same words must not match.
+const FOOTER_SHELL_TAIL_RX = /^\s*[\u23F5\u23F8]{1,2} (?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · \d+ shells?(?:(?: ·|,) \d+ monitors?)?\s*$/
 
 function isClippedIdleFooter(line: string): boolean {
   if (!FOOTER_TRUNCATED_RX.test(line)) return false
