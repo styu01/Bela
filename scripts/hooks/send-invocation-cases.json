@@ -360,6 +360,321 @@
       "name": "LINECONT1126: control, after a line continuation sendmail is still echo's argument",
       "cmd": "echo a \\\nsendmail",
       "expected": false
+    },
+    {
+      "name": "SENDWRAP924: time (a reserved word) before the sender",
+      "cmd": "time sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: time -p",
+      "cmd": "time -p sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: sudo",
+      "cmd": "sudo sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: sudo -u consumes its value",
+      "cmd": "sudo -u x sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: env with an assignment",
+      "cmd": "env FOO=1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: env -i",
+      "cmd": "env -i sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: nohup",
+      "cmd": "nohup sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: nice -n consumes its value",
+      "cmd": "nice -n 5 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: exec",
+      "cmd": "exec sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: command (without -v)",
+      "cmd": "command sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: xargs",
+      "cmd": "xargs sendmail < list",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: a function body",
+      "cmd": "function f { sendmail a@b.hu; }",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: coproc",
+      "cmd": "coproc sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: nested wrappers",
+      "cmd": "sudo env FOO=1 nohup sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: an unknown long flag is read both ways (errs toward auditing)",
+      "cmd": "sudo --login sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: a known long flag consumes its value",
+      "cmd": "sudo --user x sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: timeout: flags, then one duration, then the command",
+      "cmd": "timeout -s KILL 10 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: the -- end of options",
+      "cmd": "sudo -- sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: xargs -I with an inline value",
+      "cmd": "xargs -I{} sendmail {} < list",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: send.py behind sudo",
+      "cmd": "sudo python3 scripts/support-mail/send.py --to a@b.hu --body x",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: a named coproc body",
+      "cmd": "coproc M { sendmail a@b.hu; }",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: a wrapper inside if/then",
+      "cmd": "if true; then sudo -u x sendmail a@b.hu; fi",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: reverse -- sendmail is the VALUE of sudo -u",
+      "cmd": "sudo -u sendmail true",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- sendmail is the VALUE of sudo -g",
+      "cmd": "sudo -g sendmail id",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- wrapper words as echo arguments",
+      "cmd": "echo sudo sendmail a@b.hu",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- command -v only looks the name up",
+      "cmd": "command -v sendmail",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- command -V only looks the name up",
+      "cmd": "command -V sendmail",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- time runs a non-sender",
+      "cmd": "time echo sendmail",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- timeout runs a non-sender",
+      "cmd": "timeout 5 echo sendmail",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- xargs -a consumes the file name",
+      "cmd": "xargs -a sendmail.txt echo",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- defining a function NAMED sendmail",
+      "cmd": "function sendmail { true; }",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- a named coproc with a non-send body",
+      "cmd": "coproc M { true; }",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- nice runs grep",
+      "cmd": "nice -n 5 grep sendmail log",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: reverse -- a bare wrapper",
+      "cmd": "sudo",
+      "expected": false
+    },
+    {
+      "name": "SENDWRAP924: an UNKNOWN long flag that takes a value (a future sudo flag): the second reading finds the send",
+      "cmd": "sudo --future-flag val sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: setsid (the one open wrapper fleet traffic uses)",
+      "cmd": "setsid sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: setsid -f",
+      "cmd": "setsid -f sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDWRAP924: reverse -- setsid runs a non-sender",
+      "cmd": "setsid echo sendmail",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: the PoC: a bare env prefix",
+      "cmd": "env sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: env with an assignment",
+      "cmd": "env A=1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: nice without a value",
+      "cmd": "nice sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: timeout with its duration",
+      "cmd": "timeout 5 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: builtin in front of eval",
+      "cmd": "builtin eval sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: stdbuf with an attached mode",
+      "cmd": "stdbuf -oL sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: stdbuf with a separate mode value",
+      "cmd": "stdbuf -o L sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: eval re-parses its arguments as a command",
+      "cmd": "eval sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: eval of a quoted command line",
+      "cmd": "eval \"sendmail a@b.hu\"",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: eval of a command list",
+      "cmd": "eval 'cd /tmp && sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: stacked wrappers",
+      "cmd": "sudo env nohup timeout 5 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: a wrapper in front of a sender script",
+      "cmd": "env python3 /x/send.py --to a@b.hu --body x",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: the send in a loop body",
+      "cmd": "while true; do sendmail a@b.hu; done",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: the send in a brace group",
+      "cmd": "{ sendmail a@b.hu; }",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: the send after a negation",
+      "cmd": "! sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: a wrapper at the depth bound is refused, not passed",
+      "cmd": "sudo sudo sudo sudo sudo sudo sudo sudo sudo sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: control: env alone runs nothing",
+      "cmd": "env",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: control: sudo with a non-sender",
+      "cmd": "sudo ls",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: control: timeout with a non-sender",
+      "cmd": "timeout 5 ls",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: control: eval of a command that only names the sender",
+      "cmd": "eval echo sendmail",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: control: the sender name only as an assignment value",
+      "cmd": "env A=sendmail ls",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: control: stdbuf with a non-sender",
+      "cmd": "stdbuf -oL grep sendmail log",
+      "expected": false
+    },
+    {
+      "name": "WRAPGATE1126: timeout options after the duration (getopt permutation): --",
+      "cmd": "timeout 2 -- sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: timeout options after the duration: -s KILL",
+      "cmd": "timeout 2 -s KILL sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "WRAPGATE1126: control: timeout options after the duration, non-sender",
+      "cmd": "timeout 2 -s KILL ls",
+      "expected": false
     }
   ]
 }

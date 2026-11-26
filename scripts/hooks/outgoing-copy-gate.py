@@ -338,11 +338,15 @@ _WRAPPERS = {
     # first count found all sat inside quoted remote (ssh) command strings or heredoc
     # bodies, and that pattern was not quote-aware (Marveen's correction, 2026-09-24).
     "setsid": ("", (), 0),
+    # WRAPGATE1126: both run their argument as a command ('builtin' only shell builtins, so in practice
+    # 'builtin eval ...'; 'stdbuf -oL sendmail x' runs sendmail) and both passed this gate and the JS twin.
+    "builtin": ("", (), 0),
+    "stdbuf": ("ioe", ("input", "output", "error"), 0),
 }
 _HEAD_DEPTH = 8
 
 
-def _command_heads(toks, _d: int = 0):
+def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
     """Every token list that can be the real command of this segment, after the
     leading assignments, command-position keywords and wrappers are stepped over."""
     while toks and (_ENV_ASSIGN.match(toks[0]) or toks[0] in _CMD_POSITION_KEYWORDS):
@@ -364,6 +368,8 @@ def _command_heads(toks, _d: int = 0):
     if spec is None:
         return [toks]
     short_val, long_val, positionals = spec
+    if _positionals_done:
+        positionals = 0
     i, starts = 1, []
     while i < len(toks):
         t = toks[i]
@@ -388,7 +394,13 @@ def _command_heads(toks, _d: int = 0):
     starts.insert(0, i)
     heads = []
     for s in starts:
-        heads += _command_heads(toks[s + positionals:], _d + 1)
+        after = toks[s + positionals:]
+        # WRAPGATE1126: GNU getopt permutes, so options may also follow the positional ('timeout 2 -- sendmail x',
+        # 'timeout 2 -s KILL sendmail x' both run sendmail). After the positionals the flag loop runs once more.
+        if positionals and after and after[0].startswith("-"):
+            heads += _command_heads([toks[0]] + after, _d + 1, True)
+        else:
+            heads += _command_heads(after, _d + 1)
     return heads
 
 
@@ -405,6 +417,14 @@ def _head_is_send(toks, depth: int) -> bool:
     rest = toks[1:]
     if _SENDER_PROG.match(prog):
         return True
+    # WRAPGATE1126: eval re-parses its arguments, joined by spaces, as a command line, the same as bash -c
+    # ('eval sendmail x', "eval 'cd /tmp && sendmail x'" passed both gates). At the recursion bound the text is
+    # out of sight: audit it (fail-closed), like a wrapper at the depth bound.
+    if prog == "eval" and rest:
+        if depth >= 3:
+            return True
+        if is_send_invocation(" ".join(rest), _depth=depth + 1):
+            return True
     # burkolo hejj: a -c string-argumentum maga is parancs -- rekurzio
     if _WRAPPER_SHELL.match(prog) and depth < 3:
         for i, t in enumerate(rest):

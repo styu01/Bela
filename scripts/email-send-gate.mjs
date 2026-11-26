@@ -151,13 +151,98 @@ export function segmentsTokens(cmd) {
 
 const basename = (t) => t.split('/').pop()
 
-function segmentIsSend(toksIn, depth) {
+// WRAPGATE1126 (own gap; the shape follows upstream SENDWRAP924 068557b0 and
+// HEADDEPTH924 bdfb09d4): this hard gate looked at the FIRST token of a segment
+// only, so any wrapper in front of the sender ('env sendmail x', 'sudo ...',
+// 'nohup ...', 'timeout 5 ...', 'exec', 'command', 'nice', 'time', 'xargs',
+// 'setsid', 'stdbuf', 'builtin') and any command-position keyword ('if x; then
+// sendmail x; fi', '{ sendmail x; }', '! sendmail x') let a sub-agent send past
+// it. Measured 2026-11-26 with the real hook from a sub-agent cwd: 'sendmail x'
+// deny, 'env sendmail x' allowed. A wrapper is now stepped over WITH its own
+// flags, exactly as the python twin (_WRAPPERS / _command_heads in
+// outgoing-copy-gate.py) does: a value-taking flag consumes its value ('sudo -u
+// sendmail true' stays false), timeout skips its duration, an unknown long flag
+// is read both ways so it errs toward refusing, 'command -v' runs nothing,
+// function / coproc bodies are in command position, and a wrapper still found
+// at the depth bound counts as a send (null head), never as a pass.
+// send-invocation-cases.json binds the two copies.
+const CMD_POSITION_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '{', '!'])
+const WRAPPERS = new Map([
+  ['time', ['fo', ['format', 'output'], 0]],
+  ['sudo', ['ughpCUrtDRT', ['user', 'group', 'host', 'prompt', 'close-from', 'other-user',
+    'role', 'type', 'chdir', 'chroot', 'command-timeout'], 0]],
+  ['env', ['uCS', ['unset', 'chdir', 'split-string'], 0]],
+  ['nohup', ['', [], 0]],
+  ['nice', ['n', ['adjustment'], 0]],
+  ['exec', ['a', [], 0]],
+  ['command', ['', [], 0]],
+  ['builtin', ['', [], 0]],
+  ['xargs', ['ILnPsdEa', ['arg-file', 'delimiter', 'eof', 'replace', 'max-lines', 'max-args',
+    'max-procs', 'max-chars', 'process-slot-var'], 0]],
+  ['timeout', ['sk', ['signal', 'kill-after'], 1]],
+  ['setsid', ['', [], 0]],
+  ['stdbuf', ['ioe', ['input', 'output', 'error'], 0]],
+])
+const HEAD_DEPTH = 8
+
+function commandHeads(toksIn, d = 0, positionalsDone = false) {
   let toks = toksIn
-  while (toks.length && ENV_ASSIGN.test(toks[0])) toks = toks.slice(1)
+  while (toks.length && (ENV_ASSIGN.test(toks[0]) || CMD_POSITION_KEYWORDS.has(toks[0]))) toks = toks.slice(1)
+  if (!toks.length) return [toks]
+  const w = basename(toks[0])
+  if (d >= HEAD_DEPTH) return (WRAPPERS.has(w) || w === 'function' || w === 'coproc') ? [null] : [toks]
+  if (w === 'function') return commandHeads(toks.slice(2), d + 1)
+  if (w === 'coproc') return [...commandHeads(toks.slice(1), d + 1), ...commandHeads(toks.slice(2), d + 1)]
+  const spec = WRAPPERS.get(w)
+  if (!spec) return [toks]
+  const [shortVal, longVal, positionalsSpec] = spec
+  const positionals = positionalsDone ? 0 : positionalsSpec
+  let i = 1
+  const starts = []
+  while (i < toks.length) {
+    const t = toks[i]
+    if (t === '--') { i++; break }
+    if (t.startsWith('--')) {
+      if (!t.includes('=') && longVal.includes(t.slice(2))) { i += 2; continue }
+      if (!t.includes('=')) starts.push(i + 2)
+      i++
+      continue
+    }
+    if (t.startsWith('-') && t.length > 1) {
+      if (w === 'command' && (t.includes('v') || t.includes('V'))) return []
+      let k = -1
+      for (let j = 1; j < t.length; j++) if (shortVal.includes(t[j])) { k = j; break }
+      i += k === t.length - 1 ? 2 : 1
+      continue
+    }
+    break
+  }
+  starts.unshift(i)
+  // GNU getopt permutes: options may also follow the positional ('timeout 2 -- sendmail x', 'timeout 2 -s KILL
+  // sendmail x' both run sendmail). After the positionals the flag loop runs once more for the same wrapper.
+  return starts.flatMap((s) => {
+    const after = toks.slice(s + positionals)
+    if (positionals && after.length && after[0].startsWith('-')) return commandHeads([toks[0], ...after], d + 1, true)
+    return commandHeads(after, d + 1)
+  })
+}
+
+function segmentIsSend(toksIn, depth) {
+  return commandHeads(toksIn).some((h) => headIsSend(h, depth))
+}
+
+function headIsSend(toks, depth) {
+  if (toks === null) return true // a wrapper at the depth bound: the real command is out of sight, refuse
   if (!toks.length) return false
   const prog = basename(toks[0])
   const rest = toks.slice(1)
   if (SENDER_PROG.test(prog)) return true
+  // eval re-parses its arguments, joined by spaces, as a command line -- same as bash -c.
+  // At the recursion bound the text is out of sight: refuse (fail-closed).
+  if (prog === 'eval' && rest.length) {
+    if (depth >= 3) return true
+    if (isSendInvocation(rest.join(' '), depth + 1)) return true
+  }
   if (WRAPPER_SHELL.test(prog) && depth < 3) {
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === '-c' && rest[i + 1] && isSendInvocation(rest[i + 1], depth + 1)) return true
