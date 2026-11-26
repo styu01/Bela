@@ -196,6 +196,42 @@ const WRAPPERS = new Map([
   ['timeout', ['sk', ['signal', 'kill-after'], 1]],
   ['setsid', ['', [], 0]],
   ['stdbuf', ['ioe', ['input', 'output', 'error'], 0]],
+  // LAUNCHGATE1126 (PROGI review 5977 point B): launchers that run their argument as a command and passed both
+  // gates. Same table as the python twin (_WRAPPERS); an option this table does not know is caught by the
+  // sender-token layer (senderTokenLayer) rather than mis-read as the program.
+  ['flock', ['wE', ['timeout', 'conflict-exit-code'], 1]],
+  ['ionice', ['cnpPu', ['class', 'classdata', 'pid', 'pgid', 'uid'], 0]],
+  ['chrt', ['TPD', ['sched-runtime', 'sched-period', 'sched-deadline'], 1]],
+  ['taskset', ['', [], 1]],
+  ['doas', ['uC', [], 0]],
+  ['runuser', ['ugG', ['user', 'group', 'supp-group', 'shell', 'whitelist-environment'], 0]],
+  ['unbuffer', ['', [], 0]],
+  ['nsenter', ['tSGwr', ['target', 'setuid', 'setgid', 'wd', 'root'], 0]],
+  ['systemd-run', ['pEMuGH', ['property', 'setenv', 'machine', 'unit', 'uid', 'gid', 'host', 'description',
+    'slice', 'working-directory', 'on-calendar', 'on-active', 'timer-property'], 0]],
+  ['busybox', ['', [], 0]],
+  ['parallel', ['jS', ['jobs', 'sshlogin'], 0]],
+  ['strace', ['oeapsuIEPSXbO', ['output', 'trace', 'signal', 'attach', 'string-limit', 'user', 'env'], 0]],
+  ['ltrace', ['oeapsunADFLS', ['output', 'library', 'align', 'indent', 'config', 'user'], 0]],
+  ['sg', ['', [], 1]],
+])
+
+// LAUNCHGATE1126: launchers whose option carries a whole SHELL COMMAND STRING (like `bash -c`), re-evaluated with
+// the same depth bound, fail-closed at the bound. Mirrors _STRING_LAUNCHERS.
+const STRING_LAUNCHERS = new Map([
+  ['su', ['c', 'command']], ['runuser', ['c', 'command']], ['script', ['c', 'command']],
+  ['flock', ['c', 'command']], ['sg', ['c']],
+])
+const FIND_EXEC = new Set(['-exec', '-execdir', '-ok', '-okdir'])
+// LAUNCHGATE1126, the sender-token layer: programs that NEVER run an argument as a command (mirrors
+// _NON_EXEC_PROGS). Calibrated on 8045 real Bash commands of the fleet: 0 new refusals on real work.
+const NON_EXEC_PROGS = new Set([
+  'echo', 'printf', 'cat', 'less', 'more', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'wc', 'sort',
+  'uniq', 'diff', 'cmp', 'comm', 'cut', 'tr', 'column', 'jq', 'yq', 'nl', 'tac', 'rev', 'fold', 'fmt',
+  'man', 'info', 'which', 'whereis', 'type', 'apropos', 'whatis', 'ls', 'stat', 'file', 'readlink', 'realpath',
+  'dirname', 'basename', 'du', 'df', 'tree', 'md5sum', 'sha1sum', 'sha256sum', 'xxd', 'od', 'hexdump', 'strings',
+  'chmod', 'chown', 'chgrp', 'touch', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'ln', 'test', '[', '[[', 'true',
+  'false', 'cd', 'pwd', ':', 'id', 'whoami',
 ])
 const HEAD_DEPTH = 8
 
@@ -249,6 +285,9 @@ function commandHeads(toksIn, d = 0, positionalsDone = false) {
   }
   const spec = WRAPPERS.get(w)
   if (!spec) return [toks]
+  // LAUNCHGATE1126: a launcher that is BOTH a wrapper and a string launcher ('flock FILE -c STRING', 'sg GROUP -c
+  // STRING', 'runuser USER -c STRING') keeps its own head too, so headIsSend sees its -c STRING.
+  if (STRING_LAUNCHERS.has(w)) splitHeads = [...splitHeads, toks]
   const [shortVal, longVal, positionalsSpec] = spec
   const positionals = positionalsDone ? 0 : positionalsSpec
   let i = 1
@@ -282,7 +321,44 @@ function commandHeads(toksIn, d = 0, positionalsDone = false) {
 }
 
 function segmentIsSend(toksIn, depth) {
-  return commandHeads(toksIn).some((h) => headIsSend(h, depth))
+  const heads = commandHeads(toksIn)
+  if (heads.some((h) => headIsSend(h, depth))) return true
+  return senderTokenLayer(toksIn, heads)
+}
+
+function segmentNamesSender(toks) {
+  if (toks.some((t) => SENDER_PROG.test(basename(t)))) return true
+  if (toks.some((t) => SENDPY.test(basename(t))) && toks.some((t) => t === '--to' || t.startsWith('--to='))) return true
+  return toks.some((t) => GRAPHMAIL.test(basename(t))) && toks.includes('send')
+}
+
+// LAUNCHGATE1126: a sender named anywhere in the segment, run by something other than a never-exec program.
+// eval re-parses its arguments and is judged on that re-parse in headIsSend, so it is not judged here again.
+function senderTokenLayer(toks, heads) {
+  if (!segmentNamesSender(toks)) return false
+  // find without an exec action runs nothing; with one, headIsSend has already judged the action's command.
+  // A wrapper head (kept only so a string launcher's -c STRING is seen) is represented by its stepped heads.
+  const progs = heads.filter((h) => h && h.length).map((h) => basename(h[0]))
+    .filter((p) => p !== 'eval' && p !== 'find' && !WRAPPERS.has(p))
+  return progs.length > 0 && !progs.every((p) => NON_EXEC_PROGS.has(p))
+}
+
+// The value of `-<short>` (alone, or last in a cluster like '-qc'), `--<long> X` or `--<long>=X`, anywhere.
+function launcherString(rest, short, longs) {
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i]
+    for (const lg of longs) {
+      if (t === '--' + lg) return i + 1 < rest.length ? rest[i + 1] : null
+      if (t.startsWith('--' + lg + '=')) return t.slice(lg.length + 3)
+    }
+    if (t.length > 1 && t[0] === '-' && !t.startsWith('--') && t.endsWith(short)) return i + 1 < rest.length ? rest[i + 1] : null
+  }
+  return null
+}
+
+function shellStringIsSend(s, depth) {
+  if (depth >= 3) return s.trim().length > 0
+  return isSendInvocation(s, depth + 1)
 }
 
 // SHCLUSTER1126: the command string of `sh|bash|zsh|dash [options] -c STRING`, or null. The shell takes the
@@ -313,6 +389,25 @@ function headIsSend(toks, depth) {
   const prog = basename(toks[0])
   const rest = toks.slice(1)
   if (SENDER_PROG.test(prog)) return true
+  // LAUNCHGATE1126: a launcher's -c STRING, watch's joined arguments, and find's -exec command.
+  const specL = STRING_LAUNCHERS.get(prog)
+  if (specL) {
+    const s = launcherString(rest, specL[0], specL.slice(1))
+    if (s !== null && shellStringIsSend(s, depth)) return true
+  }
+  if (prog === 'watch') {
+    let i = 0
+    while (i < rest.length && rest[i].startsWith('-')) i += (rest[i] === '-n' || rest[i] === '--interval') ? 2 : 1
+    if (rest.length > i && shellStringIsSend(rest.slice(i).join(' '), depth)) return true
+  }
+  if (prog === 'find') {
+    for (let k = 0; k < rest.length; k++) {
+      if (!FIND_EXEC.has(rest[k])) continue
+      const sub = []
+      for (const u of rest.slice(k + 1)) { if (u === ';' || u === '+') break; sub.push(u) }
+      if (sub.length && segmentIsSend(sub, depth)) return true
+    }
+  }
   // eval re-parses its arguments, joined by spaces, as a command line -- same as bash -c.
   // At the recursion bound the text is out of sight: refuse (fail-closed).
   if (prog === 'eval' && rest.length) {

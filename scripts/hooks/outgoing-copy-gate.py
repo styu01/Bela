@@ -360,7 +360,50 @@ _WRAPPERS = {
     # 'builtin eval ...'; 'stdbuf -oL sendmail x' runs sendmail) and both passed this gate and the JS twin.
     "builtin": ("", (), 0),
     "stdbuf": ("ioe", ("input", "output", "error"), 0),
+    # LAUNCHGATE1126 (PROGI review 5977 point B): launchers that run their argument as a command and passed both
+    # gates. Measured with bash where the tool exists here (flock, ionice, chrt, taskset, nsenter, systemd-run are
+    # present; doas, strace, ltrace, unbuffer, sg, parallel, busybox are not, those are pinned by the shared rows
+    # only). The flag lists are the value-taking ones; an option this table does not know is caught by the
+    # sender-token layer (_sender_token_layer) rather than mis-read as the program.
+    "flock": ("wE", ("timeout", "conflict-exit-code"), 1),          # flock [opts] FILE CMD (-c STRING: see below)
+    "ionice": ("cnpPu", ("class", "classdata", "pid", "pgid", "uid"), 0),
+    "chrt": ("TPD", ("sched-runtime", "sched-period", "sched-deadline"), 1),   # chrt [opts] PRIO CMD
+    "taskset": ("", (), 1),                                         # taskset [-c] MASK CMD
+    "doas": ("uC", (), 0),
+    "runuser": ("ugG", ("user", "group", "supp-group", "shell", "whitelist-environment"), 0),
+    "unbuffer": ("", (), 0),
+    "nsenter": ("tSGwr", ("target", "setuid", "setgid", "wd", "root"), 0),
+    "systemd-run": ("pEMuGH", ("property", "setenv", "machine", "unit", "uid", "gid", "host", "description",
+                               "slice", "working-directory", "on-calendar", "on-active", "timer-property"), 0),
+    "busybox": ("", (), 0),                                         # busybox APPLET ARGS
+    "parallel": ("jS", ("jobs", "sshlogin"), 0),
+    "strace": ("oeapsuIEPSXbO", ("output", "trace", "signal", "attach", "string-limit", "user", "env"), 0),
+    "ltrace": ("oeapsunADFLS", ("output", "library", "align", "indent", "config", "user"), 0),
+    "sg": ("", (), 1),                                              # sg GROUP CMD (-c STRING: see below)
 }
+
+# LAUNCHGATE1126: launchers whose option carries a whole SHELL COMMAND STRING (like `bash -c`). The string is
+# re-evaluated, bounded by the same depth as `bash -c` and fail-closed at the bound.
+_STRING_LAUNCHERS = {
+    "su": ("c", "command"), "runuser": ("c", "command"), "script": ("c", "command"),
+    "flock": ("c", "command"), "sg": ("c",),
+}
+# find's actions whose arguments, up to ';' or '+', are a command.
+_FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+# LAUNCHGATE1126, the sender-token layer: programs that NEVER run an argument as a command. A segment that names a
+# sender anywhere (a sendmail/msmtp/swaks token, send.py with --to, graph-mail with send) but whose real command
+# is not one of these is refused, so a launcher missing from the tables above still cannot carry a send. Calibrated
+# on 8045 real Bash commands from the fleet's transcripts: only two segments there name a sender as a token at
+# all (a printf and a chmod of a test fixture), both covered here; 0 new refusals on real work.
+_NON_EXEC_PROGS = frozenset({
+    "echo", "printf", "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag", "wc", "sort",
+    "uniq", "diff", "cmp", "comm", "cut", "tr", "column", "jq", "yq", "nl", "tac", "rev", "fold", "fmt",
+    "man", "info", "which", "whereis", "type", "apropos", "whatis", "ls", "stat", "file", "readlink", "realpath",
+    "dirname", "basename", "du", "df", "tree", "md5sum", "sha1sum", "sha256sum", "xxd", "od", "hexdump", "strings",
+    "chmod", "chown", "chgrp", "touch", "mkdir", "rmdir", "rm", "cp", "mv", "ln", "test", "[", "[[", "true",
+    "false", "cd", "pwd", ":", "id", "whoami",
+})
+
 _HEAD_DEPTH = 8
 
 
@@ -433,6 +476,10 @@ def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
     spec = _WRAPPERS.get(w)
     if spec is None:
         return [toks]
+    # LAUNCHGATE1126: a launcher that is BOTH a wrapper and a string launcher ('flock FILE -c STRING', 'sg GROUP -c
+    # STRING', 'runuser USER -c STRING') keeps its own head too, so _head_is_send sees its -c STRING.
+    if w in _STRING_LAUNCHERS:
+        split_heads = split_heads + [toks]
     short_val, long_val, positionals = spec
     if _positionals_done:
         positionals = 0
@@ -471,7 +518,49 @@ def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
 
 
 def _segment_is_send(toks, depth: int) -> bool:
-    return any(_head_is_send(h, depth) for h in _command_heads(toks))
+    heads = _command_heads(toks)
+    if any(_head_is_send(h, depth) for h in heads):
+        return True
+    return _sender_token_layer(toks, heads)
+
+
+def _segment_names_sender(toks) -> bool:
+    if any(_SENDER_PROG.match(_basename(t)) for t in toks):
+        return True
+    if any(_SENDPY.match(_basename(t)) for t in toks) and any(t == "--to" or t.startswith("--to=") for t in toks):
+        return True
+    return any(_GRAPHMAIL.match(_basename(t)) for t in toks) and "send" in toks
+
+
+def _sender_token_layer(toks, heads) -> bool:
+    """LAUNCHGATE1126: a sender named anywhere in the segment, run by something other than a never-exec program."""
+    if not _segment_names_sender(toks):
+        return False
+    # eval re-parses its arguments and is judged on that re-parse in _head_is_send, so it is not judged here again.
+    # find without an exec action runs nothing; with one, _head_is_send has already judged the action's command.
+    # A wrapper head (kept only so a string launcher's -c STRING is seen) is represented by its stepped heads.
+    progs = [_basename(h[0]) for h in heads
+             if h and _basename(h[0]) not in ("eval", "find") and _basename(h[0]) not in _WRAPPERS]
+    return bool(progs) and not all(p in _NON_EXEC_PROGS for p in progs)
+
+
+def _launcher_string(rest, short: str, longs) -> "str | None":
+    """The value of `-<short>` (alone, or last in a cluster like '-qc'), `--<long> X` or `--<long>=X`, anywhere."""
+    for i, t in enumerate(rest):
+        for lg in longs:
+            if t == "--" + lg:
+                return rest[i + 1] if i + 1 < len(rest) else None
+            if t.startswith("--" + lg + "="):
+                return t.split("=", 1)[1]
+        if len(t) > 1 and t[0] == "-" and not t.startswith("--") and t.endswith(short):
+            return rest[i + 1] if i + 1 < len(rest) else None
+    return None
+
+
+def _shell_string_is_send(s: str, depth: int) -> bool:
+    if depth >= 3:
+        return bool(s.strip())
+    return is_send_invocation(s, _depth=depth + 1)
 
 
 def _shell_command_string(rest):
@@ -512,6 +601,28 @@ def _head_is_send(toks, depth: int) -> bool:
     rest = toks[1:]
     if _SENDER_PROG.match(prog):
         return True
+    # LAUNCHGATE1126: a launcher's -c STRING, watch's joined arguments, and find's -exec command.
+    spec_l = _STRING_LAUNCHERS.get(prog)
+    if spec_l is not None:
+        s = _launcher_string(rest, spec_l[0], spec_l[1:])
+        if s is not None and _shell_string_is_send(s, depth):
+            return True
+    if prog == "watch":
+        i = 0
+        while i < len(rest) and rest[i].startswith("-"):
+            i += 2 if rest[i] in ("-n", "--interval") else 1
+        if rest[i:] and _shell_string_is_send(" ".join(rest[i:]), depth):
+            return True
+    if prog == "find":
+        for k, t in enumerate(rest):
+            if t in _FIND_EXEC:
+                sub = []
+                for u in rest[k + 1:]:
+                    if u in (";", "+"):
+                        break
+                    sub.append(u)
+                if sub and _segment_is_send(sub, depth):
+                    return True
     # WRAPGATE1126: eval re-parses its arguments, joined by spaces, as a command line, the same as bash -c
     # ('eval sendmail x', "eval 'cd /tmp && sendmail x'" passed both gates). At the recursion bound the text is
     # out of sight: audit it (fail-closed), like a wrapper at the depth bound.

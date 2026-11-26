@@ -902,8 +902,208 @@
       "expected": false
     },
     {
-      "name": "ENVSPLIT1126: control: after --, -S is the program name",
+      "name": "ENVSPLIT1126 / LAUNCHGATE1126: after --, '-S' is the program; not a -S string, but an unknown program with a sender-name argument is refused by the sender-token layer (conservative)",
       "cmd": "env -- -S sendmail",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: flock FILE CMD",
+      "cmd": "flock lock.f sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: flock FILE -c STRING",
+      "cmd": "flock lock.f -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: ionice",
+      "cmd": "ionice -c3 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: ionice with values",
+      "cmd": "ionice -c 3 -n 7 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: chrt PRIO CMD",
+      "cmd": "chrt -i 0 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: taskset MASK CMD",
+      "cmd": "taskset 1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: taskset -c LIST CMD",
+      "cmd": "taskset -c 0 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: watch runs its joined arguments through the shell",
+      "cmd": "watch -n1 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: watch with bare arguments",
+      "cmd": "watch sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: script -qc STRING",
+      "cmd": "script -qc 'sendmail a@b.hu' /dev/null",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: script --command=STRING",
+      "cmd": "script --command='sendmail a@b.hu' /dev/null",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: find -exec CMD ;",
+      "cmd": "find . -exec sendmail a@b.hu \\;",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: find -execdir CMD +",
+      "cmd": "find . -execdir sendmail a@b.hu {} +",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: doas (not installed here, row only)",
+      "cmd": "doas sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: doas -u USER",
+      "cmd": "doas -u root sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: su -c STRING",
+      "cmd": "su -c 'sendmail a@b.hu' root",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: su - USER -c STRING",
+      "cmd": "su - root -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: runuser -u USER -- CMD",
+      "cmd": "runuser -u nobody -- sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: runuser USER -c STRING",
+      "cmd": "runuser nobody -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: strace (row only)",
+      "cmd": "strace -f -o out.txt sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: ltrace (row only)",
+      "cmd": "ltrace sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: unbuffer (row only)",
+      "cmd": "unbuffer sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: nsenter (row only, not run)",
+      "cmd": "nsenter -t 1 -m sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: sg GROUP CMD (row only)",
+      "cmd": "sg mail sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: sg GROUP -c STRING (row only)",
+      "cmd": "sg mail -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: systemd-run (row only, not run)",
+      "cmd": "systemd-run --user -p X=1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: parallel (row only)",
+      "cmd": "parallel sendmail ::: a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: busybox APPLET (row only)",
+      "cmd": "busybox sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: sender-token layer: a launcher in no table, with a sender token, is refused",
+      "cmd": "chroot / sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: sender-token layer: an unknown program with a sender-name argument",
+      "cmd": "mylauncher --opt sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: sender-token layer: send.py with --to anywhere in the segment",
+      "cmd": "python3 -m launcher /x/send.py --to a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LAUNCHGATE1126: control: flock with a non-sender",
+      "cmd": "flock lock.f ls",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: a script string that only names the sender",
+      "cmd": "script -qc 'echo sendmail' /dev/null",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: find without an exec action runs nothing",
+      "cmd": "find . -name sendmail",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: a never-exec program with a sender-name argument",
+      "cmd": "ls -la /usr/sbin/sendmail",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: chmod of a sender-named file (the only such shape in the fleet corpus)",
+      "cmd": "chmod +x bin/sendmail",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: printf into a sender-named file",
+      "cmd": "printf 'x' > bin/sendmail",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: copying the sender binary",
+      "cmd": "cp /usr/sbin/sendmail /tmp/x",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: grep for the sender name",
+      "cmd": "grep -rn sendmail src/",
+      "expected": false
+    },
+    {
+      "name": "LAUNCHGATE1126: control: a string launcher's own head does not make the sender-token layer refuse a never-exec command",
+      "cmd": "flock lk.f grep sendmail /dev/null",
       "expected": false
     }
   ]
