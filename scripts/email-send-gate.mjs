@@ -857,8 +857,30 @@ function stdinShellTexts(cmd) {
   let segs
   try { segs = segmentsWithSeparators(cmd) } catch { return { run, piped, code } }
   for (let k = 0; k < segs.length; k++) {
-    const [toks] = segs[k]
+    const [toks, sepK] = segs[k]
     if (!toks.length) continue
+    // PROCSUB1126 (PROGI msg 6034): 'source <(...)', '. <(...)', 'bash <(...)', 'bash < <(...)' run the OUTPUT of
+    // the process substitution as a script. The tokenizer leaves '<' as the last word and '(' as the separator.
+    if (toks.length >= 2 && toks[toks.length - 1] === '<' && sepK === '(') {
+      let base = toks.slice(0, -1)
+      if (base[base.length - 1] === '<') base = base.slice(0, -1)
+      const ph = commandHeads(base)[0]
+      const pp = ph && ph.length ? basename(ph[0]) : ''
+      if (pp === 'source' || pp === '.' || ((WRAPPER_SHELL.test(pp) || FISH_SHELL.test(pp)) &&
+          shellCommandString(withoutRedirections(ph.slice(1)), pp) === null)) {
+        const body = []
+        let depth = 1
+        for (let m2 = k + 1; m2 < segs.length && depth > 0; m2++) {
+          body.push(segs[m2][0])
+          depth += (segs[m2][1].match(/\(/g) || []).length - (segs[m2][1].match(/\)/g) || []).length
+        }
+        piped.push(body.map((b) => b.join(' ')).join(' ; '))
+        for (const b of body) {
+          const bh = commandHeads(b)[0]
+          if (bh && (basename(bh[0]) === 'echo' || basename(bh[0]) === 'printf')) run.push(bh.slice(1).filter((t) => !/^-[neE]+$/.test(t)).join(' '))
+        }
+      }
+    }
     const head = commandHeads(toks)[0]
     if (isStdinInterpreterHead(head)) {
       for (let i = 0; i < toks.length; i++) {

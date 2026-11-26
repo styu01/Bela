@@ -1945,6 +1945,56 @@
       "name": "GROUPPIPE1126: control: a group piped into grep",
       "cmd": "{ echo hi; } | grep -c sendmail",
       "expected": false
+    },
+    {
+      "name": "PROCSUB1126: source <(...)",
+      "cmd": "source <(echo 'sendmail a@b.hu')",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: . <(...)",
+      "cmd": ". <(echo 'sendmail a@b.hu')",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: bash <(...) runs it as a script",
+      "cmd": "bash <(echo 'sendmail a@b.hu')",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: bash < <(...) feeds it on stdin",
+      "cmd": "bash < <(echo 'sendmail a@b.hu')",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: the echo literal inside is parsed (quotes split the name)",
+      "cmd": "bash <(echo 'send\"\"mail a@b.hu')",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: printf lines inside",
+      "cmd": "bash <(printf '%s\\n' 'cd /tmp' 'sendmail a@b.hu')",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: control: source of a non-sender",
+      "cmd": "source <(echo ls)",
+      "expected": false
+    },
+    {
+      "name": "PROCSUB1126: control: diff of two process substitutions runs nothing",
+      "cmd": "diff <(echo sendmail) <(echo x)",
+      "expected": false
+    },
+    {
+      "name": "PROCSUB1126: control: bash -c reads no script from the substitution",
+      "cmd": "bash -c 'cat' <(echo 'sendmail a')",
+      "expected": false
+    },
+    {
+      "name": "PROCSUB1126: control: cat prints the substitution",
+      "cmd": "cat <(echo 'sendmail a@b.hu')",
+      "expected": false
     }
   ]
 }

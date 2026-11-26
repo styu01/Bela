@@ -1218,9 +1218,31 @@ def _stdin_shell_texts(cmd: str):
     def is_pipe(sep):
         return sep.endswith("|") and not sep.endswith("||")
 
-    for k, (toks, _sep) in enumerate(segs):
+    for k, (toks, sep_k) in enumerate(segs):
         if not toks:
             continue
+        # PROCSUB1126 (PROGI msg 6034): 'source <(...)', '. <(...)', 'bash <(...)', 'bash < <(...)' run the OUTPUT of
+        # the process substitution as a script.
+        if len(toks) >= 2 and toks[-1] == "<" and sep_k == "(":
+            base = toks[:-1]
+            if base and base[-1] == "<":
+                base = base[:-1]
+            phs = _command_heads(base) if base else []
+            ph = phs[0] if phs else None
+            pp = _basename(ph[0]) if ph else ""
+            if pp in ("source", ".") or ((_WRAPPER_SHELL.match(pp) or _FISH_SHELL.match(pp))
+                                         and _shell_command_string(_without_redirections(ph[1:]), pp) is None):
+                body, depth, m2 = [], 1, k + 1
+                while m2 < len(segs) and depth > 0:
+                    body.append(segs[m2][0])
+                    depth += segs[m2][1].count("(") - segs[m2][1].count(")")
+                    m2 += 1
+                piped.append(" ; ".join(" ".join(b) for b in body))
+                for b in body:
+                    bhs = _command_heads(b) if b else []
+                    bh = bhs[0] if bhs else None
+                    if bh and _basename(bh[0]) in ("echo", "printf"):
+                        run.append(" ".join(t for t in bh[1:] if not re.match(r"-[neE]+$", t)))
         heads = _command_heads(toks)
         if heads and _is_stdin_interpreter_head(heads[0]):
             for i, t in enumerate(toks):
