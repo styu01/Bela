@@ -17,8 +17,8 @@
     "PreToolUse": [
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py\"", "timeout": 15 } ] },
       { "matcher": ".*send_email.*", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py\"", "timeout": 15 } ] },
-      { "matcher": "mcp__.*[Gg]mail__(draft_email|update_draft|reply_all)", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py\"", "timeout": 15 } ] },
-      { "matcher": "mcp__plugin_telegram_telegram__reply", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py\"", "timeout": 15 } ] }
+      { "matcher": "mcp__.*[Gg]mail__(draft_email|update_draft|reply_all|reply|send_message|create_draft|forward)$", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py\"", "timeout": 15 } ] },
+      { "matcher": "mcp__plugin_telegram_telegram__(reply|edit_message)$", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py\"", "timeout": 15 } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/telegram-reply-guard.py\"", "timeout": 10 } ] }

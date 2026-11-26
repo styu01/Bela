@@ -1466,6 +1466,11 @@ MANAGE_EMAIL_OUTBOUND_OPS = {"send", "reply", "replyall", "forward"}
 # before Gmail, and `(^|__)gmail__` never matched it, so its sends fell through
 # to sys.exit(0) with no audit (measured 2026-08-30, 2026-09-08). Anything
 # ending in "gmail__<send-shaped tool>" is a send now, whatever the prefix.
+# The fields of a forward that hold no text of ours (recipients and ids).
+_FORWARD_ADDRESS_FIELDS = frozenset({
+    "to", "cc", "bcc", "from", "messageId", "message_id", "messageIds", "threadId", "thread_id", "id", "userId",
+})
+
 EMAIL_TOOL_RE = re.compile(
     r"(send_email|create_draft|draft_email|update_draft"
     r"|gmail__(reply|reply_all|send_message|forward)$)",
@@ -1701,6 +1706,14 @@ def main():
             sys.exit(0)
         text, unreadable = collect_mcp_body(tool_input), None
     elif EMAIL_TOOL_RE.search(tool):
+        # A bare Gmail-connector forward carries someone else's text and no note of
+        # ours, the same case as the manage_email forward above: the fail-closed
+        # "unreadable" branch below would block it for no reason. Narrow on purpose:
+        # only when every filled field is a recipient or an id, so a note in a field
+        # the collector does not know still ends in the loud fail-closed block.
+        if re.search(r"gmail__forward$", tool, re.I) and all(
+                k in _FORWARD_ADDRESS_FIELDS for k, v in tool_input.items() if v not in (None, "", [], {})):
+            sys.exit(0)
         text, unreadable = collect_mcp_body(tool_input), None
     elif tool == "Bash":
         cmd = str(tool_input.get("command") or "")
