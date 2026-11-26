@@ -1651,7 +1651,8 @@ export function updateMemory(id: number, content: string, category?: string, age
   // stored values rather than testing for the parameter's presence -- `content` is
   // required and the PUT route resends the unchanged body on a category-only edit.
   const keywordsChanged = keywords !== undefined && (before?.keywords ?? null) !== keywords
-  if (before && (before.content !== content || keywordsChanged)) sets.push('embedding = NULL')
+  const embeddedTextChanged = !!before && (before.content !== content || keywordsChanged)
+  if (embeddedTextChanged) sets.push('embedding = NULL')
   if (category) { sets.push('category = ?'); params.push(category) }
   if (agentId) { sets.push('agent_id = ?'); params.push(agentId) }
   if (keywords !== undefined) { sets.push('keywords = ?'); params.push(keywords) }
@@ -1666,8 +1667,29 @@ export function updateMemory(id: number, content: string, category?: string, age
       if (before?.agent_id) memoryCacheInvalidate(before.agent_id)
       if (agentId && agentId !== before?.agent_id) memoryCacheInvalidate(agentId)
     }
+    // REEMBEDONUPDATE1117: re-embed the new text right away, fire-and-forget,
+    // instead of leaving the row NULL until the next backfill (the nightly Dream
+    // Engine round), during which the vector half of hybrid search cannot see a
+    // freshly edited memory. It stays off the write path, a backend outage just
+    // leaves the NULL for backfill as before, and the UPDATE is guarded by the
+    // embedded text, so a slow reply for text edited again meanwhile is discarded.
+    if (embeddedTextChanged) {
+      reEmbedEditedMemory(id, content, keywords !== undefined ? keywords : (before?.keywords ?? null))
+    }
   }
   return changed
+}
+
+// Upstream calls its shared scheduleEmbedding() here; that helper (and the
+// embedding_model / vector-cache bookkeeping it carries) comes from commits not
+// in this fork, so the guarded fire-and-forget step lives in this local helper.
+function reEmbedEditedMemory(id: number, content: string, keywords: string | null): void {
+  generateEmbedding(content + (keywords ? ' ' + keywords : '')).then(emb => {
+    if (emb) {
+      db.prepare('UPDATE memories SET embedding = ? WHERE id = ? AND content = ? AND keywords IS ?')
+        .run(JSON.stringify(emb), id, content, keywords)
+    }
+  }).catch(() => {})
 }
 
 // --- Daily logs ---
