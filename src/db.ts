@@ -1629,11 +1629,29 @@ export function updateMemory(id: number, content: string, category?: string, age
   // Read the row's CURRENT owner and category before writing. The agentId
   // parameter is optional and means "reassign to this agent", so it is absent
   // on the ordinary edit -- it cannot be used to decide whose cache went
-  // stale. Only the row itself knows that.
-  const before = db.prepare('SELECT agent_id, category FROM memories WHERE id = ?').get(id) as
-    { agent_id: string | null; category: string | null } | undefined
+  // stale. Only the row itself knows that. content/keywords come along for the
+  // staleness check below, for the same reason: the parameters alone cannot say
+  // whether the embedded text changed.
+  const before = db.prepare('SELECT agent_id, category, content, keywords FROM memories WHERE id = ?').get(id) as
+    { agent_id: string | null; category: string | null; content: string | null; keywords: string | null } | undefined
   const sets: string[] = ['content = ?', 'accessed_at = ?']
   const params: unknown[] = [content, now]
+  // EMBSTALE916: the stored embedding was generated from the OLD text, so an edit
+  // silently leaves the vector describing text that is no longer there. Nothing in
+  // the schema records that mismatch, and neither search path errors: FTS and the
+  // LIKE fallback read `content` live and stay correct, while hybridSearch keeps
+  // fusing the stale vector's ranking in. Dropping it to NULL hands the row back to
+  // backfillEmbeddings, which processes exactly `WHERE embedding IS NULL` and is
+  // therefore idempotent and resumable. Deliberately NOT regenerating here: that
+  // would put a synchronous Ollama call in the path of a DB write.
+  //
+  // The trigger is the embedded TEXT changing, which is content AND keywords: both
+  // saveAgentMemory and backfillEmbeddings embed `content + ' ' + keywords`, so a
+  // keywords-only edit leaves exactly the same stale vector. Compare against the
+  // stored values rather than testing for the parameter's presence -- `content` is
+  // required and the PUT route resends the unchanged body on a category-only edit.
+  const keywordsChanged = keywords !== undefined && (before?.keywords ?? null) !== keywords
+  if (before && (before.content !== content || keywordsChanged)) sets.push('embedding = NULL')
   if (category) { sets.push('category = ?'); params.push(category) }
   if (agentId) { sets.push('agent_id = ?'); params.push(agentId) }
   if (keywords !== undefined) { sets.push('keywords = ?'); params.push(keywords) }
