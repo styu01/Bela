@@ -1850,6 +1850,71 @@
       "name": "ENVPREFIX1126: control: git add -n (dry run) stays read-only",
       "cmd": "git add -n sendmail",
       "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: python3 - heredoc calling os.system",
+      "cmd": "python3 - <<'EOF'\nimport os\nos.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN1126: python3 heredoc calling subprocess with the sender",
+      "cmd": "python3 <<'EOF'\nimport subprocess\nsubprocess.run(['sendmail','a@b.hu'])\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN1126: python3 here-string",
+      "cmd": "python3 <<< 'import os; os.system(\"sendmail a@b.hu\")'",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN1126: node here-string with execSync (conservative: the measuring PATH had no node)",
+      "cmd": "node <<< 'require(\"child_process\").execSync(\"sendmail a@b.hu\")'",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN1126: echo of python code piped into python3",
+      "cmd": "echo 'import os; os.system(\"sendmail a\")' | python3",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN1126: control: a python heredoc that only prints the sender name",
+      "cmd": "python3 - <<'EOF'\nprint('sendmail')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: control: a python heredoc that starts a non-sender",
+      "cmd": "python3 - <<'EOF'\nimport subprocess\nprint(subprocess.run(['ls']).returncode)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: control: python running a script reads data from stdin",
+      "cmd": "python3 script.py <<'EOF'\nos.system('sendmail a')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: control: python -c ignores the here-string",
+      "cmd": "python3 -c 'print(1)' <<< 'import os; os.system(\"sendmail a\")'",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: control: a heredoc script that EDITS mail code (the mail call inside a string literal)",
+      "cmd": "python3 - <<'EOF'\ns=open('send.py').read()\ns=s.replace('''import smtplib''', '''import smtplib, ssl''')\nopen('send.py','w').write(s)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: smtplib used outside strings in a heredoc",
+      "cmd": "python3 - <<'EOF'\nimport smtplib\ns = smtplib.SMTP('localhost')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN1126: control: a process starter and the sender name on DIFFERENT lines (a real fleet shape)",
+      "cmd": "python3 - <<'EOF'\nexec(compile('1', 'x', 'exec'))\nname = 'sendmail'\nprint(name)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "INTERPSTDIN1126: control: python -c attached ('-c'...') reads no program from stdin",
+      "cmd": "python3 -c'print(1)' <<< 'import os; os.system(\"sendmail a\")'",
+      "expected": false
     }
   ]
 }

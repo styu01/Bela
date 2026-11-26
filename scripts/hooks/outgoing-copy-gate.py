@@ -1144,6 +1144,47 @@ def _is_stdin_shell_head(h) -> bool:
     return saw_s or i >= len(rest) or rest[i] in _STDIN_FILES
 
 
+# Calibrated on the fleet's real python heredocs (2255; the plain _code_string_sends rule refused 5, all scripts
+# that EDIT or TEST mail code, the mail words inside string literals): blank string literals line by line, then a
+# line sends when a mail call stands OUTSIDE strings, or a process starter stands outside strings and that same
+# line names a sender. Mirrors interpCodeSends in email-send-gate.mjs.
+_TRIPLE_STR = re.compile(r"'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\"")
+_LINE_STR = re.compile(r"'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`")
+
+
+def _blank_strings(code: str) -> str:
+    keep = lambda m: re.sub(r"[^\n]", " ", m.group(0))
+    return _LINE_STR.sub(keep, _TRIPLE_STR.sub(keep, code))
+
+
+def _interp_code_sends(code: str) -> bool:
+    bare = _blank_strings(code).split("\n")
+    orig = code.split("\n")
+    return any(_CODE_SEND.search(l) or (_CODE_EXECISH.search(l) and _CODE_SENDER_LIT.search(orig[i] if i < len(orig) else ""))
+               for i, l in enumerate(bare))
+
+
+def _is_stdin_interpreter_head(h) -> bool:
+    """INTERPSTDIN1126 (PROGI msg 6034): python / node reading their PROGRAM from stdin. That text is code, judged by
+    _code_string_sends, never by name. Mirrors isStdinInterpreterHead in email-send-gate.mjs."""
+    if not h:
+        return False
+    prog = _basename(h[0])
+    is_py = bool(_PYTHON.match(prog) or re.match(r"python3\.\d+$", prog, re.I))
+    if not is_py and prog != "node":
+        return False
+    rest = _without_redirections(h[1:])
+    run_flags = ("-c", "-m") if is_py else ("-e", "--eval", "-p", "--print")
+    for t in rest:
+        if t in run_flags or (is_py and re.match(r"-[A-Za-z]*[cm]", t) and not t.startswith("--")):
+            return False
+        if t == "-":
+            return True
+        if not t.startswith("-"):
+            return False
+    return True
+
+
 def _segments_with_separators(cmd: str):
     """[(tokens, separator that ENDED the segment)], the tokenizer of _segments_tokens; an empty segment (a run of
     operators) adds its separator to the previous one."""
@@ -1168,11 +1209,11 @@ def _segments_with_separators(cmd: str):
 
 def _stdin_shell_texts(cmd: str):
     """(run, piped): command texts a stdin shell runs, and the pipeline texts it reads (judged by name only)."""
-    run, piped = [], []
+    run, piped, code = [], [], []
     try:
         segs = _segments_with_separators(cmd)
     except ValueError:
-        return run, piped
+        return run, piped, code
 
     def is_pipe(sep):
         return sep.endswith("|") and not sep.endswith("||")
@@ -1181,6 +1222,18 @@ def _stdin_shell_texts(cmd: str):
         if not toks:
             continue
         heads = _command_heads(toks)
+        if heads and _is_stdin_interpreter_head(heads[0]):
+            for i, t in enumerate(toks):
+                if t == "<<<" and i + 1 < len(toks):
+                    code.append(toks[i + 1])
+                elif t.startswith("<<<") and len(t) > 3:
+                    code.append(t[3:])
+            if k > 0 and is_pipe(segs[k - 1][1]):
+                lhs = _command_heads(segs[k - 1][0])
+                lh = lhs[0] if lhs else None
+                if lh and _basename(lh[0]) in ("echo", "printf"):
+                    code.append(" ".join(lh[1:]))
+            continue
         if not heads or not _is_stdin_shell_head(heads[0]):
             continue
         for i, t in enumerate(toks):
@@ -1212,6 +1265,9 @@ def _stdin_shell_texts(cmd: str):
         if hs and _is_stdin_shell_head(hs[0]):
             run.append(body)
             continue
+        if hs and _is_stdin_interpreter_head(hs[0]):
+            code.append(body)
+            continue
         # 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
         try:
             hl = _segments_with_separators(cmd[line_start:m.start() + len(m.group(1))])
@@ -1236,12 +1292,14 @@ def _stdin_shell_texts(cmd: str):
             run.append(body)
         else:
             piped.append(body)
-    return run, piped
+    return run, piped, code
 
 
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
-    run, piped = _stdin_shell_texts(cmd)
+    run, piped, code = _stdin_shell_texts(cmd)
     if any(_CODE_SENDER_LIT.search(t) for t in piped):
+        return True
+    if any(_interp_code_sends(t) for t in code):
         return True
     for text in run:
         if _depth >= 3:

@@ -783,6 +783,39 @@ function isStdinShellHead(h) {
   }
   return sawS || i >= rest.length || STDIN_FILES.has(rest[i])
 }
+// INTERPSTDIN1126 (PROGI msg 6034): python / node reading their PROGRAM from stdin ('python3 - <<EOF',
+// 'python3 <<< "..."', 'node <<< "...execSync(...)"', 'echo ... | python3'): that text is code, judged by the
+// python -c / node -e rule (codeStringSends), never by name (a heredoc script that mentions a sender is data).
+// Calibrated on the fleet's real python heredocs (2255; the plain codeStringSends rule refused 5 of them, all
+// scripts that EDIT or TEST mail code, so the mail words sat inside string literals): string literals are blanked
+// line by line first, then a line sends when a mail call stands OUTSIDE strings (CODE_SEND), or a process starter
+// stands outside strings and that same line names a sender. Mirrors _interp_code_sends.
+function blankStrings(code) {
+  const keepNl = (m) => m.replace(/[^\n]/g, ' ')
+  return code
+    .replace(/'''[\s\S]*?'''|"""[\s\S]*?"""/g, keepNl)
+    .replace(/'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, keepNl)
+}
+function interpCodeSends(code) {
+  const bare = blankStrings(code).split('\n')
+  const orig = code.split('\n')
+  return bare.some((l, i) => CODE_SEND.test(l) || (CODE_EXECISH.test(l) && CODE_SENDER_LIT.test(orig[i] || '')))
+}
+function isStdinInterpreterHead(h) {
+  if (!h || !h.length) return false
+  const prog = basename(h[0])
+  const isPy = PYTHON.test(prog) || /^python3\.\d+$/i.test(prog)
+  if (!isPy && prog !== 'node') return false
+  const rest = withoutRedirections(h.slice(1))
+  const runFlags = isPy ? ['-c', '-m'] : ['-e', '--eval', '-p', '--print']
+  for (const t of rest) {
+    if (runFlags.includes(t) || (isPy && /^-[A-Za-z]*[cm]/.test(t) && !t.startsWith('--'))) return false
+    if (t === '-') return true
+    if (!t.startsWith('-')) return false
+  }
+  return true
+}
+
 // [segment tokens, separator that ENDED it] -- the tokenizer above, keeping '|' apart from '||' and the rest.
 function segmentsWithSeparators(cmd) {
   const s = maskSubshellMarkers(cmd.replace(HEREDOC_RE, '$1'))
@@ -820,12 +853,24 @@ function segmentsWithSeparators(cmd) {
 function stdinShellTexts(cmd) {
   const run = []
   const piped = []
+  const code = []
   let segs
-  try { segs = segmentsWithSeparators(cmd) } catch { return { run, piped } }
+  try { segs = segmentsWithSeparators(cmd) } catch { return { run, piped, code } }
   for (let k = 0; k < segs.length; k++) {
     const [toks] = segs[k]
     if (!toks.length) continue
     const head = commandHeads(toks)[0]
+    if (isStdinInterpreterHead(head)) {
+      for (let i = 0; i < toks.length; i++) {
+        if (toks[i] === '<<<' && i + 1 < toks.length) code.push(toks[i + 1])
+        else if (toks[i].startsWith('<<<') && toks[i].length > 3) code.push(toks[i].slice(3))
+      }
+      if (k > 0 && segs[k - 1][1].endsWith('|') && !segs[k - 1][1].endsWith('||')) {
+        const lh = commandHeads(segs[k - 1][0])[0]
+        if (lh && (basename(lh[0]) === 'echo' || basename(lh[0]) === 'printf')) code.push(lh.slice(1).join(' '))
+      }
+      continue
+    }
     if (!isStdinShellHead(head)) continue
     // here-string: '<<<' WORD or '<<<WORD'
     for (let i = 0; i < toks.length; i++) {
@@ -851,6 +896,7 @@ function stdinShellTexts(cmd) {
     const last = headSegs[headSegs.length - 1]
     const body = m[0].slice(m[1].length + 1, m[0].length - m[2].length)
     if (last && isStdinShellHead(commandHeads(last)[0])) { run.push(body); continue }
+    if (last && isStdinInterpreterHead(commandHeads(last)[0])) { code.push(body); continue }
     // 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
     let hs
     try { hs = segmentsWithSeparators(cmd.slice(lineStart, m.index + m[1].length)) } catch { continue }
@@ -866,12 +912,13 @@ function stdinShellTexts(cmd) {
     if (feeder && basename(feeder[0]) === 'cat') run.push(body)
     else piped.push(body)
   }
-  return { run, piped }
+  return { run, piped, code }
 }
 
 export function isSendInvocation(cmd, depth = 0) {
   const stdin = stdinShellTexts(cmd)
   if (stdin.piped.some((t) => CODE_SENDER_LIT.test(t))) return true
+  if (stdin.code.some((t) => interpCodeSends(t))) return true
   for (const text of stdin.run) {
     if (depth >= 3) { if (text.trim()) return true } else if (isSendInvocation(text, depth + 1)) return true
   }
