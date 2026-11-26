@@ -965,6 +965,20 @@ export function resolveTaskTarget(
   return { session, host }
 }
 
+// The task types whose prompt carries ONLY a bare tag, never a "send the result to
+// Telegram" instruction. heartbeat: a background check nobody is waiting for.
+// dream-engine (upstream #2284): its SKILL.md forbids a channel send (the owner is
+// asleep at 02:07; DREAM.md goes out with the 07:30 briefing), so the runner must not
+// say the opposite in the same prompt. The type is cast, not validated, so every other
+// type, unknown ones included, keeps the delivery instruction; catch-up budget and
+// quota class are NOT changed here. Returns the tag, or null for a delivering type.
+export function silentTaskTag(task: Pick<ScheduledTask, 'type' | 'name'>): string | null {
+  if (task.type === 'heartbeat') return `[Heartbeat: ${task.name}] `
+  if ((task.type as string) === 'dream-engine') return `[Utemezett feladat: ${task.name}] `
+  return null
+}
+
+
 async function attemptFireTask(
   task: ScheduledTask,
   agentName: string,
@@ -1112,7 +1126,8 @@ async function attemptFireTask(
 
   try {
     let prefix: string
-    if (task.type === 'heartbeat') {
+    const silentTag = silentTaskTag(task)
+    if (silentTag !== null) {
       // Heartbeat prompts get ONLY a minimal tag. The agent's CLAUDE.md and
       // the task SKILL.md drive behaviour -- the runner MUST NOT prepend any
       // operational directive here.
@@ -1131,7 +1146,7 @@ async function attemptFireTask(
       // is handled separately by the channels TUI keepalive
       // (channel-coordinator/liveness.ts), never by injecting instructions into
       // heartbeat prompts.
-      prefix = `[Heartbeat: ${task.name}] `
+      prefix = silentTag
     } else {
       // Target the RUNNING agent's own bound channel, NOT the global
       // ALLOWED_CHAT_ID. The latter is the main/admin chat; injecting it here

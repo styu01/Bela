@@ -33,7 +33,9 @@ describe('schedule-runner heartbeat prefix is injection-free', () => {
   })
 
   it('does not branch the heartbeat prefix by agentName (one clean prefix)', () => {
-    const heartbeatBlockStart = SRC.indexOf("if (task.type === 'heartbeat')")
+    // #2284: the silent branch is now chosen by silentTaskTag(); the block from
+    // there to the delivering branch must still carry no agentName switch.
+    const heartbeatBlockStart = SRC.indexOf('if (silentTag !== null) {')
     expect(heartbeatBlockStart).toBeGreaterThan(0)
     const outerElseMarker = SRC.indexOf('[Utemezett feladat:', heartbeatBlockStart)
     expect(outerElseMarker).toBeGreaterThan(heartbeatBlockStart)
