@@ -2425,8 +2425,26 @@ describe('truncated idle footer (tmux width clipping)', () => {
     expect(isReadyForPrompt(IDLE_TRUNCATED_TAIL)).toBe(true)
   })
 
-  it('reads a footer clipped one segment earlier as idle', () => {
-    expect(detectPaneState(IDLE_TRUNCATED_EARLIER)).toBe('idle')
+  // Local, deliberate departure from upstream (CLIPIDLEONLY1126): a footer clipped at a counter is ambiguous (a busy
+  // footer carries the same counters before 'esc to interrupt'), so it reads unknown, not idle.
+  it('reads a footer clipped one segment earlier (at a counter) as unknown, not idle (local)', () => {
+    expect(detectPaneState(IDLE_TRUNCATED_EARLIER)).toBe('unknown')
+    expect(isReadyForPrompt(IDLE_TRUNCATED_EARLIER)).toBe(false)
+  })
+
+  it('a clipped footer that carries esc is never idle, even when its last segment looks idle-only (local)', () => {
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ↓ to…'))).not.toBe('idle')
+  })
+
+  it('a footer clipped right after a separator (empty last segment) is not idle (local)', () => {
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 3 shells · …'))).toBe('unknown')
+  })
+
+  it('the PoC: a busy 2.1.326 pane whose task list pushed the spinner away and whose footer clipped at a counter is not ready (local)', () => {
+    const poc = readFileSync(join(__dirname, 'fixtures', 'pane-2.1.326', 'busy-tasklist-footer-clipped-at-count-poc.txt'), 'utf-8')
+    expect(poc).toMatch(/· 3 shells, 2 monito…\n?$/)
+    expect(detectPaneState(poc)).not.toBe('idle')
+    expect(isReadyForPrompt(poc)).toBe(false)
   })
 
   it('reads idle when blank rows follow the clipped footer', () => {

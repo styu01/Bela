@@ -1,0 +1,16 @@
+     2>/dev/null; tmux c…
+
+· Bunning… (6m 20s · ↓ 27.4k tokens)
+  ⎿  ◼ Port the footer rule
+     ◻ Measure before and after
+     ◻ Mutants, each twin
+     ◻ Live captures
+     ◻ Full run
+     ◻ Commit
+     ◻ Report
+     ◻ Rebase
+
+───────────────────────────────────────────────────────────────────── KisProgi ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · install gh for PR status · 3 shells, 2 monito…

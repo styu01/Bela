@@ -106,10 +106,19 @@ const FOOTER_SHELL_TAIL_RX = new RegExp(
   String.raw`^\s*[\u23F5\u23F8]{1,2} (?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · ${FOOTER_COUNT}(?:(?: ·|,) ${FOOTER_COUNT})*\s*$`,
 )
 
+// CLIPIDLEONLY1126 (PROGI msg 6026, BELA msg 6027): a clipped footer is idle ONLY when its last, clipped segment is
+// the start of an item that exists ONLY on the idle footer ('↓ to manage', '← for agents') and the line carries no
+// 'esc'. A busy footer carries the same counters with 'esc to interrupt' after them, so a footer clipped AT a counter
+// ('· 3 shells, 2 monito…') or right after one is ambiguous. PoC (derived from a live 2.1.326 busy capture): a task
+// list under the spinner pushed it out of the busy window and the footer clipped at the counter, and the pane read
+// idle and ready, so the router would have typed into a working pane. Now it reads unknown (no delivery). The guard
+// port (stuck-modal-guard.sh clipped()) keeps the looser rule on purpose: for the guard, idle is the safe answer.
+const IDLE_ONLY_FOOTER_ITEMS = ['↓ to manage', '← for agents']
 function isClippedIdleFooter(line: string): boolean {
   if (!FOOTER_TRUNCATED_RX.test(line)) return false
+  if (line.includes('esc')) return false
   const tail = line.replace(/…\s*$/, '').split('·').pop()!.trim()
-  return !(tail.length > 0 && BUSY_FOOTER_ITEM.startsWith(tail))
+  return tail.length > 0 && IDLE_ONLY_FOOTER_ITEMS.some((item) => item.startsWith(tail))
 }
 
 // PANEFOOTERQUOTE1114 (upstream 0e15b122): how the LIVE footer line starts. Measured upstream on Claude Code 2.1.325

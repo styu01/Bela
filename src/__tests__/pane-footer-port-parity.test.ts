@@ -120,11 +120,17 @@ describe('PANEFOOTEROUTSIDE1114: one footer anchor, the TypeScript original and 
     expect(cases.length - found).toBeGreaterThan(40)
   })
 
-  it('the shell port answers exactly like liveFooterLine on every case', () => {
-    const diff = cases
-      .map(([name, pane]) => ({ name, ts: liveFooterLine(pane), sh: viaGuard(pane) }))
-      .filter((r) => r.ts !== r.sh)
+  // Documented exception (CLIPIDLEONLY1126, BELA msg 6027): for a CLIPPED footer whose last segment is not the start
+  // of an idle-only item, the TypeScript rule answers null (unknown, no delivery) while the guard port still returns
+  // the line (idle). For the guard, idle is the safe answer (it means: do not respawn); the stricter rule there would
+  // read a spinner-less busy pane as stuck. Every other case must match exactly.
+  const clippedOnlyGuard = (r: { ts: string | null; sh: string | null }) => r.ts === null && r.sh !== null && /…\s*$/.test(r.sh)
+  it('the shell port answers exactly like liveFooterLine on every case (but the documented clipped exception)', () => {
+    const rows = cases.map(([name, pane]) => ({ name, ts: liveFooterLine(pane), sh: viaGuard(pane) }))
+    const diff = rows.filter((r) => r.ts !== r.sh && !clippedOnlyGuard(r))
     expect(diff).toEqual([])
+    // The exception is real and narrow: it appears, and only on clipped lines.
+    expect(rows.filter(clippedOnlyGuard).length).toBeGreaterThan(0)
   }, 60_000)
 })
 
