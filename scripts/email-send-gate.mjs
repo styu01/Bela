@@ -105,6 +105,11 @@ export function maskSubshellMarkers(cmd) {
       continue
     }
     if (ch === "'" || ch === '"') { q = ch; out += ch; continue }
+    // bash line continuation: an unquoted backslash-newline pair is removed BEFORE the line is split into words.
+    // Kept as an escape it put a "\n" token at command position, so `cd /tmp &&\<NL>sendmail x` (the common
+    // multi-line `cmd && \` style) was NOT recognised as a send and passed this hard gate. Same rule as the
+    // python twin (outgoing-copy-gate.py _mask_subshell_markers); the shared rows pin it.
+    if (ch === '\\' && cmd[i + 1] === '\n') { i++; continue }
     if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; continue }
     if (ch === '\n' || ch === '`') { out += ';'; continue }
     if (ch === '$' && cmd[i + 1] === '(') { out += ';'; i++; continue }

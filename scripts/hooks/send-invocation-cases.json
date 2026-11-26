@@ -340,6 +340,26 @@
       "name": "MAINGATENLCOMMENT1104 (PROGI review): a # after an escaped ; is part of the word too",
       "cmd": "echo a\\;#b; sendmail a@b.hu",
       "expected": true
+    },
+    {
+      "name": "LINECONT1126 (PROGI review): a line continuation after ';' keeps the send at command position",
+      "cmd": "true; \\\nsendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LINECONT1126: the multi-line 'cmd &&\\' style, no space before the backslash",
+      "cmd": "cd /tmp &&\\\nsendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "LINECONT1126: the multi-line 'cmd && \\' style with an indented sender script",
+      "cmd": "cd /tmp && \\\n  python3 /x/send.py --to a@b.hu --body x",
+      "expected": true
+    },
+    {
+      "name": "LINECONT1126: control, after a line continuation sendmail is still echo's argument",
+      "cmd": "echo a \\\nsendmail",
+      "expected": false
     }
   ]
 }
