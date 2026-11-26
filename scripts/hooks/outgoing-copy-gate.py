@@ -73,7 +73,12 @@ import sys
 # resze es MEGMARAD -- csak a torzs esik ki. Enelkul (a) forditott
 # sorrendnel a torzs parancsnak latszott (FP), (b) a bevezeto sor
 # eldobasa a heredoc-taplalt VALODI kuldot vesztette volna el (FN).
-_HEREDOC = re.compile(r"(<<-?\s*'?(\w+)'?[^\n]*)\n.*?\n\2(?=\s|$)", re.S)
+# HEREDOCQUOTE1126 (PROGI msg 6042): also "EOF" and \\EOF delimiters (unexpanded bodies). Mirrors HEREDOC_RE.
+# HEREDOCDELIM1126 (PROGI msg 6049): the body ends where bash ends it: a WHOLE delimiter word (a partly quoted one
+# does not match, the body is then read as commands), a terminator line that is exactly the word, tab-led only after
+# <<- (group 2), possibly the first body line (empty heredoc). See HEREDOC_RE for why both later and earlier cuts leak.
+# Groups: 1 intro line, 2 dash, 3 quote, 4 delimiter word.
+_HEREDOC = re.compile(r"(<<(-)?[ \t]*(?:([\"'])|\\)?(\w+)(?(3)\3)(?=[\s;&|<>()]|$)[^\n]*)\n(?:.*?\n)??(?(2)\t*)\4(?=\n|$)", re.S)
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 # KWSPLIT924: shell reserved words that put the NEXT word in command position.
 # The segmenter splits on operators only, so `if true; then sendmail x; fi`
@@ -1008,7 +1013,7 @@ def _heredoc_substitutions(cmd: str):
     for m in _HEREDOC.finditer(cmd):
         if re.match(r"<<-?\s*['\"\\]", m.group(1)):
             continue
-        body = m.group(0)[len(m.group(1)) + 1:len(m.group(0)) - len(m.group(2))]
+        body = m.group(0)[len(m.group(1)) + 1:len(m.group(0)) - len(m.group(4))]
         n = len(body)
         i = 0
         while i < n:
@@ -1327,7 +1332,7 @@ def _stdin_shell_texts(cmd: str):
         if not head_segs:
             continue
         hs = _command_heads(head_segs[-1])
-        body = m.group(0)[len(m.group(1)) + 1:len(m.group(0)) - len(m.group(2))]
+        body = m.group(0)[len(m.group(1)) + 1:len(m.group(0)) - len(m.group(4))]
         if hs and _is_stdin_shell_head(hs[0]):
             run.append(body)
             continue

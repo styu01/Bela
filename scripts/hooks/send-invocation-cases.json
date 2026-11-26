@@ -2080,6 +2080,221 @@
       "name": "ENVFORMS1126: control: env -u alone",
       "cmd": "env -u HOME ls",
       "expected": false
+    },
+    {
+      "name": "HEREDOCQUOTE1126: control: a <<\"EOF\" body is data, $(...) in it is not expanded",
+      "cmd": "cat <<\"EOF\"\nsendmail a@b.hu $(sendmail a)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCQUOTE1126: control: a <<\\EOF body is data",
+      "cmd": "cat <<\\EOF\nsendmail a@b.hu\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCQUOTE1126: a <<\"EOF\" body fed to bash still runs",
+      "cmd": "bash <<\"EOF\"\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCQUOTE1126: a <<\\EOF body fed to bash still runs",
+      "cmd": "bash <<\\EOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCQUOTE1126: control: a <<\"EOF\" python heredoc that only prints the name",
+      "cmd": "python3 - <<\"EOF\"\nprint(\"sendmail\")\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCQUOTE1126: an unquoted <<EOF body still expands (unchanged)",
+      "cmd": "cat <<EOF\n$(sendmail a)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: regression: partly quoted <<\"E\"OF ends at E, not EOF",
+      "cmd": "cat <<\"E\"OF\nx\nEOF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: regression: partly quoted <<\\E\"OF\" ends at E",
+      "cmd": "cat <<\\E\"OF\"\nx\nEOF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: regression: <<-\"EOF\" ends at a tab-led EOF",
+      "cmd": "cat <<-\"EOF\"\n\tx\n\tEOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: <<E'OF' ends at EOF, not E",
+      "cmd": "cat <<E'OF'\nx\nEOF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: <<E\"OF\" ends at EOF",
+      "cmd": "cat <<E\"OF\"\nx\nEOF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: <<E\\OF ends at EOF",
+      "cmd": "cat <<E\\OF\nx\nEOF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: <<'E'OF ends at EOF",
+      "cmd": "cat <<'E'OF\nx\nEOF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: <<E-OF ends at E-OF, not E",
+      "cmd": "cat <<E-OF\nx\nE-OF\nsendmail a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: <<-EOF ends at a tab-led EOF",
+      "cmd": "cat <<-EOF\n\tx\n\tEOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: '<<X' inside single quotes is no heredoc",
+      "cmd": "echo '<<X'\nsendmail a@b.hu\nX",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: old bypass: \"a <<X\" inside double quotes is no heredoc",
+      "cmd": "echo \"a <<X\"\nsendmail a@b.hu\nX",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: empty heredoc: the first body line can be the terminator",
+      "cmd": "cat <<EOF\nEOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: empty <<'EOF' heredoc",
+      "cmd": "cat <<'EOF'\nEOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: empty <<-EOF heredoc with a tab-led terminator",
+      "cmd": "cat <<-EOF\n\tEOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: a tab-led EOF does not end a plain << heredoc (a later <<Z must not swallow the send)",
+      "cmd": "cat <<EOF\nfill\n\tEOF\ncat <<Z\nEOF\nsendmail a@b.hu\nZ",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: 'EOF x' does not end the heredoc",
+      "cmd": "cat <<EOF\nfill\nEOF x\ncat <<Z\nEOF\nsendmail a@b.hu\nZ",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: 'EOF ' (trailing space) does not end the heredoc",
+      "cmd": "cat <<EOF\nfill\nEOF \ncat <<Z\nEOF\nsendmail a@b.hu\nZ",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: '  EOF' (space-led) does not end a <<'EOF' heredoc",
+      "cmd": "cat <<'EOF'\nfill\n  EOF\ncat <<'Z'\nEOF\nsendmail a@b.hu\nZ",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: 'EOF;' does not end the heredoc",
+      "cmd": "cat <<EOF\nfill\nEOF;\ncat <<Z\nEOF\nsendmail a@b.hu\nZ",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: empty heredoc, then a second heredoc holding the name",
+      "cmd": "cat <<EOF\nEOF\ncat <<Z\nfill\nsendmail a@b.hu\nZ",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: empty heredoc fed to bash, the next line runs",
+      "cmd": "bash <<EOF\nEOF\nsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: <<-EOF body fed to bash runs",
+      "cmd": "bash <<-EOF\n\tsendmail a@b.hu\n\tEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: tab-led line in a plain << body fed to bash runs",
+      "cmd": "bash <<EOF\n\tsendmail a@b.hu\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: <<-'EOF' python heredoc with a tab-led terminator is judged by the code rule",
+      "cmd": "python3 - <<-'EOF'\n\timport os; os.system('sendmail a@b.hu')\n\tEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: <<-EOF body expands $(...)",
+      "cmd": "cat <<-EOF\n\t$(sendmail a@b.hu)\n\tEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: a tab-led EOF does not end a plain << body: $(...) after it expands",
+      "cmd": "cat <<EOF\n\tEOF\n$(sendmail a@b.hu)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: <<\"EOF\" body: $(...) not expanded",
+      "cmd": "cat <<\"EOF\"\n$(sendmail a@b.hu)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: <<\\EOF body: $(...) not expanded",
+      "cmd": "cat <<\\EOF\n$(sendmail a@b.hu)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: <<-EOF body is data",
+      "cmd": "cat <<-EOF\n\tsendmail a@b.hu\n\tEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: <<-'EOF' body is data",
+      "cmd": "cat <<-'EOF'\n\tsendmail a@b.hu\n\tEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: <<EOF > /dev/null body is data",
+      "cmd": "cat <<EOF > /dev/null\nsendmail a@b.hu\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: cat > /dev/null <<'EOF' body is data",
+      "cmd": "cat > /dev/null <<'EOF'\nsendmail a@b.hu\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: heredoc in $(...) closed by EOF then a ')' line",
+      "cmd": "x=$(cat <<'EOF'\nsendmail a@b.hu\nEOF\n); echo \"$x\" | wc -c",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: commit message heredoc naming the sender",
+      "cmd": "git commit --dry-run -m \"$(cat <<'EOF'\nfix: sendmail path\nEOF\n)\"",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: blank first body line",
+      "cmd": "cat <<EOF\n\nsendmail a@b.hu\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: python heredoc printing the name",
+      "cmd": "python3 - <<'EOF'\nprint('sendmail is a word')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "HEREDOCDELIM1126: control: EOF inside a <<'EOF2' body is no terminator",
+      "cmd": "cat <<'EOF2'\nsendmail a@b.hu\nEOF\nEOF2",
+      "expected": false
     }
   ]
 }

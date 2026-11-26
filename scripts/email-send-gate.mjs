@@ -73,7 +73,17 @@ const SEND_PATTERNS = [
 // is KEPT -- only the body is cut. Without this, marker-first spellings
 // leaked the body into command position (FP), and dropping the intro
 // would have lost a heredoc-fed real sender (FN).
-const HEREDOC_RE = /(<<-?\s*'?(\w+)'?[^\n]*)\n[\s\S]*?\n\2(?=\s|$)/g
+// HEREDOCQUOTE1126 (PROGI msg 6042): the delimiter may also be "EOF" or \\EOF (bash does not expand those bodies
+// either); they used to be read as commands (synthetic over-refusals). Mirrors _HEREDOC.
+// HEREDOCDELIM1126 (PROGI msg 6049): the body must end where bash ends it, never later -- a gate that cuts later than
+// bash swallows the real commands after bash's terminator, and one that cuts earlier can let a second '<<Z' in the
+// rest of bash's body swallow them. So: the delimiter is a WHOLE word ('EOF', "EOF", \\EOF or EOF, then a shell
+// metacharacter or the line end; a partly quoted one such as <<"E"OF or <<E'OF' does not match, the body is then
+// read as commands, the cautious side); the terminator line is exactly the word (nothing after it but the newline),
+// led by tabs only after <<- (group 2: '(?!\2)' fails when there is no dash, as an unmatched backreference is empty);
+// and it may be the very first body line (an empty heredoc).
+// Groups: 1 the intro line kept as command text, 2 the dash, 3 the quote, 4 the delimiter word.
+const HEREDOC_RE = /(<<(-)?[ \t]*(?:(["'])|\\)?(\w+)\3(?=[\s;&|<>()]|$)[^\n]*)\n(?:[\s\S]*?\n)??(?:(?!\2)\t*)?\4(?=\n|$)/g
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z_0-9]*=/
 const SENDER_PROG = /^(sendmail|msmtp|swaks)$/i
 const SENDPY = /^send\.py$/i
@@ -699,7 +709,7 @@ function heredocSubstitutions(cmd) {
   const out = []
   for (const m of cmd.matchAll(HEREDOC_RE)) {
     if (/^<<-?\s*['"\\]/.test(m[1])) continue
-    const body = m[0].slice(m[1].length + 1, m[0].length - m[2].length)
+    const body = m[0].slice(m[1].length + 1, m[0].length - m[4].length)
     for (let i = 0; i < body.length; i++) {
       const ch = body[i]
       if (ch === '\\') { i++; continue }
@@ -961,7 +971,7 @@ function stdinShellTexts(cmd) {
     let headSegs
     try { headSegs = segmentsTokens(cmd.slice(lineStart, m.index)) } catch { continue }
     const last = headSegs[headSegs.length - 1]
-    const body = m[0].slice(m[1].length + 1, m[0].length - m[2].length)
+    const body = m[0].slice(m[1].length + 1, m[0].length - m[4].length)
     if (last && isStdinShellHead(commandHeads(last)[0])) { run.push(body); continue }
     if (last && isStdinInterpreterHead(commandHeads(last)[0])) { code.push(body); continue }
     // 'cat <<EOF | bash': the heredoc feeds a command whose output is piped into a stdin shell on the same line.
