@@ -28,7 +28,7 @@ import {
   sessionExistsOnHost,
   capturePane,
 } from './agent-process.js'
-import { detectPaneState, type PaneState } from '../pane-state.js'
+import { detectPaneState, footerWordsOffAnchor, type PaneState } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -100,6 +100,7 @@ export function formatStuckSessionAlert(
   stuckMs: number,
   pendingCount: number,
   paneState: PaneState | null = null,
+  footerOffAnchor = false,
 ): string | null {
   if (agent === mainAgentId) return null
   const min = Math.round(stuckMs / 60000)
@@ -111,12 +112,18 @@ export function formatStuckSessionAlert(
   if (paneState === 'busy') {
     return `[session-stuck] Agent '${agent}' (tmux ${session}) has been BUSY (actively working, spinner up) for ${min} min with ${queue}. Not a stall by itself -- check whether the turn is progressing or a tool call is wedged. Do NOT restart on this alert alone.`
   }
+  // PANEFOOTEROUTSIDE1114 (upstream 3a56935a): the footer words are on the screen, but no live footer is where the
+  // UI draws it -- a quoted footer above an open dialog, or a footer shape this version does not know. A bare
+  // "not-ready" sent the reader to a restart guess first.
+  if (footerOffAnchor) {
+    return `[session-stuck] Agent '${agent}' (tmux ${session}) has been not-ready for ${min} min with ${queue}. The footer words are on screen, but NOT where the live footer is drawn: either a line quotes the footer above an open dialog, or the footer has a shape this version does not recognise. Look at the pane first (tmux attach -t ${session}): an open dialog needs an answer, not a restart; an unrecognised footer is a reader bug to report.`
+  }
   return `[session-stuck] Agent '${agent}' (tmux ${session}) has been not-ready for ${min} min with ${queue}. Run the delivery-stall diagnosis: check the pane (busy vs idle vs full context) and restart the agent if it is wedged.`
 }
 
-function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckMs: number, pendingCount: number, paneState: PaneState | null): void {
+function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckMs: number, pendingCount: number, paneState: PaneState | null, footerOffAnchor = false): void {
   try {
-    const alert = formatStuckSessionAlert(agent, MAIN_AGENT_ID, session, stuckMs, pendingCount, paneState)
+    const alert = formatStuckSessionAlert(agent, MAIN_AGENT_ID, session, stuckMs, pendingCount, paneState, footerOffAnchor)
     if (!alert) return
     createAgentMessage('system', MAIN_AGENT_ID, alert)
     logger.info({ agent, session, stuckMs, pendingCount, paneState }, 'session-stuck surfaced to orchestrator')
@@ -646,7 +653,7 @@ export async function runMessageRouterTick(): Promise<void> {
             // stall to the main agent's inbox so it can run the delivery-stall
             // diagnosis (pane state, full context, restart). The escalation-window
             // reset below doubles as the notification cooldown.
-            notifyOrchestratorOfStuckSession(msg.to_agent, session, stuckMs, pendingMsgCount, paneState)
+            notifyOrchestratorOfStuckSession(msg.to_agent, session, stuckMs, pendingMsgCount, paneState, pane != null && footerWordsOffAnchor(pane))
             // Reset timer so we don't spam every tick; re-escalate after another window.
             agentStuckSince.set(msg.to_agent, now)
           } else {

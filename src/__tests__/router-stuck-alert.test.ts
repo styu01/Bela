@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 // Contract tests for formatStuckSessionAlert: a session continuously not-ready
 // past the escalation threshold must produce an ALERT the main agent receives,
 // not only a warn log.
@@ -60,6 +62,26 @@ describe('formatStuckSessionAlert: silent stall becomes a main-agent alert', () 
     // Messages TO the main agent use the pull model and never enter the stuck
     // branch; this guards the invariant if that ever changes.
     expect(formatStuckSessionAlert(MAIN, MAIN, 'marveen-channels', 20 * 60 * 1000, 5)).toBeNull()
+  })
+
+  it('PANEFOOTEROUTSIDE1114: names a footer seen off its live place instead of a bare not-ready', () => {
+    // Local adaptation of upstream 3a56935a: our formatStuckSessionAlert has no permission/quota/progress
+    // parameters, so the flag is the 7th argument.
+    const alert = formatStuckSessionAlert('prisma', MAIN, 'agent-prisma', 35 * 60 * 1000, 2, 'unknown', true)!
+    expect(alert).toContain('[session-stuck]')
+    expect(alert).toContain('NOT where the live footer is drawn')
+    expect(alert).toContain('tmux attach -t agent-prisma')
+    expect(alert).not.toContain('restart the agent if it is wedged')
+    // Without the flag the ordinary not-ready text is unchanged.
+    expect(formatStuckSessionAlert('prisma', MAIN, 'agent-prisma', 35 * 60 * 1000, 2, 'unknown')).toContain('restart the agent if it is wedged')
+    // A busy pane keeps its own sentence first.
+    expect(formatStuckSessionAlert('prisma', MAIN, 'agent-prisma', 35 * 60 * 1000, 2, 'busy', true)).toContain('BUSY')
+  })
+
+  it('PANEFOOTEROUTSIDE1114: the router hands the off-anchor verdict of the pane it holds to the alert (source pin)', () => {
+    const src = readFileSync(join(__dirname, '..', 'web', 'message-router.ts'), 'utf8')
+    expect(src).toMatch(/notifyOrchestratorOfStuckSession\([^\n]*, pane != null && footerWordsOffAnchor\(pane\)\)/)
+    expect(src).toMatch(/formatStuckSessionAlert\([^\n]*paneState, footerOffAnchor\)/)
   })
 
   it('rounds the stall duration to whole minutes', () => {

@@ -160,6 +160,34 @@ function hasIdleFooter(lines: string[]): boolean {
   return idleFooterIndex(lines) >= 0
 }
 
+/**
+ * PANEFOOTEROUTSIDE1114: the live idle footer line, or null. The ONE footer
+ * anchor for consumers outside this module: channel-plugin-unlock calls it,
+ * and the two ports (scripts/stuck-modal-guard.sh `footer-line`,
+ * scripts/telegram-live-progress.py `live_footer_line`) re-implement exactly
+ * this over plain `capture-pane -p` text; a parity test runs all three over
+ * one corpus. Same lines as idleFooterIndex: no background-agent split, so a
+ * port does not need one (the footer sits above that block and under the last
+ * separator, where the search finds it).
+ */
+export function liveFooterLine(pane: string | null): string | null {
+  if (!pane) return null
+  const lines = pane.split('\n')
+  const idx = idleFooterIndex(lines)
+  return idx < 0 ? null : lines[idx]
+}
+
+/**
+ * PANEFOOTEROUTSIDE1114: true when a line on screen carries the footer words
+ * but no live footer is where the UI draws it -- a quoted footer above an open
+ * dialog, or a footer shape this module does not know. The stuck-session
+ * report names this cause instead of a bare 'unknown'.
+ */
+export function footerWordsOffAnchor(pane: string | null): boolean {
+  if (!pane || liveFooterLine(pane) !== null) return false
+  return pane.split('\n').some((line) => IDLE_FOOTER_RX.test(stripAllAnsi(line)))
+}
+
 // Positive busy signals. ANY match anywhere in the pane means the turn
 // is mid-flight, even if the footer looks idle for a frame.
 //
@@ -917,8 +945,12 @@ export function detectPermissionMode(pane: string): string | null {
   const idx = idleFooterIndex(lines)
   if (idx < 0) return null
   const footer = lines[idx]
+  // PANEFOOTEROUTSIDE1114: measured on Claude Code 2.1.325 -- the manual footer
+  // is `⏸ manual mode on · ? for shortcuts` (its tail is the shortcuts hint, so
+  // it used to fall through to 'default'), and the apostrophe of `don't ask on`
+  // cut the phrase to 't ask'. Both now read as the words the footer shows.
   const m = footer.match(
-    /((?:[A-Za-z][\w-]* ){1,3})on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage|← for agents))/,
+    /((?:[A-Za-z][\w'-]* ){1,3})on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage|← for agents|\? for shortcuts))/,
   )
   if (m) return m[1].trim()
   return /\? for shortcuts/.test(footer) ? 'default' : null
