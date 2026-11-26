@@ -248,8 +248,52 @@ const NON_EXEC_PROGS = new Set([
   'man', 'info', 'which', 'whereis', 'type', 'apropos', 'whatis', 'ls', 'stat', 'file', 'readlink', 'realpath',
   'dirname', 'basename', 'du', 'df', 'tree', 'md5sum', 'sha1sum', 'sha256sum', 'xxd', 'od', 'hexdump', 'strings',
   'chmod', 'chown', 'chgrp', 'touch', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'ln', 'test', '[', '[[', 'true',
-  'false', 'cd', 'pwd', ':', 'id', 'whoami',
+  'false', 'cd', 'pwd', ':', 'id', 'whoami', 'pgrep', 'locate', 'apt-cache',
 ])
+// READONLYSUB1126: commands that never run an argument when called with one of these subcommands (PROGI msg 5993:
+// 'git grep -n X', 'systemctl status X', 'pip show X'... were refused by the sender-token layer, and on the main
+// agent's copy gate as a loud "nothing to inspect" block). Editors stay out ('vim -c "!X"' runs X). Mirrors
+// _READ_ONLY_SUBCOMMANDS in outgoing-copy-gate.py.
+const READ_ONLY_SUBCOMMANDS = new Map([
+  ['git', new Set(['grep', 'log', 'diff', 'show', 'status', 'add'])],
+  ['systemctl', new Set(['status'])],
+  ['pip', new Set(['show'])], ['pip3', new Set(['show'])],
+  ['npm', new Set(['view', 'info', 'show'])],
+  ['docker', new Set(['images'])],
+])
+// git global options that cannot make git run a program: '-C DIR', '--git-dir', '--work-tree', '--no-pager'... ;
+// '-c', '--config-env' and '--exec-path' can (core.pager, alias.X='!cmd', diff.external), so they are not here.
+const GIT_SAFE_GLOBAL = new Set(['--no-pager', '-P', '--bare', '--no-optional-locks', '--literal-pathspecs',
+  '--no-replace-objects', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs'])
+const GIT_SAFE_GLOBAL_VALUE = new Set(['-C', '--git-dir', '--work-tree', '--namespace'])
+
+function readOnlyHead(h) {
+  const prog = basename(h[0])
+  if (prog === 'dpkg') {
+    // only the query actions -S / -L (and their long names), nothing that installs or configures
+    const opts = h.slice(1).filter((t) => t.startsWith('-'))
+    return opts.length > 0 && opts.every((t) => ['-S', '-L', '--search', '--listfiles'].includes(t))
+  }
+  const subs = READ_ONLY_SUBCOMMANDS.get(prog)
+  if (!subs) return false
+  let i = 1
+  if (prog === 'git') {
+    while (i < h.length && h[i].startsWith('-')) {
+      const t = h[i]
+      if (GIT_SAFE_GLOBAL.has(t)) { i++; continue }
+      if (GIT_SAFE_GLOBAL_VALUE.has(t)) { i += 2; continue }
+      if ([...GIT_SAFE_GLOBAL_VALUE].some((o) => o.startsWith('--') && t.startsWith(o + '='))) { i++; continue }
+      return false
+    }
+  } else {
+    while (i < h.length && h[i].startsWith('-')) i++
+  }
+  if (i >= h.length || !subs.has(h[i])) return false
+  // 'git grep -O<prog>' / '--open-files-in-pager[=<prog>]' (any unique prefix) runs <prog> on the hits (measured).
+  if (prog === 'git' && h[i] === 'grep' && h.slice(i + 1).some((t) =>
+    (/^-[A-Za-z]*O/.test(t) && !t.startsWith('--')) || (t.startsWith('--o') && 'open-files-in-pager'.startsWith(t.slice(2).split('=')[0])))) return false
+  return true
+}
 const HEAD_DEPTH = 8
 
 // ENVSPLIT1126: [string, index after it] for `env ... -S STRING ...` / `--split-string[=]STRING` / an option
@@ -355,9 +399,9 @@ function senderTokenLayer(toks, heads) {
   if (!segmentNamesSender(toks)) return false
   // find without an exec action runs nothing; with one, headIsSend has already judged the action's command.
   // A wrapper head (kept only so a string launcher's -c STRING is seen) is represented by its stepped heads.
-  const progs = heads.filter((h) => h && h.length).map((h) => basename(h[0]))
-    .filter((p) => p !== 'eval' && p !== 'find' && !WRAPPERS.has(p))
-  return progs.length > 0 && !progs.every((p) => NON_EXEC_PROGS.has(p))
+  const hs = heads.filter((h) => h && h.length)
+    .filter((h) => { const p = basename(h[0]); return p !== 'eval' && p !== 'find' && !WRAPPERS.has(p) })
+  return hs.length > 0 && !hs.every((h) => NON_EXEC_PROGS.has(basename(h[0])) || readOnlyHead(h))
 }
 
 // The value of `-<short>` (alone, or last in a cluster like '-qc'), `--<long> X` or `--<long>=X`, anywhere.

@@ -423,8 +423,61 @@ _NON_EXEC_PROGS = frozenset({
     "man", "info", "which", "whereis", "type", "apropos", "whatis", "ls", "stat", "file", "readlink", "realpath",
     "dirname", "basename", "du", "df", "tree", "md5sum", "sha1sum", "sha256sum", "xxd", "od", "hexdump", "strings",
     "chmod", "chown", "chgrp", "touch", "mkdir", "rmdir", "rm", "cp", "mv", "ln", "test", "[", "[[", "true",
-    "false", "cd", "pwd", ":", "id", "whoami",
+    "false", "cd", "pwd", ":", "id", "whoami", "pgrep", "locate", "apt-cache",
 })
+# READONLYSUB1126: commands that never run an argument when called with one of these subcommands (PROGI msg 5993:
+# 'git grep -n X', 'systemctl status X', 'pip show X'... were refused by the sender-token layer, and here as a loud
+# "nothing to inspect" block). Editors stay out ('vim -c "!X"' runs X). Mirrors READ_ONLY_SUBCOMMANDS in
+# email-send-gate.mjs.
+_READ_ONLY_SUBCOMMANDS = {
+    "git": frozenset({"grep", "log", "diff", "show", "status", "add"}),
+    "systemctl": frozenset({"status"}),
+    "pip": frozenset({"show"}), "pip3": frozenset({"show"}),
+    "npm": frozenset({"view", "info", "show"}),
+    "docker": frozenset({"images"}),
+}
+# git global options that cannot make git run a program: '-C DIR', '--git-dir', '--work-tree', '--no-pager'... ;
+# '-c', '--config-env' and '--exec-path' can (core.pager, alias.X='!cmd', diff.external), so they are not here.
+_GIT_SAFE_GLOBAL = frozenset({"--no-pager", "-P", "--bare", "--no-optional-locks", "--literal-pathspecs",
+                              "--no-replace-objects", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs"})
+_GIT_SAFE_GLOBAL_VALUE = ("-C", "--git-dir", "--work-tree", "--namespace")
+
+
+def _read_only_head(h) -> bool:
+    prog = _basename(h[0])
+    if prog == "dpkg":
+        # only the query actions -S / -L (and their long names), nothing that installs or configures
+        opts = [t for t in h[1:] if t.startswith("-")]
+        return bool(opts) and all(t in ("-S", "-L", "--search", "--listfiles") for t in opts)
+    subs = _READ_ONLY_SUBCOMMANDS.get(prog)
+    if not subs:
+        return False
+    i = 1
+    if prog == "git":
+        while i < len(h) and h[i].startswith("-"):
+            t = h[i]
+            if t in _GIT_SAFE_GLOBAL:
+                i += 1
+                continue
+            if t in _GIT_SAFE_GLOBAL_VALUE:
+                i += 2
+                continue
+            if any(o.startswith("--") and t.startswith(o + "=") for o in _GIT_SAFE_GLOBAL_VALUE):
+                i += 1
+                continue
+            return False
+    else:
+        while i < len(h) and h[i].startswith("-"):
+            i += 1
+    if i >= len(h) or h[i] not in subs:
+        return False
+    # 'git grep -O<prog>' / '--open-files-in-pager[=<prog>]' (any unique prefix) runs <prog> on the hits (measured).
+    if prog == "git" and h[i] == "grep" and any(
+            (re.match(r"-[A-Za-z]*O", t) and not t.startswith("--"))
+            or (t.startswith("--o") and "open-files-in-pager".startswith(t[2:].split("=", 1)[0]))
+            for t in h[i + 1:]):
+        return False
+    return True
 
 _HEAD_DEPTH = 8
 
@@ -566,9 +619,9 @@ def _sender_token_layer(toks, heads) -> bool:
     # eval re-parses its arguments and is judged on that re-parse in _head_is_send, so it is not judged here again.
     # find without an exec action runs nothing; with one, _head_is_send has already judged the action's command.
     # A wrapper head (kept only so a string launcher's -c STRING is seen) is represented by its stepped heads.
-    progs = [_basename(h[0]) for h in heads
-             if h and _basename(h[0]) not in ("eval", "find") and _basename(h[0]) not in _WRAPPERS]
-    return bool(progs) and not all(p in _NON_EXEC_PROGS for p in progs)
+    hs = [h for h in heads
+          if h and _basename(h[0]) not in ("eval", "find") and _basename(h[0]) not in _WRAPPERS]
+    return bool(hs) and not all(_basename(h[0]) in _NON_EXEC_PROGS or _read_only_head(h) for h in hs)
 
 
 def _launcher_string(rest, short: str, longs) -> "str | None":

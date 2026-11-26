@@ -1650,6 +1650,106 @@
       "name": "EXECVEC1126: a git '!' alias is parsed as a command line (quotes split the name, measured)",
       "cmd": "git -c alias.z='!send\"\"mail a@b.hu' z",
       "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: git -c before the subcommand is not read-only (core.pager, alias, diff.external can run a program)",
+      "cmd": "git -c color.ui=never log sendmail",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: a git subcommand outside the read-only list",
+      "cmd": "git commit -m x sendmail",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: dpkg other than -S / -L",
+      "cmd": "dpkg -i sendmail",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: PINNED: an editor is never read-only (vim -c '!X' runs X)",
+      "cmd": "vim sendmail",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: systemctl other than status",
+      "cmd": "systemctl start sendmail",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: git grep with -O is not read-only: the pager can be assembled at run time",
+      "cmd": "git grep -O\"$P\" sendmail x",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: git --exec-path=DIR runs git-<sub> from DIR, not read-only",
+      "cmd": "git --exec-path=/tmp/x log sendmail",
+      "expected": true
+    },
+    {
+      "name": "READONLYSUB1126: control: git log --grep",
+      "cmd": "git log --grep sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: git grep -n",
+      "cmd": "git grep -n sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: git grep -c (a count flag)",
+      "cmd": "git grep -c sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: git -C DIR --no-pager log",
+      "cmd": "git -C /tmp --no-pager log --oneline -- sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: git diff -- path",
+      "cmd": "git diff -- scripts/sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: git add",
+      "cmd": "git add sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: git show / git status",
+      "cmd": "git show HEAD:sendmail; git status sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: systemctl status",
+      "cmd": "systemctl --no-pager status sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: apt-cache policy",
+      "cmd": "apt-cache policy sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: dpkg -S / -L",
+      "cmd": "dpkg -S sendmail && dpkg -L sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: pgrep / locate",
+      "cmd": "pgrep sendmail; locate sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: pip show / npm view / docker images",
+      "cmd": "pip show sendmail; npm view sendmail; docker images sendmail",
+      "expected": false
+    },
+    {
+      "name": "READONLYSUB1126: control: npm view after an option",
+      "cmd": "npm --json view sendmail",
+      "expected": false
     }
   ]
 }
