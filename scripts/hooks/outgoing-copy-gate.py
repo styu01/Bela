@@ -234,44 +234,49 @@ def _mask_subshell_markers(cmd: str) -> str:
     i, n = 0, len(cmd)
     parens = []  # Bence 69701: "s" for an open $( , "p" for a plain ( -- which ) closes a command substitution
     subst_close_at = -1
-    # Index of the last character escaped by an unquoted backslash. -2, not -1: at i == 0 the test
-    # `escaped_at != i - 1` would read -1 and treat a # on the very first character as escaped.
+    # Index of the last character escaped by an unquoted backslash. -2, never a real index.
     escaped_at = -2
+    # Index (in cmd) of the last character bash actually KEEPS on the line, -1 before the first one. The comment test
+    # looks at this, not at cmd[i-1]: a line continuation (backslash-newline) is removed before the line is split
+    # into words, so in 'echob\<NL>#x' the # sits in the middle of the word 'echob#x', not at a word start.
+    prev = -1
     while i < n:
         ch = cmd[i]
         if q:
             if ch == "\\" and q == '"' and i + 1 < n:
-                out.append(cmd[i:i + 2]); i += 2; continue
+                out.append(cmd[i:i + 2]); prev = i + 1; i += 2; continue
             if ch == q:
                 q = None
-            out.append(ch); i += 1; continue
+            out.append(ch); prev = i; i += 1; continue
         if ch in "'\"":
-            q = ch; out.append(ch); i += 1; continue
+            q = ch; out.append(ch); prev = i; i += 1; continue
         # bash line continuation: an unquoted backslash-newline pair is removed BEFORE the line is split into words,
         # so it neither escapes the next character nor separates anything (`cd /tmp &&\<NL>sendmail x` is one
         # command list). Kept as an escape it gave shlex a "\n" token at command position and hid the send.
+        # `prev` is deliberately left alone: the pair is not part of the line.
         if ch == "\\" and i + 1 < n and cmd[i + 1] == "\n":
             i += 2; continue
         if ch == "\\" and i + 1 < n:
             escaped_at = i + 1
-            out.append(cmd[i:i + 2]); i += 2; continue
-        # a ) that closes a $( ends no word: `$(echo a)#x` is one word (Bence 69701)
-        # An escaped separator (`a\ #b`, `a\;#b`) is part of the word, so the # after it is no comment.
-        if ch == "#" and escaped_at != i - 1 and (
-                i == 0 or cmd[i - 1] in " \t\n;&|(" or (cmd[i - 1] == ")" and subst_close_at != i - 1)):
+            out.append(cmd[i:i + 2]); prev = i + 1; i += 2; continue
+        # A # starts a comment only at a word start: nothing kept before it, or the kept character before it is a
+        # separator, or a ) that closes no $( (Bence 69701: `$(echo a)#x` is one word). An ESCAPED separator
+        # (`a\ #b`, `a\;#b`) is part of the word, so the # after it is no comment.
+        if ch == "#" and (prev == -1 or (escaped_at != prev and (
+                cmd[prev] in " \t\n;&|(" or (cmd[prev] == ")" and subst_close_at != prev)))):
             while i < n and cmd[i] != "\n":
                 i += 1
             continue
         if ch == "\n" or ch == "`":
-            out.append(";"); i += 1; continue
+            out.append(";"); prev = i; i += 1; continue
         if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
             parens.append("s")
-            out.append(";"); i += 2; continue
+            out.append(";"); prev = i + 1; i += 2; continue
         if ch == "(":
             parens.append("p")
         elif ch == ")" and parens and parens.pop() == "s":
             subst_close_at = i
-        out.append(ch); i += 1
+        out.append(ch); prev = i; i += 1
     return "".join(out)
 
 

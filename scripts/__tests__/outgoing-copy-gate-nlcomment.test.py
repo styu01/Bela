@@ -45,6 +45,10 @@ for cmd, want, what in [
     ("#x; sendmail a@b.hu", False, "control: a # on the first character comments out the whole line"),
     ("true; \\\nsendmail a@b.hu", True, "a line continuation before the send keeps it at command position"),
     ("echo a \\\nsendmail", False, "control: after a line continuation, sendmail is still echo's argument"),
+    # The comment test looks at the last character bash KEEPS: after a line continuation the # can sit mid-word.
+    ("echob\\\n#\\#;sendmail a@b.hu", True, "a # glued to the previous word by a line continuation is no comment"),
+    ("'q'\\\n#;sendmail a@b.hu", True, "same after a quoted word"),
+    ("echo a \\\n#x; sendmail a@b.hu", False, "control: a line continuation after a SPACE, the # is a comment"),
 ]:
     got = ocg.is_send_invocation(cmd)
     check(f"{what}: {cmd!r} -> {want}", got is want, f"got {got}")
