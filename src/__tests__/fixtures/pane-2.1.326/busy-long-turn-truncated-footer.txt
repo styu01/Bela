@@ -1,0 +1,9 @@
+     2>/dev/null; tmux c…
+
+· Bunning… (6m 20s · ↓ 27.4k tokens)
+  ⎿  Tip: Use /btw to ask a side question without interrupting Claude
+
+───────────────────────────────────────────────────────────────────── KisProgi ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell · esc to inte…
