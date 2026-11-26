@@ -803,6 +803,60 @@ def _fish_command_strings(rest):
 _GIT_GLOBAL_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"})
 
 
+def _git_config_value_sends(key: str, val: str, depth: int) -> bool:
+    if _CODE_SENDER_LIT.search(val):
+        return True
+    if re.match(r"alias\.", key, re.I) and val.startswith("!"):
+        if depth >= 3:
+            return bool(val[1:].strip())
+        return is_send_invocation(val[1:], _depth=depth + 1)
+    return False
+
+
+def _git_config_env_pairs(rest):
+    """ENVFORMS2 (PROGI msg 6049, BELA msg 6050): [(key, VAR)] of 'git --config-env=KEY=VAR' / '--config-env KEY=VAR'
+    among the global options before the subcommand. Mirrors gitConfigEnvPairs."""
+    out = []
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        t = rest[i]
+        kv = None
+        if t == "--config-env":
+            kv = rest[i + 1] if i + 1 < len(rest) else ""
+            i += 2
+        elif t.startswith("--config-env="):
+            kv = t[13:]
+            i += 1
+        else:
+            i += 2 if t in _GIT_GLOBAL_VALUE else 1
+        if kv is None:
+            continue
+        eq = kv.rfind("=")
+        if eq > 0:
+            out.append((kv[:eq], kv[eq + 1:]))
+    return out
+
+
+def _config_env_sends(segments, depth: int) -> bool:
+    """ENVFORMS2: an assignment anywhere in the line (in front of a command, after env/export/declare, or alone) of a
+    variable that a 'git --config-env' in the line reads, whose value would send through that key, is a send (the
+    'git -c KEY=VALUE' judgement). Mirrors configEnvSends."""
+    keys = {}
+    for t in segments:
+        for h in (_command_heads(t) if t else []):
+            if h and _basename(h[0]) == "git":
+                for k, v in _git_config_env_pairs(h[1:]):
+                    keys.setdefault(v, []).append(k)
+    if not keys:
+        return False
+    for t in segments:
+        for a in _prefix_assignments(t):
+            name, _, val = a.partition("=")
+            if any(_git_config_value_sends(k, val, depth) for k in keys.get(name, ())):
+                return True
+    return False
+
+
 def _git_runs_sender(rest, depth: int) -> bool:
     values = []
     i = 0
@@ -823,14 +877,8 @@ def _git_runs_sender(rest, depth: int) -> bool:
         i += 1
     for kv in values:
         key, _, val = kv.partition("=")
-        if _CODE_SENDER_LIT.search(val):
+        if _git_config_value_sends(key, val, depth):
             return True
-        if re.match(r"alias\.", key, re.I) and val.startswith("!"):
-            if depth >= 3:
-                if val[1:].strip():
-                    return True
-            elif is_send_invocation(val[1:], _depth=depth + 1):
-                return True
     if i < len(rest) and rest[i] == "grep":
         for t in rest[i + 1:]:
             if t == "--":
@@ -1659,6 +1707,8 @@ def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
         # all a szovegben -- igy egy fura, de valodi kuldes nem csuszik at
         # neman, a tipikus belso parancsok viszont nem kapnak hamis pozitivot.
         return bool(_FALLBACK_LITERALS.search(cmd))
+    if _config_env_sends(segments, _depth):
+        return True
     return any(_segment_is_send(toks, _depth) for toks in segments)
 
 # --- Hungarian detection (accent-insensitive markers) -----------------------

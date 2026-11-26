@@ -567,6 +567,47 @@ function fishCommandStrings(rest) {
 // is a shell command line; any other value that names a sender is a send. Only the options BEFORE the subcommand
 // are global ('git grep -c X' is a count flag).
 const GIT_GLOBAL_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'])
+function gitConfigValueSends(key, val, depth) {
+  if (CODE_SENDER_LIT.test(val)) return true
+  if (/^alias\./i.test(key) && val.startsWith('!')) {
+    if (depth >= 3) return !!val.slice(1).trim()
+    return isSendInvocation(val.slice(1), depth + 1)
+  }
+  return false
+}
+// ENVFORMS2 (PROGI msg 6049, BELA msg 6050): 'git --config-env=KEY=VAR' (or '--config-env KEY=VAR') takes the config
+// value from the environment variable VAR. Returns [key, VAR] pairs of the global options before the subcommand.
+function gitConfigEnvPairs(rest) {
+  const out = []
+  let i = 0
+  while (i < rest.length && rest[i].startsWith('-')) {
+    const t = rest[i]
+    let kv = null
+    if (t === '--config-env') { kv = rest[i + 1] ?? ''; i += 2 } else if (t.startsWith('--config-env=')) { kv = t.slice(13); i++ } else { i += GIT_GLOBAL_VALUE.has(t) ? 2 : 1 }
+    if (kv === null) continue
+    const eq = kv.lastIndexOf('=')
+    if (eq > 0) out.push([kv.slice(0, eq), kv.slice(eq + 1)])
+  }
+  return out
+}
+// The variables a 'git --config-env' anywhere in this command line reads, and the config key each feeds; then any
+// assignment of such a variable in the line (in front of a command, after env/export/declare, or alone) whose value
+// would send through that key is a send -- the same judgement as 'git -c KEY=VALUE'. A plain, unexported
+// assignment is counted too (cautious, like ENVFORMS1126's runner variables). Mirrors _config_env_sends.
+function configEnvSends(segments, depth) {
+  const keys = new Map()
+  for (const t of segments) {
+    for (const h of commandHeads(t)) {
+      if (h && h.length && basename(h[0]) === 'git') for (const [k, v] of gitConfigEnvPairs(h.slice(1))) keys.set(v, [...(keys.get(v) || []), k])
+    }
+  }
+  if (!keys.size) return false
+  return segments.some((t) => prefixAssignments(t).some((a) => {
+    const eq = a.indexOf('=')
+    const ks = keys.get(a.slice(0, eq))
+    return !!ks && ks.some((k) => gitConfigValueSends(k, a.slice(eq + 1), depth))
+  }))
+}
 function gitRunsSender(rest, depth) {
   const values = []
   let i = 0
@@ -579,12 +620,7 @@ function gitRunsSender(rest, depth) {
   }
   for (const kv of values) {
     const eq = kv.indexOf('=')
-    const key = eq < 0 ? kv : kv.slice(0, eq)
-    const val = eq < 0 ? '' : kv.slice(eq + 1)
-    if (CODE_SENDER_LIT.test(val)) return true
-    if (/^alias\./i.test(key) && val.startsWith('!')) {
-      if (depth >= 3) { if (val.slice(1).trim()) return true } else if (isSendInvocation(val.slice(1), depth + 1)) return true
-    }
+    if (gitConfigValueSends(eq < 0 ? kv : kv.slice(0, eq), eq < 0 ? '' : kv.slice(eq + 1), depth)) return true
   }
   if (rest[i] === 'grep') {
     for (const t of rest.slice(i + 1)) {
@@ -1195,6 +1231,7 @@ export function isSendInvocation(cmd, depth = 0) {
     // this path the gate is exactly as strict as before -- never weaker.
     return SEND_PATTERNS.some((re) => re.test(cmd))
   }
+  if (configEnvSends(segments, depth)) return true
   return segments.some((toks) => segmentIsSend(toks, depth))
 }
 

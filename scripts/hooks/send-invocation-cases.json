@@ -2675,6 +2675,76 @@
       "name": "INTERPSTDIN2: a backtick inside JS // comments opens no template",
       "cmd": "node - <<'EOF'\n// `\nrequire('child_process').execSync('sendmail a@b.hu')\n// `\nEOF",
       "expected": true
+    },
+    {
+      "name": "ENVFORMS2: prefix V='!sender' git --config-env=alias.z=V",
+      "cmd": "V='!sendmail a@b.hu' git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: export V, then git --config-env",
+      "cmd": "export V='!sendmail a@b.hu'; git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: V=..., export V, then git --config-env",
+      "cmd": "V='!sendmail a@b.hu'; export V; git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: declare -x V, then git --config-env",
+      "cmd": "declare -x V='!sendmail a@b.hu'; git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: env V=... git --config-env",
+      "cmd": "env V='!sendmail a@b.hu' git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: separate '--config-env KEY=VAR' form",
+      "cmd": "V='!sendmail a@b.hu' git --config-env alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: PINNED cost: a --config-env value naming the sender is refused for any key, like git -c (core.pager runs only on a terminal)",
+      "cmd": "V='sendmail a@b.hu' git --config-env=core.pager=V -p log -1",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: the alias value is judged as a command line (split sender name)",
+      "cmd": "V='!sh -c \"send\"\"mail a@b.hu\"' git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: after git -C .",
+      "cmd": "V='!sendmail a@b.hu' git -C . --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: export A=1 V=... (second assignment)",
+      "cmd": "export A=1 V='!sendmail a@b.hu'; git --config-env=alias.z=V z",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: control: an alias that runs echo",
+      "cmd": "V='!echo hi' git --config-env=alias.z=V z",
+      "expected": false
+    },
+    {
+      "name": "ENVFORMS2: PINNED cost: a --config-env value naming the sender is refused for any key, like git -c (user.name)",
+      "cmd": "V='sendmail' git --config-env=user.name=V log -1 --format=%an",
+      "expected": true
+    },
+    {
+      "name": "ENVFORMS2: control: a variable git does not read",
+      "cmd": "W='!sendmail a@b.hu' git --config-env=alias.z=V z",
+      "expected": false
+    },
+    {
+      "name": "ENVFORMS2: control: an alias-shaped value with no --config-env",
+      "cmd": "V='!sendmail a@b.hu' git log -1 --format=%s",
+      "expected": false
     }
   ]
 }
