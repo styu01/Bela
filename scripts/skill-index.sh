@@ -9,6 +9,7 @@
 #                   <AGENT_DIR>/.claude/skills/.skill-index.md
 #                   (backward-compatible format for no-arg callers)
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GLOBAL_SKILLS_DIR="$HOME/.claude/skills"
 
 if [ $# -ge 1 ]; then
@@ -65,7 +66,10 @@ index_skills_dir() {
     fi
 
     local desc
-    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | cut -c1-120)
+    # IDXBLOCK1118: a `grep "^description:"` turned a YAML block scalar (`description: >` with the text on the
+    # indented lines below) into a lone ">"; skill-desc.py reads the frontmatter, joins it onto one line and cuts at
+    # 120 CHARACTERS (`cut -c` is byte-oriented and split accented text mid-character).
+    desc=$(python3 "$SCRIPT_DIR/skill-desc.py" "$skill_md" 2>/dev/null)
     if [ -z "$desc" ]; then
       desc="(nincs leírás)"
     fi
