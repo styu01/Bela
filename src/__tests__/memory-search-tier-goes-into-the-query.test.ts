@@ -16,9 +16,9 @@
 // cold rows win the ranking. Measured on this seed: the top ten of an
 // unfiltered search contains zero warm rows, so a post-filter returns nothing
 // while four warm rows match.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { Readable } from 'node:stream'
-import { initDatabase, saveAgentMemory, searchAgentMemories } from '../db.js'
+import { initDatabase, saveAgentMemory, searchAgentMemories, getDb, hybridSearch, type HybridSearchTrace } from '../db.js'
 import { tryHandleMemories } from '../web/routes/memories.js'
 import type { RouteContext } from '../web/routes/types.js'
 
@@ -110,5 +110,79 @@ describe('a category search is filtered in the query, not after the limit', () =
     const { ctx, out } = fakeCtx('/api/memories?agent=agent-a&q=billingo&tier=warm&limit=10')
     expect(await tryHandleMemories(ctx)).toBe(true)
     expect(out.body).toHaveLength(WARM_ROWS)
+  })
+})
+
+// PROGI review: the two other search branches of GET /api/memories take the
+// category too (hybrid, and the agent-less ?q= branch). The route keeps a
+// post-filter as a backstop, and that backstop is exactly what would hide a
+// regression here: with the filter dropped from the query, the post-filter
+// still returns only warm rows, just fewer of them (zero on this seed). So the
+// assertion is the COUNT, not the category of what came back.
+describe('the hybrid and the agent-less search branches filter in the query too', () => {
+  // Embeddings are stubbed at the fetch boundary. Cold rows get the query's own
+  // direction and warm rows an almost orthogonal one, so the vector branch also
+  // ranks every cold row above every warm row: a post-filter would lose them.
+  const QUERY_VEC = [1, 0, 0]
+  const COLD_VEC = [1, 0.01, 0]
+  const WARM_VEC = [0.05, 1, 0]
+  let embedded = 0
+
+  beforeEach(async () => {
+    embedded = 0
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { body?: string }) => {
+      const prompt: string = JSON.parse(init?.body ?? '{}').prompt ?? ''
+      embedded++
+      const vec = prompt === 'billingo' ? QUERY_VEC : prompt.startsWith('billingo billingo') ? COLD_VEC : WARM_VEC
+      return { json: async () => ({ embedding: vec }) }
+    }))
+    initDatabase(':memory:')
+    seed()
+    // saveAgentMemory embeds fire-and-forget: wait until every seeded row has its vector.
+    await vi.waitFor(() => {
+      const missing = (getDb().prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL').get() as { n: number }).n
+      expect(missing).toBe(0)
+    })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  // At the db level, without the route's post-filter: BOTH hybrid branches must
+  // have filtered. The vector branch has no text test, so with the category in
+  // its query it sees exactly the warm rows (the four matches plus the off-topic
+  // one); without it, it would fill limit*2 with cold rows.
+  it('hybridSearch passes the category to the FTS AND the vector branch', async () => {
+    const trace: HybridSearchTrace = { ftsHits: 0, vectorHits: 0, ftsRelaxed: false, vectorOnly: false }
+    const rows = await hybridSearch('agent-a', 'billingo', 10, trace, 'warm')
+    expect(rows.every(m => m.category === 'warm')).toBe(true)
+    expect(trace.ftsHits).toBe(WARM_ROWS)
+    expect(trace.vectorHits).toBe(WARM_ROWS + 1)
+  })
+
+  it('the measure is not vacuous: the unfiltered agent-less and hybrid answers hold no warm row', async () => {
+    const plain = fakeCtx('/api/memories?q=billingo&limit=10')
+    expect(await tryHandleMemories(plain.ctx)).toBe(true)
+    expect(plain.out.body.filter((m: any) => m.category === 'warm')).toHaveLength(0)
+    const hybrid = fakeCtx('/api/memories?agent=agent-a&q=billingo&mode=hybrid&limit=10')
+    expect(await tryHandleMemories(hybrid.ctx)).toBe(true)
+    expect(hybrid.out.body.filter((m: any) => m.category === 'warm')).toHaveLength(0)
+    expect(embedded).toBeGreaterThan(WARM_ROWS + COLD_ROWS)
+  })
+
+  it('agent-less ?q=&category=warm returns every matching warm row', async () => {
+    const { ctx, out } = fakeCtx('/api/memories?q=billingo&category=warm&limit=10')
+    expect(await tryHandleMemories(ctx)).toBe(true)
+    expect(out.body).toHaveLength(WARM_ROWS)
+    expect(out.body.every((m: any) => m.category === 'warm')).toBe(true)
+  })
+
+  it('hybrid with category=warm returns every matching warm row and nothing from another tier', async () => {
+    const { ctx, out } = fakeCtx('/api/memories?agent=agent-a&q=billingo&mode=hybrid&category=warm&limit=10')
+    expect(await tryHandleMemories(ctx)).toBe(true)
+    // The vector branch has no text test, so it may add the off-topic warm row; the
+    // count that matters is the matching warm rows, all four of them.
+    const matching = out.body.filter((m: any) => m.content.includes('billingo'))
+    expect(matching).toHaveLength(WARM_ROWS)
+    expect(out.body.every((m: any) => m.category === 'warm')).toBe(true)
+    expect(out.headers['x-memory-search']).toContain('vector-only=false')
   })
 })
