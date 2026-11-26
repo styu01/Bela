@@ -38,6 +38,13 @@ for cmd, want, what in [
     ("echo a\\\t#b; sendmail a@b.hu", True, "a # after an escaped tab is no comment"),
     ("echo a\\;#b; sendmail a@b.hu", True, "a # after an escaped ; is no comment"),
     ("echo a\\\\ #b; sendmail a@b.hu", False, "control: an escaped BACKSLASH, then a real space: the # is a comment again"),
+    # PROGI re-review: a # on the very FIRST character is a comment (escaped_at started at -1 == i-1 at i == 0),
+    # and a backslash-newline is a line continuation that bash removes before splitting words, not an escape.
+    ("#x\\\nsendmail a@b.hu", True, "a comment on the first line ends at the newline, even after a trailing backslash"),
+    ("\\\n#&&\\\nsendmail a@b.hu", True, "line continuations around a comment: the send on the next line runs"),
+    ("#x; sendmail a@b.hu", False, "control: a # on the first character comments out the whole line"),
+    ("true; \\\nsendmail a@b.hu", True, "a line continuation before the send keeps it at command position"),
+    ("echo a \\\nsendmail", False, "control: after a line continuation, sendmail is still echo's argument"),
 ]:
     got = ocg.is_send_invocation(cmd)
     check(f"{what}: {cmd!r} -> {want}", got is want, f"got {got}")

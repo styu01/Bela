@@ -234,7 +234,9 @@ def _mask_subshell_markers(cmd: str) -> str:
     i, n = 0, len(cmd)
     parens = []  # Bence 69701: "s" for an open $( , "p" for a plain ( -- which ) closes a command substitution
     subst_close_at = -1
-    escaped_at = -1  # index of the last character escaped by an unquoted backslash
+    # Index of the last character escaped by an unquoted backslash. -2, not -1: at i == 0 the test
+    # `escaped_at != i - 1` would read -1 and treat a # on the very first character as escaped.
+    escaped_at = -2
     while i < n:
         ch = cmd[i]
         if q:
@@ -245,6 +247,11 @@ def _mask_subshell_markers(cmd: str) -> str:
             out.append(ch); i += 1; continue
         if ch in "'\"":
             q = ch; out.append(ch); i += 1; continue
+        # bash line continuation: an unquoted backslash-newline pair is removed BEFORE the line is split into words,
+        # so it neither escapes the next character nor separates anything (`cd /tmp &&\<NL>sendmail x` is one
+        # command list). Kept as an escape it gave shlex a "\n" token at command position and hid the send.
+        if ch == "\\" and i + 1 < n and cmd[i + 1] == "\n":
+            i += 2; continue
         if ch == "\\" and i + 1 < n:
             escaped_at = i + 1
             out.append(cmd[i:i + 2]); i += 2; continue
