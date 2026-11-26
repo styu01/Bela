@@ -554,9 +554,14 @@ def _segment_names_sender(toks) -> bool:
     return any(_GRAPHMAIL.match(_basename(t)) for t in toks) and "send" in toks
 
 
+# SENDERNAMEMSG1126: switched off only inside sender_named_only(), to tell whether a refusal comes from this
+# layer alone.
+_TOKEN_LAYER_ON = True
+
+
 def _sender_token_layer(toks, heads) -> bool:
     """LAUNCHGATE1126: a sender named anywhere in the segment, run by something other than a never-exec program."""
-    if not _segment_names_sender(toks):
+    if not _TOKEN_LAYER_ON or not _segment_names_sender(toks):
         return False
     # eval re-parses its arguments and is judged on that re-parse in _head_is_send, so it is not judged here again.
     # find without an exec action runs nothing; with one, _head_is_send has already judged the action's command.
@@ -863,6 +868,17 @@ def wrapper_depth_hit(cmd: str) -> bool:
     heads = [h for toks in segments for h in _command_heads(toks)]
     return any(h is None for h in heads) and not any(
         h is not None and _head_is_send(h, 0) for h in heads)
+
+
+def sender_named_only(cmd: str) -> bool:
+    """SENDERNAMEMSG1126: True when cmd reads as a send ONLY through the sender-token layer: a sender is named in it,
+    but no rule sees a send being started. The copy gate still refuses it (fail-closed), with its own message."""
+    global _TOKEN_LAYER_ON
+    _TOKEN_LAYER_ON = False
+    try:
+        return not is_send_invocation(cmd)
+    finally:
+        _TOKEN_LAYER_ON = True
 
 
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
@@ -2165,6 +2181,21 @@ def main():
                 f"Ha ez NEM levelkuldes: csokkentsd a burkolok szamat {_HEAD_DEPTH} vagy kevesebb ala.\n"
                 "Ha levelkuldes: tedd vizsgalhatova -- ABSZOLUT utvonalu stdin-atiranyitas "
                 "(< /teljes/ut/body.txt), vagy --body-ban atadott szoveg.\n"
+            )
+            sys.exit(2)
+        if tool == "Bash" and not unreadable and sender_named_only(cmd):
+            # SENDERNAMEMSG1126 (PROGI msg 5993): refused only because a sender is NAMED in the command. The generic
+            # "nothing to inspect" text below sent the agent looking for a mail body that does not exist.
+            sys.stderr.write(
+                "KIMENO-SZOVEG KAPU: TILTVA, mert a parancsban kuldo-nevu szo all (sendmail, msmtp, swaks, "
+                "send.py --to vagy graph-mail send), es nem tudom eldonteni, hogy kuldes-e.\n"
+                "A parancs nem ismert csak-olvaso program, ezert lehet, hogy ezt a szot parancskent futtatja. "
+                "Ez szandekosan fail-closed.\n\n"
+                "Ha ez NEM levelkuldes, a szo csak adat (kereses, listazas, csomagnev): ne onallo szokent add at, "
+                "hanem egy hosszabb idezett mintaban (pl. 'sendmail(' vagy '[s]endmail'), vagy hasznalj "
+                "csak olvaso eszkozt (grep, rg, cat, ls, git log, git grep).\n"
+                "Ha levelkuldes: futtasd kozvetlenul, vizsgalhato torzzsel (ABSZOLUT utvonalu "
+                "stdin-atiranyitas vagy --body).\n"
             )
             sys.exit(2)
         reason = unreadable or "a hook nem talalt vizsgalhato szoveget a hivasban"
