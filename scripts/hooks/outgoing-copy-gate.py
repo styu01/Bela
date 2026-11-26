@@ -426,10 +426,17 @@ def _head_is_send(toks, depth: int) -> bool:
         if is_send_invocation(" ".join(rest), _depth=depth + 1):
             return True
     # burkolo hejj: a -c string-argumentum maga is parancs -- rekurzio
-    if _WRAPPER_SHELL.match(prog) and depth < 3:
+    if _WRAPPER_SHELL.match(prog):
         for i, t in enumerate(rest):
             if t == "-c" and i + 1 < len(rest):
-                if is_send_invocation(rest[i + 1], _depth=depth + 1):
+                # SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
+                # "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash
+                # runs the send). A non-empty command string at the bound is now refused (fail-closed), like a
+                # wrapper at the head-depth bound and an eval at the same bound.
+                if depth >= 3:
+                    if rest[i + 1].strip():
+                        return True
+                elif is_send_invocation(rest[i + 1], _depth=depth + 1):
                     return True
     # interpreter kod-string: python -c / node -e / --eval, ami kuldest hiv
     if _PYTHON.match(prog) or _NODEISH.match(prog):

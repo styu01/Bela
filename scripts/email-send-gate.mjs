@@ -243,9 +243,15 @@ function headIsSend(toks, depth) {
     if (depth >= 3) return true
     if (isSendInvocation(rest.join(' '), depth + 1)) return true
   }
-  if (WRAPPER_SHELL.test(prog) && depth < 3) {
+  if (WRAPPER_SHELL.test(prog)) {
     for (let i = 0; i < rest.length; i++) {
-      if (rest[i] === '-c' && rest[i + 1] && isSendInvocation(rest[i + 1], depth + 1)) return true
+      if (rest[i] !== '-c' || !rest[i + 1]) continue
+      // SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
+      // "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash runs
+      // the send). A non-empty command string at the bound is now refused (fail-closed), like a wrapper at the
+      // head-depth bound and an eval at the same bound.
+      if (depth >= 3) { if (rest[i + 1].trim()) return true }
+      else if (isSendInvocation(rest[i + 1], depth + 1)) return true
     }
   }
   if (PYTHON.test(prog) || NODEISH.test(prog)) {
