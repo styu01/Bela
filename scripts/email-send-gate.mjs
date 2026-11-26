@@ -363,19 +363,26 @@ function shellStringIsSend(s, depth) {
 
 // SHCLUSTER1126: the command string of `sh|bash|zsh|dash [options] -c STRING`, or null. The shell takes the
 // first NON-option argument as the string once -c was given anywhere among the options, and -c can sit inside a
-// cluster ('-lc', '-ec', '-xc'). '-o NAME' / '+o NAME' / '-O NAME' / '+O NAME' take a value, '--long' options
-// stand alone, '--' ends the options. Mirrors _shell_command_string in outgoing-copy-gate.py.
+// cluster ('-lc', '-ec', '-xc'). Every 'o' / 'O' in an option word ('-o', '+O', '-euxo', '-co', '-oc') takes the
+// next argument as its value, in order. '--rcfile FILE', '--init-file FILE' (bash) and '--emulate NAME' (zsh) take a
+// value, every other '--long' option stands alone, '--' and a lone '-' end the options, a lone '+' is skipped.
+// Mirrors _shell_command_string in outgoing-copy-gate.py.
+const SHELL_LONG_WITH_VALUE = new Set(['--rcfile', '--init-file', '--emulate'])
 function shellCommandString(rest) {
   let sawC = false
   let i = 0
   while (i < rest.length) {
     const t = rest[i]
-    if (t === '--') { i++; break }
-    if (t === '-o' || t === '+o' || t === '-O' || t === '+O') { i += 2; continue }
+    // A lone '-' ends the options like '--'; a lone '+' is an empty option word and the options go on (bash and
+    // dash, measured: 'bash -c - "sendmail x"', 'bash -c + "sendmail x"' and 'bash + -c "sendmail x"' all send).
+    if (t === '--' || t === '-') { i++; break }
+    if (t === '+') { i++; continue }
+    if (SHELL_LONG_WITH_VALUE.has(t)) { i += 2; continue }
     if (t.startsWith('--')) { i++; continue }
     if (t.length > 1 && (t[0] === '-' || t[0] === '+')) {
       if (t[0] === '-' && t.slice(1).includes('c')) sawC = true
-      i++
+      // SHCLUSTERFIX1126: each o/O of the word swallows one following argument ('-euxo pipefail -c ...').
+      i += 1 + [...t.slice(1)].filter((ch) => ch === 'o' || ch === 'O').length
       continue
     }
     break

@@ -563,21 +563,31 @@ def _shell_string_is_send(s: str, depth: int) -> bool:
     return is_send_invocation(s, _depth=depth + 1)
 
 
+_SHELL_LONG_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
+
+
 def _shell_command_string(rest):
     """The command string of `sh|bash|zsh|dash [options] -c STRING`, or None (SHCLUSTER1126).
 
     The shell takes the first NON-option argument as the string once -c was given anywhere among the options, and
-    -c can sit inside a cluster ('-lc', '-ec', '-xc'). '-o NAME' / '+o NAME' / '-O NAME' / '+O NAME' take a value,
-    '--long' options stand alone, '--' ends the options. Before this, only a bare '-c' token followed directly by
-    the string was seen: 'bash -lc "sendmail x"' and 'sh -ec "sendmail x"' passed both gates while bash ran them.
+    -c can sit inside a cluster ('-lc', '-ec', '-xc'). Every 'o' / 'O' in an option word ('-o', '+O', '-euxo', '-co',
+    '-oc') takes the next argument as its value, in order. '--rcfile FILE', '--init-file FILE' (bash) and
+    '--emulate NAME' (zsh) take a value, every other '--long' option stands alone, '--' and a lone '-' end the
+    options, a lone '+' is skipped. Before this, only a bare '-c' token followed directly by the string was seen:
+    'bash -lc "sendmail x"' and 'sh -ec "sendmail x"' passed both gates while bash ran them.
     Mirrored in email-send-gate.mjs (shellCommandString)."""
     saw_c, i = False, 0
     while i < len(rest):
         t = rest[i]
-        if t == "--":
+        # A lone '-' ends the options like '--'; a lone '+' is an empty option word and the options go on (bash and
+        # dash, measured: 'bash -c - "sendmail x"', 'bash -c + "sendmail x"' and 'bash + -c "sendmail x"' all send).
+        if t in ("--", "-"):
             i += 1
             break
-        if t in ("-o", "+o", "-O", "+O"):
+        if t == "+":
+            i += 1
+            continue
+        if t in _SHELL_LONG_WITH_VALUE:
             i += 2
             continue
         if t.startswith("--"):
@@ -586,7 +596,8 @@ def _shell_command_string(rest):
         if len(t) > 1 and t[0] in "-+":
             if t[0] == "-" and "c" in t[1:]:
                 saw_c = True
-            i += 1
+            # SHCLUSTERFIX1126: each o/O of the word swallows one following argument ('-euxo pipefail -c ...').
+            i += 1 + sum(1 for ch in t[1:] if ch in "oO")
             continue
         break
     return rest[i] if saw_c and i < len(rest) else None

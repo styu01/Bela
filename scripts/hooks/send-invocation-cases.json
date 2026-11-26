@@ -747,6 +747,71 @@
       "expected": true
     },
     {
+      "name": "SHCLUSTERFIX1126: a cluster ending in o takes a value before -c (bash -euxo pipefail)",
+      "cmd": "bash -euxo pipefail -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: c and o in one cluster, the value comes first (-co)",
+      "cmd": "bash -co pipefail \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: o and c in one cluster, the value comes first (-oc)",
+      "cmd": "bash -oc pipefail \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: --rcfile takes a value",
+      "cmd": "bash --rcfile /x -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: --init-file takes a value",
+      "cmd": "bash --init-file /x -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: --emulate (zsh) takes a value",
+      "cmd": "zsh --emulate sh -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: control: -O swallows the -c as its value, bash runs no string (measured)",
+      "cmd": "bash -O -c \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTERFIX1126: control: -euxo with its value and no -c runs a script",
+      "cmd": "bash -euxo pipefail script.sh",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTERFIX1126: a lone '+' is an empty option word, the options go on (bash sends)",
+      "cmd": "bash + -c \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: a lone '+' after -c is skipped, the string follows it (bash sends)",
+      "cmd": "bash -c + \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: a lone '-' after -c ends the options, the string follows it (bash sends)",
+      "cmd": "bash -c - \"sendmail a\"",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTERFIX1126: control: a lone '-' ends the options, the later -c is the script name (bash runs no string)",
+      "cmd": "bash - -c \"sendmail a\"",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTERFIX1126: control: after '+' the FIRST non-option argument is the string (bash runs ls)",
+      "cmd": "bash -c + ls \"sendmail a\"",
+      "expected": false
+    },
+    {
       "name": "SHCLUSTER1126: control: a cluster with a non-sender",
       "cmd": "bash -lc 'ls'",
       "expected": false
