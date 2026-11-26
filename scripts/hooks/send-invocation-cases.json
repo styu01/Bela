@@ -1467,6 +1467,81 @@
       "expected": false
     },
     {
+      "name": "DQSUB1126: $(...) inside double quotes",
+      "cmd": "echo \"$(sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: an assignment from a quoted $(...)",
+      "cmd": "X=\"$(sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: a quoted $(...) as a git argument",
+      "cmd": "git log --grep \"$(sendmail a)\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: backticks inside double quotes",
+      "cmd": "echo \"`sendmail a@b.hu`\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: a list inside a quoted $(...)",
+      "cmd": "echo \"a $(cd /tmp && sendmail a) b\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: nested quoted $(...)",
+      "cmd": "echo \"$(echo \"$(sendmail a)\")\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: control: arithmetic $(( ))",
+      "cmd": "echo \"$(( 1 + 2 ))\"",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: control: single quotes stay literal",
+      "cmd": "echo '$(sendmail a)'",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: control: an escaped \\$( is literal",
+      "cmd": "echo \"\\$(sendmail a)\"",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: control: a quoted $(...) with a non-sender",
+      "cmd": "echo \"$(echo sendmail)\"",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: control: a quoted $(...) that only names the sender",
+      "cmd": "echo \"$(grep -c sendmail /dev/null)\"",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: control: a quoted heredoc body is data",
+      "cmd": "cat <<'EOF'\n\"$(sendmail a)\"\nEOF",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: control: harmless quoted substitutions",
+      "cmd": "echo \"$(ls)\" && echo \"`date`\"",
+      "expected": false
+    },
+    {
+      "name": "DQSUB1126: a bash -c inside a quoted $(...)",
+      "cmd": "X=\"$(bash -c 'sendmail a')\"",
+      "expected": true
+    },
+    {
+      "name": "DQSUB1126: control: ${VAR} is not a substitution",
+      "cmd": "echo \"${HOME}\"",
+      "expected": false
+    },
+    {
       "name": "EXECVEC1126: a git '!' alias is parsed as a command line (quotes split the name, measured)",
       "cmd": "git -c alias.z='!send\"\"mail a@b.hu' z",
       "expected": true

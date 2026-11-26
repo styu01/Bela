@@ -580,7 +580,54 @@ function headIsSend(toks, depth) {
   return false
 }
 
+// DQSUB1126 (PROGI msg 6001): command substitution inside DOUBLE quotes runs. The mask keeps quoted text as content,
+// so 'echo "$(sendmail a)"', 'X="$(sendmail a)"', 'git log --grep "$(sendmail a)"' and 'echo "`sendmail a`"' passed
+// both gates while bash ran the send. This returns the bodies of every $(...) and `...` that sit inside double
+// quotes (single quotes stay literal; heredoc bodies are cut first, like the tokenizer does). Mirrors
+// _dquote_substitutions in outgoing-copy-gate.py.
+function dquoteSubstitutions(cmd) {
+  const s = cmd.replace(HEREDOC_RE, '$1')
+  const out = []
+  let q = null
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (q === "'") { if (ch === "'") q = null; continue }
+    if (ch === '\\' && i + 1 < s.length) { i++; continue }
+    if (q === null) { if (ch === "'" || ch === '"') q = ch; continue }
+    // inside double quotes
+    if (ch === '"') { q = null; continue }
+    if (ch === '`') {
+      let j = i + 1
+      while (j < s.length && s[j] !== '`') { if (s[j] === '\\') j++; j++ }
+      out.push(s.slice(i + 1, j))
+      i = j
+      continue
+    }
+    if (ch === '$' && s[i + 1] === '(') {
+      let j = i + 2
+      let level = 1
+      let iq = null
+      while (j < s.length && level > 0) {
+        const c = s[j]
+        if (iq) { if (c === '\\' && iq === '"') j++; else if (c === iq) iq = null }
+        else if (c === "'" || c === '"') iq = c
+        else if (c === '\\') j++
+        else if (c === '(') level++
+        else if (c === ')') level--
+        j++
+      }
+      out.push(s.slice(i + 2, level === 0 ? j - 1 : j))
+      i = j - 1
+      continue
+    }
+  }
+  return out
+}
+
 export function isSendInvocation(cmd, depth = 0) {
+  for (const inner of dquoteSubstitutions(cmd)) {
+    if (depth >= 3) { if (inner.trim()) return true } else if (isSendInvocation(inner, depth + 1)) return true
+  }
   let segments
   try {
     segments = segmentsTokens(cmd)

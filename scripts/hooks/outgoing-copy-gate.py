@@ -881,7 +881,78 @@ def sender_named_only(cmd: str) -> bool:
         _TOKEN_LAYER_ON = True
 
 
+def _dquote_substitutions(cmd: str):
+    """DQSUB1126 (PROGI msg 6001): the bodies of every $(...) and `...` inside DOUBLE quotes. bash runs them; the mask
+    keeps quoted text as content, so 'echo "$(sendmail a)"' and 'X="$(sendmail a)"' passed both gates. Single quotes
+    stay literal; heredoc bodies are cut first, like the tokenizer does. Mirrors dquoteSubstitutions in
+    email-send-gate.mjs."""
+    s = _HEREDOC.sub(r"\1", cmd)
+    out = []
+    q = None
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if q == "'":
+            if ch == "'":
+                q = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if q is None:
+            if ch in ("'", '"'):
+                q = ch
+            i += 1
+            continue
+        if ch == '"':
+            q = None
+            i += 1
+            continue
+        if ch == "`":
+            j = i + 1
+            while j < n and s[j] != "`":
+                if s[j] == "\\":
+                    j += 1
+                j += 1
+            out.append(s[i + 1:j])
+            i = j + 1
+            continue
+        if ch == "$" and i + 1 < n and s[i + 1] == "(":
+            j = i + 2
+            level = 1
+            iq = None
+            while j < n and level > 0:
+                c = s[j]
+                if iq:
+                    if c == "\\" and iq == '"':
+                        j += 1
+                    elif c == iq:
+                        iq = None
+                elif c in ("'", '"'):
+                    iq = c
+                elif c == "\\":
+                    j += 1
+                elif c == "(":
+                    level += 1
+                elif c == ")":
+                    level -= 1
+                j += 1
+            out.append(s[i + 2:j - 1] if level == 0 else s[i + 2:j])
+            i = j
+            continue
+        i += 1
+    return out
+
+
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
+    for inner in _dquote_substitutions(cmd):
+        if _depth >= 3:
+            if inner.strip():
+                return True
+        elif is_send_invocation(inner, _depth=_depth + 1):
+            return True
     try:
         segments = _segments_tokens(cmd)
     except ValueError:
