@@ -497,30 +497,27 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_BACKGROUND_ONE_SHELL_HIDDEN)).toBe('idle')
   })
 
-  it('does NOT classify a truncated "· N shell" prefix as idle', () => {
-    // Defense in depth: the shells-variant requires either the
-    // "· N shells · ctrl+t" marker or the "· N shells · ↓ to manage"
-    // marker, not just the bare "· N shell(s)" prefix. Two reasons we
-    // pin this down with an explicit negative test:
-    //   1. A malformed or partially rendered footer (terminal
-    //      corruption, mid-render frame) must classify as 'unknown'
-    //      so we do not deliver a prompt into a pane that is not
-    //      really ready.
-    //   2. The "bypass permissions on · 1 shell" substring could
-    //      appear in scrollback as quoted log output or an echoed
-    //      message, and the regex must not be tricked into treating
-    //      that as a live footer.
-    // The fixture is deliberately minimal: no other idle markers
-    // (no "(shift+tab to cycle)", no "? for shortcuts") so the
-    // assertion isolates the truncated-shells path specifically.
-    const truncated = [
+  it('a bare "· N shell" tail is idle ONLY as the live (last) footer line (VAGTECHIDLE1009 reversed #61)', () => {
+    // #61 (2026-05) pinned the bare "bypass permissions on · 1 shell" footer as
+    // 'unknown', for two reasons: (1) it could be a mid-render frame, and (2)
+    // the substring could be quoted in scrollback. A customer's 35 captures
+    // (Vág-Tech, 2026-10-09) and our own fleet (2026-10-08) showed that this
+    // bare tail is the STABLE idle footer while a background shell runs, for
+    // hours, so reading it as 'unknown' stopped delivery and the auto-restart
+    // idle guard. Reason (2) is kept: the tail counts only on the last non-empty
+    // line, and the scrollback case is pinned in the VAGTECHIDLE1009 block.
+    // Reason (1) is a known residual: one capture cannot tell a mid-render
+    // frame from the stable footer.
+    const bare = [
       '',
       SEP,
       '❯ ',
       SEP,
       '  ⏵⏵ bypass permissions on · 1 shell',
     ].join('\n')
-    expect(detectPaneState(truncated)).toBe('unknown')
+    expect(detectPaneState(bare)).toBe('idle')
+    const quotedAbove = ['  ⏵⏵ bypass permissions on · 1 shell', '', SEP, '❯ ', SEP, '  some status line'].join('\n')
+    expect(detectPaneState(quotedAbove)).toBe('unknown')
   })
 
   it('detects busy when "esc to interrupt" footer marker is present', () => {
@@ -2542,5 +2539,83 @@ describe('a tmux-clipped BUSY footer is never read as idle (local, live 2.1.326 
 
   it('control: an idle footer clipped inside another item is still idle', () => {
     expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell · ↓ to mana…'))).toBe('idle')
+  })
+})
+
+describe('idle footer that ends in a background-shell count (VAGTECHIDLE1009)', () => {
+  // Customer report (Vág-Tech, 2026-10-09), seen on our own fleet the evening
+  // before: while a background shell is still running the footer can end in its
+  // count and nothing else. Before the fix this read 'unknown', paneLooksIdle
+  // never became true, and delivery plus the auto-restart idle guard stalled
+  // (6.5 and 18.5 hours of silence, 5570 dropped deliveries at the customer).
+  const SHELL_TAIL = '  ⏵⏵ bypass permissions on · 1 shell'
+  const IDLE_SHELL_TAIL = modeFooter(SHELL_TAIL)
+  const IDLE_SHELLS_TAIL = modeFooter('  ⏵⏵ bypass permissions on · 2 shells')
+  const IDLE_SHELL_MONITOR_TAIL = modeFooter('  ⏵⏵ accept edits on · 3 shells · 1 monitor')
+
+  it('reads a footer that ends in "· 1 shell" as idle', () => {
+    expect(detectPaneState(IDLE_SHELL_TAIL)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_SHELL_TAIL)).toBe(true)
+  })
+
+  it('reads the plural and the shells-plus-monitor tail as idle', () => {
+    expect(detectPaneState(IDLE_SHELLS_TAIL)).toBe('idle')
+    expect(detectPaneState(IDLE_SHELL_MONITOR_TAIL)).toBe('idle')
+  })
+
+  it('reads idle when blank rows follow the footer', () => {
+    expect(detectPaneState(IDLE_SHELL_TAIL + '\n\n\n')).toBe('idle')
+  })
+
+  it('does not let the shell-tail rule override a busy spinner', () => {
+    const busy = IDLE_SHELL_TAIL + '\n✻ Accomplishing… (3m 8s · ↓ 9.3k tokens · esc to interrupt)'
+    expect(detectPaneState(busy)).toBe('busy')
+  })
+
+  it('does not count the shell tail when it is not the last line (a log line in the scrollback)', () => {
+    const above = ['2026-07-29 log: bypass permissions on · 1 shell', '', SEP, '❯ ', SEP, '  some status line'].join('\n')
+    expect(detectPaneState(above)).toBe('unknown')
+  })
+
+  it('refuses a line that only looks like it (no count, or text after the count)', () => {
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · shell'))).toBe('unknown')
+    expect(detectPaneState(modeFooter('  the toggle was turned on · 1 shell later it broke'))).toBe('unknown')
+  })
+
+  it('a shell-tail line above a command-permission prompt does not hide the prompt', () => {
+    const pane = [
+      SHELL_TAIL,
+      ' Bash command',
+      '   rm -rf ./build',
+      '   Remove the build directory',
+      '',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No, and tell Claude what to do differently (esc)',
+      '',
+      ' Esc to cancel',
+    ].join('\n')
+    expect(isReadyForPrompt(pane)).toBe(false)
+    expect(detectsPermissionDialog(pane)).toBe(true)
+  })
+})
+
+// Live Claude Code 2.1.326 capture (bela-channels, 80 columns, idle, 2026-11-26): the build draws a right-aligned
+// "Debug" line UNDER the footer. A footer carrying a hint word ('↓ to manage') is found anywhere and reads idle.
+// A footer whose only tail is a shell count is accepted on the LAST line only (upstream 004c994d), so with the
+// Debug line below it reads 'unknown': the conservative side (no delivery), pinned so a change is deliberate.
+describe('2.1.326 Debug line under the footer (local, live capture)', () => {
+  const live = readFileSync(join(__dirname, 'fixtures', 'pane-2.1.326', 'idle-footer-debug-line-below.txt'), 'utf-8')
+
+  it('the live idle capture with a hint-word footer and the Debug line below reads idle', () => {
+    expect(live).toMatch(/↓ to manage\n\s+Debug/)
+    expect(detectPaneState(live)).toBe('idle')
+    expect(isReadyForPrompt(live)).toBe(true)
+  })
+
+  it('a shell-count-only footer with the Debug line below is not read idle (conservative)', () => {
+    const shellOnly = live.replace(/ · install gh for PR status · 1 shell · ↓ to manage/, ' · 1 shell')
+    expect(shellOnly).toMatch(/· 1 shell\n\s+Debug/)
+    expect(detectPaneState(shellOnly)).not.toBe('idle')
   })
 })

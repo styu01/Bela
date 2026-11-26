@@ -88,6 +88,12 @@ const FOOTER_TRUNCATED_RX = /(?:[A-Za-z][\w-]* ){1,3}on · [^\n]*·[^\n]*…\s*$
 // "esc to interrupt" therefore does NOT count as an idle footer.
 const BUSY_FOOTER_ITEM = 'esc to interrupt'
 
+// VAGTECHIDLE1009 (upstream 004c994d): an idle footer whose only tail is a background-shell count
+// ("⏵⏵ bypass permissions on · 3 shells", "... · 1 shell · 1 monitor") has none of the hint words IDLE_FOOTER_RX
+// needs, so it read 'unknown' while background work runs. Accepted ONLY as the last non-empty line. A busy footer
+// always carries "· esc to interrupt" after the count, so it never matches this end-anchored shape.
+const FOOTER_SHELL_TAIL_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · \d+ shells?(?: · \d+ monitors?)?\s*$/
+
 function isClippedIdleFooter(line: string): boolean {
   if (!FOOTER_TRUNCATED_RX.test(line)) return false
   const tail = line.replace(/…\s*$/, '').split('·').pop()!.trim()
@@ -104,7 +110,7 @@ function idleFooterIndex(lines: string[]): number {
   if (full >= 0) return full
   let last = lines.length - 1
   while (last >= 0 && lines[last].trim() === '') last--
-  return last >= 0 && isClippedIdleFooter(lines[last]) ? last : -1
+  return last >= 0 && (isClippedIdleFooter(lines[last]) || FOOTER_SHELL_TAIL_RX.test(lines[last])) ? last : -1
 }
 
 function hasIdleFooter(lines: string[]): boolean {
