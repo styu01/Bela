@@ -522,6 +522,10 @@ fi
 # source removes the phantom entirely. Inherited by every sub-agent via the tmux
 # global env set below.
 export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+# Same class, second source (upstream a8477d1f): the optional session-feedback survey ("How is Claude
+# doing this session?  1: Bad  2: Fine  3: Good  0: Dismiss") blocks on a keypress, and an unattended
+# agent never gets one. Verified on Claude Code 2.1.326: any non-empty value of this variable disables it.
+export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 CLAUDE="$(command -v claude)"
 TMUX="$(command -v tmux)"
@@ -551,7 +555,7 @@ TMUX="$(command -v tmux)"
 # the one place the pane-scrape recovery could still misread it (the v1.15.0
 # dim-strip catches it on the recovery side, but killing it at the SOURCE on MAIN
 # too closes the gap end-to-end). Parity with the sub-agent launch.
-MCP_BATCH_ENV="export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false MCP_SERVER_CONNECTION_BATCH_SIZE=10 MCP_CONNECTION_NONBLOCKING=1 MCP_TIMEOUT=60000 && "
+MCP_BATCH_ENV="export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 MCP_SERVER_CONNECTION_BATCH_SIZE=10 MCP_CONNECTION_NONBLOCKING=1 MCP_TIMEOUT=60000 && "
 
 # Resolve the main agent's model so we can pass --model explicitly. Without
 # --model claude-code falls back to its built-in default, which can drift
@@ -801,6 +805,7 @@ _tmux_set_auth_globals() {
   fi
   # Propagate the prompt-suggestion disable to every sub-agent tmux session.
   $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null || true
+  $TMUX set-environment -g CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY 1 2>/dev/null || true
 }
 
 # Producer-side respawn breadcrumb (SOAKRESPAWN819).  Define this before the
