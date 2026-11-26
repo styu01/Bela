@@ -117,3 +117,54 @@ describe('ensureAgentHooks does NOT seed tool-log-capture.py for MAIN_AGENT_ID (
     expect(cmds.filter((c) => c.includes('tool-log-capture.py')).length).toBe(1)
   })
 })
+
+// TOOLLOGVAKSIKER921 (upstream c5d7b2cd): a failing tool call fires
+// PostToolUseFailure and NOT PostToolUse, so with the hook under PostToolUse
+// alone failures were never logged (measured on this install 2026-11-26: 0 of
+// 1684 tool_call_log rows had success=0). Both registration surfaces carry the
+// failure event now, and the main-agent double-logging exclusion above covers it.
+function commandsOf(settings: Record<string, unknown>, event: string): string[] {
+  const hooks = settings.hooks as Record<string, unknown> | undefined
+  const entries = (hooks?.[event] ?? []) as Array<{ hooks?: Array<{ command?: string }> }>
+  return entries.flatMap((e) => (e.hooks ?? []).map((h) => h.command).filter((c): c is string => !!c))
+}
+const REPO_ROOT = join(__dirname, '..', '..')
+
+describe('tool-log-capture is registered under PostToolUseFailure as well', () => {
+  it('the template carries it with the same fail-open wrapper and matcher *', () => {
+    const tpl = JSON.parse(readFileSync(join(REPO_ROOT, 'templates', 'settings.json.template'), 'utf-8')) as Record<string, any>
+    const entries = (tpl.hooks?.PostToolUseFailure ?? []) as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>
+    const entry = entries.find((e) => (e.hooks ?? []).some((h) => (h.command ?? '').includes('tool-log-capture.py')))
+    expect(entry).toBeDefined()
+    expect(entry!.matcher).toBe('*')
+    const cmd = entry!.hooks!.find((h) => (h.command ?? '').includes('tool-log-capture.py'))!.command!
+    expect(cmd).toMatch(/^bash -c '\[ -f [^']*tool-log-capture\.py \] && exec python3 /)
+    expect(cmd).toMatch(/; exit 0'$/)
+  })
+
+  it('the repo-root project settings (the main agent session) carry it exactly once', () => {
+    const s = readSettings(join(REPO_ROOT, '.claude', 'settings.json'))
+    expect(commandsOf(s, 'PostToolUseFailure').filter((c) => c.includes('tool-log-capture.py'))).toHaveLength(1)
+    expect(commandsOf(s, 'PostToolUse').filter((c) => c.includes('tool-log-capture.py'))).toHaveLength(1)
+  })
+
+  it('a sub-agent gets it, an existing sub-agent with only PostToolUse gets the event added, idempotently', () => {
+    writeFileSync(subAgentSettingsPath(), JSON.stringify({
+      enabledPlugins: {},
+      hooks: { PostToolUse: [{ hooks: [{ type: 'command', command: 'echo other', timeout: 5 }] }] },
+    }))
+    ensureAgentHooks(SUB_AGENT)
+    ensureAgentHooks(SUB_AGENT)
+    const s = readSettings(subAgentSettingsPath())
+    expect(commandsOf(s, 'PostToolUseFailure').filter((c) => c.includes('tool-log-capture.py'))).toHaveLength(1)
+    expect(commandsOf(s, 'PostToolUse')).toContain('echo other')
+  })
+
+  it('the main agent does NOT get a second, template-sourced copy for the failure event either', () => {
+    writeFileSync(mainAgentSettingsPath(), JSON.stringify({ enabledPlugins: {} }))
+    ensureAgentHooks(MAIN_AGENT_ID)
+    const s = readSettings(mainAgentSettingsPath())
+    expect(commandsOf(s, 'PostToolUseFailure').some((c) => c.includes('tool-log-capture.py'))).toBe(false)
+    expect(commandsOf(s, 'PostToolUse').some((c) => c.includes('tool-log-capture.py'))).toBe(false)
+  })
+})

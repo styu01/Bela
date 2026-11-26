@@ -231,12 +231,18 @@ export function ensureAgentHooks(name: string): boolean {
   // SECOND, differently-worded copy -- double-logging every tool call. Strip
   // the template's copy for the main agent only; every sub-agent (which has
   // no such hand-maintained duplicate) still gets it normally.
-  if (name === MAIN_AGENT_ID && Array.isArray(tplHooks.PostToolUse)) {
-    const filtered = (tplHooks.PostToolUse as HookEntry[])
-      .map((entry) => ({ ...entry, hooks: (entry.hooks ?? []).filter((h) => !h.command?.includes('tool-log-capture.py')) }))
-      .filter((entry) => (entry.hooks?.length ?? 0) > 0)
-    if (filtered.length > 0) tplHooks.PostToolUse = filtered
-    else delete tplHooks.PostToolUse
+  // TOOLLOGVAKSIKER921: the same holds for PostToolUseFailure, which the repo-root
+  // file now also carries for the main agent (upstream avoids this with a
+  // main-agent hook-write refusal that this fork does not have).
+  if (name === MAIN_AGENT_ID) {
+    for (const event of ['PostToolUse', 'PostToolUseFailure'] as const) {
+      if (!Array.isArray(tplHooks[event])) continue
+      const filtered = (tplHooks[event] as HookEntry[])
+        .map((entry) => ({ ...entry, hooks: (entry.hooks ?? []).filter((h) => !h.command?.includes('tool-log-capture.py')) }))
+        .filter((entry) => (entry.hooks?.length ?? 0) > 0)
+      if (filtered.length > 0) tplHooks[event] = filtered
+      else delete tplHooks[event]
+    }
   }
   if (existing.hooks) {
     // Merge strategy:
