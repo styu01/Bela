@@ -408,6 +408,35 @@ def _segment_is_send(toks, depth: int) -> bool:
     return any(_head_is_send(h, depth) for h in _command_heads(toks))
 
 
+def _shell_command_string(rest):
+    """The command string of `sh|bash|zsh|dash [options] -c STRING`, or None (SHCLUSTER1126).
+
+    The shell takes the first NON-option argument as the string once -c was given anywhere among the options, and
+    -c can sit inside a cluster ('-lc', '-ec', '-xc'). '-o NAME' / '+o NAME' / '-O NAME' / '+O NAME' take a value,
+    '--long' options stand alone, '--' ends the options. Before this, only a bare '-c' token followed directly by
+    the string was seen: 'bash -lc "sendmail x"' and 'sh -ec "sendmail x"' passed both gates while bash ran them.
+    Mirrored in email-send-gate.mjs (shellCommandString)."""
+    saw_c, i = False, 0
+    while i < len(rest):
+        t = rest[i]
+        if t == "--":
+            i += 1
+            break
+        if t in ("-o", "+o", "-O", "+O"):
+            i += 2
+            continue
+        if t.startswith("--"):
+            i += 1
+            continue
+        if len(t) > 1 and t[0] in "-+":
+            if t[0] == "-" and "c" in t[1:]:
+                saw_c = True
+            i += 1
+            continue
+        break
+    return rest[i] if saw_c and i < len(rest) else None
+
+
 def _head_is_send(toks, depth: int) -> bool:
     if toks is None:  # the depth bound was hit on a wrapper: audit it
         return True
@@ -427,17 +456,19 @@ def _head_is_send(toks, depth: int) -> bool:
             return True
     # burkolo hejj: a -c string-argumentum maga is parancs -- rekurzio
     if _WRAPPER_SHELL.match(prog):
-        for i, t in enumerate(rest):
-            if t == "-c" and i + 1 < len(rest):
-                # SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
-                # "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash
-                # runs the send). A non-empty command string at the bound is now refused (fail-closed), like a
-                # wrapper at the head-depth bound and an eval at the same bound.
-                if depth >= 3:
-                    if rest[i + 1].strip():
-                        return True
-                elif is_send_invocation(rest[i + 1], _depth=depth + 1):
+        # SHCLUSTER1126: the command string is located the way the shell does it (_shell_command_string), so an
+        # option cluster that carries c ('bash -lc ...', 'sh -ec ...') counts; it used to need a bare '-c' token.
+        cmd_string = _shell_command_string(rest)
+        if cmd_string is not None:
+            # SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
+            # "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash
+            # runs the send). A non-empty command string at the bound is now refused (fail-closed), like a
+            # wrapper at the head-depth bound and an eval at the same bound.
+            if depth >= 3:
+                if cmd_string.strip():
                     return True
+            elif is_send_invocation(cmd_string, _depth=depth + 1):
+                return True
     # interpreter kod-string: python -c / node -e / --eval, ami kuldest hiv
     if _PYTHON.match(prog) or _NODEISH.match(prog):
         for i, t in enumerate(rest):

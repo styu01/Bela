@@ -710,6 +710,66 @@
       "name": "SHDEPTH1126: control: an empty command string at the bound runs nothing",
       "cmd": "bash -c 'bash -c '\"'\"'bash -c '\"'\"'\"'\"'\"'\"'\"'\"'bash -c '\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"''\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"''\"'\"'\"'\"'\"'\"'\"'\"''\"'\"''",
       "expected": false
+    },
+    {
+      "name": "SHCLUSTER1126: an option cluster carrying c: -lc",
+      "cmd": "bash -lc 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: an option cluster carrying c: -ec",
+      "cmd": "sh -ec 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: an option cluster carrying c: -xc",
+      "cmd": "bash -xc 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: an option after -c: the string is the first non-option argument",
+      "cmd": "bash -c -x 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: -O takes a value before -c",
+      "cmd": "bash -O extglob -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: a long option before -c",
+      "cmd": "bash --norc -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: a +option before -c",
+      "cmd": "bash +x -c 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "SHCLUSTER1126: control: a cluster with a non-sender",
+      "cmd": "bash -lc 'ls'",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTER1126: control: a cluster whose string only names the sender",
+      "cmd": "bash -lc 'echo sendmail'",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTER1126: control: a cluster without c runs a script, not a string",
+      "cmd": "bash -l script.sh",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTER1126: control: -c after the script name is the script's argument",
+      "cmd": "bash script.sh -c 'sendmail a@b.hu'",
+      "expected": false
+    },
+    {
+      "name": "SHCLUSTER1126: control: only the FIRST non-option argument is the string (bash runs ls)",
+      "cmd": "sh -c 'ls' -c 'sendmail a@b.hu'",
+      "expected": false
     }
   ]
 }

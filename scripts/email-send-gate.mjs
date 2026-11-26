@@ -231,6 +231,28 @@ function segmentIsSend(toksIn, depth) {
   return commandHeads(toksIn).some((h) => headIsSend(h, depth))
 }
 
+// SHCLUSTER1126: the command string of `sh|bash|zsh|dash [options] -c STRING`, or null. The shell takes the
+// first NON-option argument as the string once -c was given anywhere among the options, and -c can sit inside a
+// cluster ('-lc', '-ec', '-xc'). '-o NAME' / '+o NAME' / '-O NAME' / '+O NAME' take a value, '--long' options
+// stand alone, '--' ends the options. Mirrors _shell_command_string in outgoing-copy-gate.py.
+function shellCommandString(rest) {
+  let sawC = false
+  let i = 0
+  while (i < rest.length) {
+    const t = rest[i]
+    if (t === '--') { i++; break }
+    if (t === '-o' || t === '+o' || t === '-O' || t === '+O') { i += 2; continue }
+    if (t.startsWith('--')) { i++; continue }
+    if (t.length > 1 && (t[0] === '-' || t[0] === '+')) {
+      if (t[0] === '-' && t.slice(1).includes('c')) sawC = true
+      i++
+      continue
+    }
+    break
+  }
+  return sawC && i < rest.length ? rest[i] : null
+}
+
 function headIsSend(toks, depth) {
   if (toks === null) return true // a wrapper at the depth bound: the real command is out of sight, refuse
   if (!toks.length) return false
@@ -244,14 +266,16 @@ function headIsSend(toks, depth) {
     if (isSendInvocation(rest.join(' '), depth + 1)) return true
   }
   if (WRAPPER_SHELL.test(prog)) {
-    for (let i = 0; i < rest.length; i++) {
-      if (rest[i] !== '-c' || !rest[i + 1]) continue
+    // SHCLUSTER1126: the command string is located the way the shell does it (shellCommandString), so an
+    // option cluster that carries c ('bash -lc ...', 'sh -ec ...') counts; it used to need a bare '-c' token.
+    const cmdString = shellCommandString(rest)
+    if (cmdString !== null) {
       // SHDEPTH1126: past the recursion bound the command string is out of sight. It used to be read as
       // "not a send", so four nested `bash -c` levels around sendmail passed both gates (measured: bash runs
       // the send). A non-empty command string at the bound is now refused (fail-closed), like a wrapper at the
       // head-depth bound and an eval at the same bound.
-      if (depth >= 3) { if (rest[i + 1].trim()) return true }
-      else if (isSendInvocation(rest[i + 1], depth + 1)) return true
+      if (depth >= 3) { if (cmdString.trim()) return true }
+      else if (isSendInvocation(cmdString, depth + 1)) return true
     }
   }
   if (PYTHON.test(prog) || NODEISH.test(prog)) {
