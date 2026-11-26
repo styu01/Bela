@@ -217,6 +217,15 @@ def _basename(tok: str) -> str:
     return tok.rsplit("/", 1)[-1]
 
 
+# REDIRHEAD1126: placeholders the mask puts in place of the '&' / '|' that belong to a redirection, and the shape of
+# a redirection token at command position: optional fd (or {var}, or the '&' of '&>'), the operator, and the target
+# either attached or as the NEXT token. bash applies leading redirections and runs the rest as the command:
+# '2>&1 sendmail x', '</dev/null sendmail x', '>/dev/null sendmail x', '&>/dev/null sendmail x' all send.
+_REDIR_AMP = "\x01"
+_REDIR_BAR = "\x02"
+_REDIR_RX = re.compile(r"^(?:\d+|\{[A-Za-z_]\w*\}|\x01)?(?:<<<|<<-?|<>|>>|>\x02|>\x01|<\x01|>|<)(.*)$", re.S)
+
+
 def _mask_subshell_markers(cmd: str) -> str:
     """Idezojelen KIVULI ujsor/`$(`/backtick -> `;` szeparator, hogy a shlex
     szegmens-hatarkent lassa; idezojelen BELUL a szoveg erintetlen (tartalom).
@@ -272,6 +281,15 @@ def _mask_subshell_markers(cmd: str) -> str:
         if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
             parens.append("s")
             out.append(";"); prev = i + 1; i += 2; continue
+        # REDIRHEAD1126: the '&' of '>&' / '<&' / '&>' and the '|' of '>|' belong to a REDIRECTION, not to a list
+        # operator or a pipe. Left as is, shlex split '2>&1 sendmail x' into ['2>'] and ['1', 'sendmail', 'x'], so
+        # the '1' became the program. They stay inside the redirection token as _REDIR_AMP / _REDIR_BAR.
+        if ch in "<>" and i + 1 < n and cmd[i + 1] == "&":
+            out.append(ch + _REDIR_AMP); prev = i + 1; i += 2; continue
+        if ch == "&" and i + 1 < n and cmd[i + 1] == ">":
+            out.append(_REDIR_AMP); prev = i; i += 1; continue
+        if ch == ">" and i + 1 < n and cmd[i + 1] == "|":
+            out.append(">" + _REDIR_BAR); prev = i + 1; i += 2; continue
         if ch == "(":
             parens.append("p")
         elif ch == ")" and parens and parens.pop() == "s":
@@ -349,8 +367,16 @@ _HEAD_DEPTH = 8
 def _command_heads(toks, _d: int = 0, _positionals_done: bool = False):
     """Every token list that can be the real command of this segment, after the
     leading assignments, command-position keywords and wrappers are stepped over."""
-    while toks and (_ENV_ASSIGN.match(toks[0]) or toks[0] in _CMD_POSITION_KEYWORDS):
-        toks = toks[1:]
+    while toks:
+        if _ENV_ASSIGN.match(toks[0]) or toks[0] in _CMD_POSITION_KEYWORDS:
+            toks = toks[1:]
+            continue
+        # REDIRHEAD1126: a leading redirection is stepped over, with its target when that is the next token.
+        r = _REDIR_RX.match(toks[0])
+        if r:
+            toks = toks[2:] if r.group(1) == "" else toks[1:]
+            continue
+        break
     if not toks:
         return [toks]
     w = _basename(toks[0])

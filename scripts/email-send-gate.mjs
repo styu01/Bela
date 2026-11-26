@@ -93,6 +93,14 @@ const codeStringSends = (code) => CODE_SEND.test(code) || (CODE_EXECISH.test(cod
 
 // Unquoted newline / backtick / `$(` become segment separators; quoted text is
 // untouched (it is content). Tracks quote state by hand -- no shell involved.
+// REDIRHEAD1126: placeholders the mask puts in place of the '&' / '|' that belong to a redirection.
+const REDIR_AMP = '\u0001'
+const REDIR_BAR = '\u0002'
+// A redirection token at command position: optional fd (or {var}, or the '&' of '&>'), the operator, and the
+// target either attached or as the NEXT token. bash applies leading redirections and runs the rest as the command:
+// '2>&1 sendmail x', '</dev/null sendmail x', '>/dev/null sendmail x', '&>/dev/null sendmail x' all send.
+const REDIR_RX = /^(?:\d+|\{[A-Za-z_]\w*\}|\u0001)?(?:<<<|<<-?|<>|>>|>\u0002|>\u0001|<\u0001|>|<)(.*)$/s
+
 export function maskSubshellMarkers(cmd) {
   let out = ''
   let q = null
@@ -113,6 +121,12 @@ export function maskSubshellMarkers(cmd) {
     if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; continue }
     if (ch === '\n' || ch === '`') { out += ';'; continue }
     if (ch === '$' && cmd[i + 1] === '(') { out += ';'; i++; continue }
+    // REDIRHEAD1126: the '&' of '>&' / '<&' / '&>' and the '|' of '>|' belong to a REDIRECTION, not to a list
+    // operator or a pipe. Left as is, the tokenizer split '2>&1 sendmail x' into ['2>'] and ['1', 'sendmail', 'x'],
+    // so the '1' became the program. They are kept inside the redirection token as REDIR_AMP / REDIR_BAR.
+    if ((ch === '>' || ch === '<') && cmd[i + 1] === '&') { out += ch + REDIR_AMP; i++; continue }
+    if (ch === '&' && cmd[i + 1] === '>') { out += REDIR_AMP; continue }
+    if (ch === '>' && cmd[i + 1] === '|') { out += ch + REDIR_BAR; i++; continue }
     out += ch
   }
   return out
@@ -187,7 +201,13 @@ const HEAD_DEPTH = 8
 
 function commandHeads(toksIn, d = 0, positionalsDone = false) {
   let toks = toksIn
-  while (toks.length && (ENV_ASSIGN.test(toks[0]) || CMD_POSITION_KEYWORDS.has(toks[0]))) toks = toks.slice(1)
+  for (;;) {
+    if (toks.length && (ENV_ASSIGN.test(toks[0]) || CMD_POSITION_KEYWORDS.has(toks[0]))) { toks = toks.slice(1); continue }
+    // REDIRHEAD1126: a leading redirection is stepped over, with its target when that is the next token.
+    const r = toks.length ? REDIR_RX.exec(toks[0]) : null
+    if (r) { toks = toks.slice(r[1] === '' ? 2 : 1); continue }
+    break
+  }
   if (!toks.length) return [toks]
   const w = basename(toks[0])
   if (d >= HEAD_DEPTH) return (WRAPPERS.has(w) || w === 'function' || w === 'coproc') ? [null] : [toks]

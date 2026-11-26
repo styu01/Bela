@@ -770,6 +770,91 @@
       "name": "SHCLUSTER1126: control: only the FIRST non-option argument is the string (bash runs ls)",
       "cmd": "sh -c 'ls' -c 'sendmail a@b.hu'",
       "expected": false
+    },
+    {
+      "name": "REDIRHEAD1126: a leading 2>&1",
+      "cmd": "2>&1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading </dev/null",
+      "cmd": "</dev/null sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading >/dev/null",
+      "cmd": ">/dev/null sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading &>/dev/null",
+      "cmd": "&>/dev/null sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading > with its target as the next token",
+      "cmd": "> out.txt sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading &>>",
+      "cmd": "&>>log.txt sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading >| (clobber)",
+      "cmd": ">|out.txt sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a leading here-string",
+      "cmd": "<<<x sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: two leading redirections",
+      "cmd": "2>/dev/null 1>&2 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a redirection between a wrapper and the sender",
+      "cmd": "env >/dev/null sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a redirection after an assignment",
+      "cmd": "A=1 2>/dev/null sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: a redirection-led segment after &&",
+      "cmd": "cd /tmp && 2>&1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "REDIRHEAD1126: control: a redirection in front of a non-sender",
+      "cmd": "2>&1 echo sendmail",
+      "expected": false
+    },
+    {
+      "name": "REDIRHEAD1126: control: sendmail as the redirection TARGET",
+      "cmd": "> sendmail ls",
+      "expected": false
+    },
+    {
+      "name": "REDIRHEAD1126: control: a trailing >&2 is no list operator",
+      "cmd": "ls >&2",
+      "expected": false
+    },
+    {
+      "name": "REDIRHEAD1126: control: a trailing &> is no background operator",
+      "cmd": "cmd &>/dev/null; ls",
+      "expected": false
+    },
+    {
+      "name": "REDIRHEAD1126: control: a real background & after a &> redirection",
+      "cmd": "ls &>/dev/null & echo sendmail",
+      "expected": false
     }
   ]
 }
