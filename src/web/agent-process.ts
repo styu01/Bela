@@ -25,6 +25,7 @@ import {
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { beginRestart, endRestart } from './restart-lock.js'
+import { protectTrailingSemicolon } from './tmux-keys.js'
 import { agentDir, listAgentNames, readAgentModel, readAgentEffort, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
 import { resolveAgentConfigDir } from './claude-plans.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
@@ -2100,6 +2101,41 @@ async function discardPlaceholderBuffer(session: string, host: string | null = n
   return finalPane != null && !detectsPastePlaceholder(finalPane)
 }
 
+// Cap on how many extra characters a single chunk boundary may absorb while
+// sliding past a leading '-'. Keeps a long run of dashes from inflating one
+// chunk past the paste-detector threshold.
+export const TMUX_CHUNK_MAX_SLIDE = 8
+
+// One `send-keys -l` chunk (and the index it ends at) for streaming `oneLine`
+// into a pane from `start`. Exported so the two tmux CLI-argument quirks it
+// handles can be tested without a live pane:
+//   - a chunk that STARTS with '-' parses as a flag ("unknown flag -s" on
+//     Hungarian suffixes like -szal/-vel/-ban). The boundary slides up to
+//     `maxSlide` chars past a '-' that would start the next chunk; if the cap is
+//     reached, a space is prepended (unchanged behaviour).
+//   - a chunk that ENDS with ';' loses that ';' (BORITEKVESZ927, upstream
+//     32ee1eea; reproduced here on tmux 3.6). Upstream slides the boundary and,
+//     when it cannot (a prompt-final ';', or a run of more than 8 ';'), appends
+//     a space -- which changes the text. Local adaptation: the chunk goes
+//     through protectTrailingSemicolon instead (a trailing ';' becomes '\;',
+//     tmux consumes the backslash), so the typed text is byte-for-byte the
+//     prompt, wherever the boundary falls.
+export function computeTmuxChunk(
+  oneLine: string,
+  start: number,
+  chunkSize: number,
+  maxSlide: number = TMUX_CHUNK_MAX_SLIDE,
+): { chunk: string; end: number } {
+  let end = Math.min(start + chunkSize, oneLine.length)
+  let slide = 0
+  while (end < oneLine.length && oneLine[end] === '-' && slide < maxSlide) {
+    end++; slide++
+  }
+  let chunk = oneLine.slice(start, end)
+  if (chunk.startsWith('-')) chunk = ' ' + chunk
+  return { chunk: protectTrailingSemicolon(chunk), end }
+}
+
 // Send text to a tmux session as if typed at the prompt.
 // Uses execFileSync so callers can pass raw text -- tmux send-keys -l treats
 // the argument as literal characters, bypassing shell quoting entirely.
@@ -2221,25 +2257,12 @@ export async function sendPromptToSession(
   // Stream oneLine into the pane as CHUNK-sized literal send-keys writes,
   // followed by a submitting Enter. Extracted as a closure so the
   // clear-and-resend recovery path below can replay the EXACT same byte
-  // stream after a Ctrl-C, rather than duplicating the dash-slide logic.
-  //
-  // tmux send-keys doesn't support `--` option-terminator, so a chunk that
-  // starts with '-' parses as a flag ("command send-keys: unknown flag -s"
-  // on Hungarian suffixes like -szal/-vel/-ban). Slide the boundary up to a
-  // few chars past any '-' that lands at the start of the next chunk. Capped
-  // so a long run of dashes doesn't inflate one chunk past the paste-detector
-  // threshold; if the cap is reached, prepend a space to the chunk instead.
-  const MAX_SLIDE = 8
+  // stream after a Ctrl-C (see computeTmuxChunk for the two chunk-boundary
+  // quirks it handles).
   const sendChunks = async (): Promise<void> => {
     let i = 0
     while (i < oneLine.length) {
-      let end = Math.min(i + CHUNK, oneLine.length)
-      let slide = 0
-      while (end < oneLine.length && oneLine[end] === '-' && slide < MAX_SLIDE) {
-        end++; slide++
-      }
-      let chunk = oneLine.slice(i, end)
-      if (chunk.startsWith('-')) chunk = ' ' + chunk
+      const { chunk, end } = computeTmuxChunk(oneLine, i, CHUNK)
       runTmux(host, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
       i = end
       if (i < oneLine.length) await delay(30)
