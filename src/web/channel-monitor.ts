@@ -33,7 +33,7 @@ import {
   shSingleQuote,
 } from './agent-process.js'
 import { beginRestart, endRestart, isRestartInFlight } from './restart-lock.js'
-import { mainCustomProviderLaunchEnv } from './main-custom-provider-env.js'
+import { mainCustomProviderLaunchEnv, MainCustomProviderBroken } from './main-custom-provider-env.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence, reapForeignMainPollers } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
@@ -1293,7 +1293,7 @@ export function createMainChannelsSession(): MainSessionCreateResult {
 // but starts a clean session -- exactly what scripts/channels.sh does -- so a
 // wedged plugin gets a brand-new process even on pure-tmux installs. Distinct
 // from the stage-3 resume (which keeps --continue) by clearing session state.
-function respawnMarveenSessionFresh(): boolean {
+function respawnMarveenSessionFresh(): { ok: boolean; error?: string } {
   const provider = getProvider(getMainAgentProvider())
   try {
     // HOSTINGERRETEST1125 (upstream 4a777cc9 + Samu's review, ported): the custom provider env is decided FIRST,
@@ -1329,7 +1329,7 @@ function respawnMarveenSessionFresh(): boolean {
     // leaving the channel offline until manual intervention.
     schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
     writeRespawnStamp() // coordinate with the systemd-timer watchdog (covers the keepalive path too)
-    return true
+    return { ok: true }
   } catch (err) {
     // When the pane/session is entirely GONE (not just the claude process
     // wedged), respawn-pane fails with 'can't find pane' and there is nothing to
@@ -1347,10 +1347,17 @@ function respawnMarveenSessionFresh(): boolean {
         'Fresh respawn: pane gone -- falling back to full session recreate (channels.sh)',
       )
       const result = createMainChannelsSession()
-      return result === 'started' || result === 'grace'
+      return { ok: result === 'started' || result === 'grace' }
+    }
+    // RESPAWNREASON1125 (upstream 55169d53, ported): a custom provider that cannot be used stopped the respawn before
+    // anything was killed; the caller (the dashboard restart) names that, instead of a generic respawn-pane failure.
+    // The message names the provider and the missing piece (a vault key's id, never its value).
+    if (err instanceof MainCustomProviderBroken) {
+      logger.error({ err: err.message }, 'Fresh session respawn refused: the main agent custom provider cannot be used')
+      return { ok: false, error: `restart refused, the main agent's running session is kept: ${err.message}` }
     }
     logger.error({ err }, 'Fresh session respawn failed')
-    return false
+    return { ok: false }
   }
 }
 
@@ -1435,11 +1442,12 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   // tmux server and with it EVERY agent session, not just the main one.
   // respawn-pane replaces only the claude process in the main channels pane,
   // leaving the server and all other sessions intact.
-  if (respawnMarveenSessionFresh()) {
+  const fresh = respawnMarveenSessionFresh()
+  if (fresh.ok) {
     marveenLastHardRestart = Date.now()
     return { ok: true }
   }
-  return { ok: false, error: 'hard restart failed: tmux respawn-pane failed' }
+  return { ok: false, error: fresh.error ?? 'hard restart failed: tmux respawn-pane failed' }
 }
 
 // Escalate a main channel input that survived the full soft recovery to a hard
@@ -1845,7 +1853,7 @@ function checkMainKeepaliveStaleness(): void {
   const ageMin = Math.round((ageMs ?? 0) / 60000)
   logger.warn({ ageMs, paneState }, 'Channel keep-alive stale -- main session likely wedged/deaf, respawning via respawn-pane')
   sendAlert(`⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
-  if (respawnMarveenSessionFresh()) {
+  if (respawnMarveenSessionFresh().ok) {
     marveenLastKeepaliveRespawn = now
     // Suppress the process-down handler during the respawn window (reuses the
     // existing hard-restart grace) so the two recovery paths don't collide.
