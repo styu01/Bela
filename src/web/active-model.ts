@@ -65,29 +65,80 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
       cache.set(cacheKey, { value: null, expiresAt: now + TTL_MS })
       return null
     }
-    const content = readFileSync(join(dir, jsonls[0].f), 'utf-8')
-    const lines = content.split('\n')
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim()
-      if (!line) continue
-      try {
-        const entry = JSON.parse(line)
-        const msg = entry?.message
-        const model = msg?.model
-        if (typeof model !== 'string' || model.startsWith('<')) continue
-        if (sinceUnixSec !== undefined) {
-          const ts = entry?.timestamp
-          if (typeof ts !== 'string') continue
-          const lineUnix = Math.floor(new Date(ts).getTime() / 1000)
-          if (!Number.isFinite(lineUnix) || lineUnix < sinceUnixSec) continue
-        }
-        value = model
-        break
-      } catch { /* skip malformed JSON line */ }
-    }
+    value = activeModelFromContent(readFileSync(join(dir, jsonls[0].f), 'utf-8'), sinceUnixSec)
   } catch { /* fall through */ }
   cache.set(cacheKey, { value, expiresAt: now + TTL_MS })
   return value
+}
+
+// Pure: the model of the last assistant line of a transcript's content (optionally not older than
+// sinceUnixSec). Shared by the directory read above and the own-file read below, so both apply the
+// exact same rule.
+export function activeModelFromContent(content: string, sinceUnixSec?: number): string | null {
+  const lines = content.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (!line) continue
+    try {
+      const entry = JSON.parse(line)
+      const msg = entry?.message
+      const model = msg?.model
+      if (typeof model !== 'string' || model.startsWith('<')) continue
+      if (sinceUnixSec !== undefined) {
+        const ts = entry?.timestamp
+        if (typeof ts !== 'string') continue
+        const lineUnix = Math.floor(new Date(ts).getTime() / 1000)
+        if (!Number.isFinite(lineUnix) || lineUnix < sinceUnixSec) continue
+      }
+      return model
+    } catch { /* skip malformed JSON line */ }
+  }
+  return null
+}
+
+// Pure: input + cache_read + cache_creation tokens of the last line carrying a usage.
+export function contextTokensFromContent(content: string): number | null {
+  const lines = content.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (!line) continue
+    try {
+      const u = JSON.parse(line)?.message?.usage
+      if (u && typeof u === 'object') {
+        const inp = Number(u.input_tokens) || 0
+        const cr = Number(u.cache_read_input_tokens) || 0
+        const cc = Number(u.cache_creation_input_tokens) || 0
+        const total = inp + cr + cc
+        if (total > 0) return total
+      }
+    } catch { /* skip malformed JSON line */ }
+  }
+  return null
+}
+
+// STUCKOWNSID1127 follow-up (BELA msg 6173): read ONE known transcript (the main session's proven own
+// file) instead of the newest file of a shared project dir. Memoised on (path, mtime): the guard asks
+// every tick, the main transcript runs to tens of MB, and an unchanged file has an unchanged answer.
+const ownFileMemo = new Map<string, { mtimeMs: number; tokens: number | null; model: string | null }>()
+function ownFileFacts(path: string): { tokens: number | null; model: string | null } | null {
+  try {
+    const mtimeMs = statSync(path).mtimeMs
+    const hit = ownFileMemo.get(path)
+    if (hit && hit.mtimeMs === mtimeMs) return hit
+    const content = readFileSync(path, 'utf-8')
+    const facts = { mtimeMs, tokens: contextTokensFromContent(content), model: activeModelFromContent(content) }
+    if (ownFileMemo.size > 8) ownFileMemo.clear()
+    ownFileMemo.set(path, facts)
+    return facts
+  } catch {
+    return null
+  }
+}
+export function readContextTokensFromFile(path: string): number | null {
+  return ownFileFacts(path)?.tokens ?? null
+}
+export function readActiveModelFromFile(path: string): string | null {
+  return ownFileFacts(path)?.model ?? null
 }
 
 const ctxCache = new Map<string, { value: number | null; expiresAt: number }>()
@@ -177,22 +228,7 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
         .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
         .sort((a, b) => b.mtime - a.mtime)
       if (jsonls.length > 0) {
-        const content = readFileSync(join(dir, jsonls[0].f), 'utf-8')
-        const lines = content.split('\n')
-        for (let i = lines.length - 1; i >= 0; i--) {
-          const line = lines[i].trim()
-          if (!line) continue
-          try {
-            const u = JSON.parse(line)?.message?.usage
-            if (u && typeof u === 'object') {
-              const inp = Number(u.input_tokens) || 0
-              const cr = Number(u.cache_read_input_tokens) || 0
-              const cc = Number(u.cache_creation_input_tokens) || 0
-              const total = inp + cr + cc
-              if (total > 0) { value = total; break }
-            }
-          } catch { /* skip malformed JSON line */ }
-        }
+        value = contextTokensFromContent(readFileSync(join(dir, jsonls[0].f), 'utf-8'))
       }
     }
   } catch { /* fall through */ }

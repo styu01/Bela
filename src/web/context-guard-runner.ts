@@ -15,8 +15,8 @@ import {
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation } from '../pane-state.js'
-import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readLastTurnActivityMs } from './active-model.js'
-import { mainSessionTranscriptMtime, readOwnSessionTranscript, tmuxPanePid, type OwnTranscript } from './main-session-transcript.js'
+import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readLastTurnActivityMs, readContextTokensFromFile, readActiveModelFromFile } from './active-model.js'
+import { mainSessionTranscriptMtime, readOwnSessionTranscript, tmuxPanePid, provenMainSession, type OwnTranscript } from './main-session-transcript.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import {
   readPendingResumes,
@@ -329,9 +329,48 @@ export async function reportResumeGiveUp(name: string, running = true): Promise<
   }
 }
 
+// STUCKOWNSID1127 follow-up (BELA msg 6173 item 2): the main agent's context SIZE and MODEL come from
+// its own transcript too. The directory read took the newest file of the shared marveen-root project
+// dir, so a foreign session (the owner's CLI, an sdk-cli run) was measured as BELA: its tokens, its
+// model, its window. A foreign session near ITS OWN 200k window would read as BELA at >=85-97% and
+// trigger a FALSE handoff/restart -- worse than a late one. And observedHighwater() keys one model per
+// agent, so a foreign reading under another model also overwrote BELA's learned window.
+// Measured on the two foreign overlaps of the last 14 days: 11-24 20:27-20:28 UTC (sdk-cli,
+// claude-haiku-4-5, up to 60251 tokens -> 30% of a 200k window, while BELA's own read 101718 on
+// claude-sonnet-5-5, ~10% of 1M) and 11-26 08:45 UTC (sdk-cli, claude-sonnet-5-5, 84944 -> ~8.5%,
+// BELA's own 112619, ~11%): neither crossed prepPct 0.85, so no false restart and no missed one in
+// those windows -- but each wrote the foreign model into BELA's highwater entry. The danger case is a
+// foreign 200k-window session above ~170k tokens.
+// Proven own file -> both values from it, NO fallback when it has no usage yet (a fresh own session
+// is unmeasurable, as before). Not provable -> the old directory reads.
+export interface GuardReadDeps {
+  ownPath(): string | null
+  tokensFromFile(path: string): number | null
+  modelFromFile(path: string): string | null
+  tokensFromDir(workingDir: string, configDir?: string): number | null
+  modelFromDir(workingDir: string): string | null
+}
+// Lazy wrappers on purpose: a test that mocks active-model.js without these exports must still load
+// this module (a direct reference here would be read at import time).
+const LIVE_GUARD_READ_DEPS: GuardReadDeps = {
+  ownPath: () => provenMainSession(MAIN_CHANNELS_SESSION, PROJECT_ROOT).resume?.transcriptPath ?? null,
+  tokensFromFile: (path) => readContextTokensFromFile(path),
+  modelFromFile: (path) => readActiveModelFromFile(path),
+  tokensFromDir: (workingDir, configDir) => readContextTokensFromProjectDir(workingDir, configDir),
+  modelFromDir: (workingDir) => readActiveModelFromProjectDir(workingDir),
+}
+/** The main agent's context tokens + model, read from ONE source (own file, else the directory). */
+export function readMainGuardFacts(deps: GuardReadDeps = LIVE_GUARD_READ_DEPS): { tokens: number | null; model: string | null; source: 'own' | 'dir' } {
+  const own = deps.ownPath()
+  if (own) return { tokens: deps.tokensFromFile(own), model: deps.modelFromFile(own), source: 'own' }
+  return { tokens: deps.tokensFromDir(PROJECT_ROOT, configDirFor(MAIN_AGENT_ID)), model: deps.modelFromDir(PROJECT_ROOT), source: 'dir' }
+}
+
 /** Raw observed context size (tokens) for the idle-flush tier's absolute threshold. */
 function measureContextTokens(name: string): number | null {
-  const tokens = readContextTokensFromProjectDir(workingDirFor(name), configDirFor(name))
+  const tokens = name === MAIN_AGENT_ID && workingDirFor(name) === PROJECT_ROOT
+    ? readMainGuardFacts().tokens
+    : readContextTokensFromProjectDir(workingDirFor(name), configDirFor(name))
   return tokens !== null && tokens > 0 ? tokens : null
 }
 
@@ -353,9 +392,9 @@ export interface GuardTranscriptDeps {
   dir(workingDir: string, configDir?: string): number | null
 }
 const LIVE_GUARD_TRANSCRIPT_DEPS: GuardTranscriptDeps = {
-  panePid: tmuxPanePid,
-  own: readOwnSessionTranscript,
-  dir: readTranscriptMtimeFromProjectDir,
+  panePid: (session) => tmuxPanePid(session),
+  own: (pid, root) => readOwnSessionTranscript(pid, root),
+  dir: (workingDir, configDir) => readTranscriptMtimeFromProjectDir(workingDir, configDir),
 }
 export function guardTranscriptMtime(name: string, deps: GuardTranscriptDeps = LIVE_GUARD_TRANSCRIPT_DEPS): number | null {
   const workingDir = workingDirFor(name)
@@ -379,15 +418,21 @@ function measureIdleMs(name: string, nowMs: number): number | null {
 function measurePct(name: string, cfgLimit: number | null): number | null {
   const workingDir = workingDirFor(name)
   const configDir = configDirFor(name)
-  const tokens = readContextTokensFromProjectDir(workingDir, configDir)
+  const isMain = name === MAIN_AGENT_ID && workingDir === PROJECT_ROOT
+  // The main agent: tokens and model from the SAME source (own file, else the directory) -- see
+  // readMainGuardFacts. Sub-agents unchanged.
+  const mainFacts = isMain ? readMainGuardFacts() : null
+  const tokens = mainFacts ? mainFacts.tokens : readContextTokensFromProjectDir(workingDir, configDir)
   if (tokens === null || tokens <= 0) return null
   let limit: number
   if (cfgLimit) {
     limit = cfgLimit
   } else {
-    const model = (name === MAIN_AGENT_ID
-      ? readActiveModelFromProjectDir(PROJECT_ROOT)
-      : readAgentModel(name)) ?? ''
+    const model = (mainFacts
+      ? mainFacts.model
+      : name === MAIN_AGENT_ID
+        ? readActiveModelFromProjectDir(PROJECT_ROOT)
+        : readAgentModel(name)) ?? ''
     // Calibrate against the persisted per-(agent, model) maximum, not just
     // the live reading: a fresh post-restart session must not un-learn a
     // window the previous session already proved (see HighwaterMap above).
