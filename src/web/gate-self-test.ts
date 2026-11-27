@@ -221,6 +221,7 @@ export function gateScriptPath(command: string, gate: string, projectDir: string
 type Awaitable<T> = T | Promise<T>
 export interface GitIo { run: (cwd: string, args: readonly string[]) => Awaitable<string | null> }
 export const GIT_CALL_TIMEOUT_MS = 5000
+export const GIT_SETTLE_GRACE_MS = 2000
 const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES', 'GIT_REPLACE_REF_BASE']
 export const REAL_GIT: GitIo = {
   run: (cwd, args) => {
@@ -230,7 +231,17 @@ export const REAL_GIT: GitIo = {
       // PROGI 6332 (D): `git replace <HEAD commit> <forged commit>` (refs/replace/) makes HEAD:<gate> resolve to a
       // swapped blob, and git status / diff / log hide it too. The check reads the real objects only.
       env.GIT_NO_REPLACE_OBJECTS = '1'
-      return new Promise<string | null>((done) => {
+      return new Promise<string | null>((resolveGit) => {
+        // PROGI 6346 (H): our own hard settle, GIT_SETTLE_GRACE_MS after the deadline. execFile answers only once
+        // the child is reaped; a git that SIGKILL cannot end (uninterruptible sleep on a dead mount) would hold
+        // the pass, and with it every later pass, forever. One answer only: the late callback is ignored.
+        let settled = false
+        const done = (v: string | null) => { if (settled) return; settled = true; clearTimeout(hard); resolveGit(v) }
+        const hard = setTimeout(() => {
+          logger.warn({ args: args[0], cwd }, 'gate self-test: git did not end after SIGKILL; answering null (not verifiable)')
+          done(null)
+        }, GIT_CALL_TIMEOUT_MS + GIT_SETTLE_GRACE_MS)
+        hard.unref?.()
         // SIGKILL at the deadline: a git stuck on a lock / a dead mount must not outlive the pass. On the
         // deadline execFile also destroys the child's pipes, so a process that inherited them cannot hold the
         // answer back (tested).
@@ -436,6 +447,8 @@ export async function checkGateIntegrity(
   }
 }
 
+export const GATE_SETTLE_GRACE_MS = 2000
+
 /** Run one wired gate command exactly as written, with a benign call on stdin. Never throws. */
 export async function runGateCommand(
   entry: GateEntry,
@@ -467,6 +480,7 @@ export async function runGateCommand(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (settleTimer) clearTimeout(settleTimer)
       const c = classifyGateRun(rc, stdout, stderr, signal)
       resolve({ entry, ok: c.ok, detail: c.detail, timeoutLike: c.timeoutLike })
     }
@@ -476,7 +490,19 @@ export async function runGateCommand(
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     // The hook's own timeout plus a margin: the fail-closed wrapper ends a hung gate 2 s inside it.
-    const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* gone */ } }, (entry.timeoutSec + 3) * 1000)
+    // PROGI 6346 (H): 'close' waits for every stdio stream, so a grandchild that inherited stdout (a gate that
+    // left a background process) kept it from firing after the kill, and the pass never ended. GATE_SETTLE_GRACE_MS
+    // after the kill the result is settled anyway (a deadline failure) and the pipes are destroyed.
+    let settleTimer: NodeJS.Timeout | undefined
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL') } catch { /* gone */ }
+      settleTimer = setTimeout(() => {
+        try { child.stdout.destroy(); child.stderr.destroy() } catch { /* gone */ }
+        stderr += ' (a kapu-folyamat a SIGKILL utan sem zarult le: egy orokolt kimenetu hatterfolyamat tartja nyitva)'
+        finish(null, 'SIGKILL')
+      }, GATE_SETTLE_GRACE_MS)
+      settleTimer.unref?.()
+    }, (entry.timeoutSec + 3) * 1000)
     child.stdout.on('data', (d) => { if (stdout.length < 65_536) stdout += String(d) })
     child.stderr.on('data', (d) => { if (stderr.length < 65_536) stderr += String(d) })
     child.on('error', (err) => { stderr += String(err); finish(null, 'spawn-error') })
@@ -690,6 +716,12 @@ export function reconcileGateEscalations(
   return { fail, recover }
 }
 let running = false
+// PROGI 6346 (H): when the running pass started, and whether its stall was told. A pass that never ends made
+// every later tick return [] in silence: no gate checked, nothing said.
+let runningSince = 0
+let stallTold = false
+export const GATE_SELF_TEST_STALL_MS = 10 * 60_000
+export const GATE_STALL_KEY = 'gate-self-test-stalled'
 // BELA 6319 (B): set once by startGateSelfTest (dashboard start); undefined: not started (tests).
 let bootGitAnchor: Promise<string | null> | undefined
 // PROGI 6346 (G): the boot anchor directory's identity, taken with it.
@@ -720,8 +752,21 @@ export async function runGateSelfTest(opts: {
   projectRoot?: string
   stat?: (p: string) => { dev: number; ino: number }
 } = {}): Promise<GateRunResult[]> {
-  if (running) return []
+  const alerterW = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
+  const nowW = opts.now ? opts.now() : Date.now()
+  if (running) {
+    if (!stallTold && nowW - runningSince >= GATE_SELF_TEST_STALL_MS) {
+      stallTold = true
+      const mins = Math.round((nowW - runningSince) / 60_000)
+      logger.error({ runningForMin: mins }, 'gate self-test: the previous pass has not ended; no gate is being checked')
+      try {
+        alerterW.fail(GATE_STALL_KEY, `[kapu-onteszt] AZ ONTESZT ELAKADT: az elozo kor ${mins} perce fut es nem ert veget, igy azota egyetlen kapu sincs ellenorizve (a kovetkezo korok kihagyodnak). Lehetseges ok: egy beragadt git- vagy kapu-folyamat (load: ${loadavg().map((x) => x.toFixed(1)).join(' ')}). Teendo: ps -ef | grep -E 'git|gate' a dashboard alatt; ha nem oldodik, dashboard ujrainditas.`)
+      } catch (err) { logger.warn({ err }, 'gate self-test: stall alert send failed') }
+    }
+    return []
+  }
   running = true
+  runningSince = nowW
   try {
     const read = opts.read ?? ((p: string) => { try { return readFileSync(p, 'utf-8') } catch { return null } })
     const { entries, unreadable } = collectGateEntriesWithStatus(opts.targets ?? gateTargets(), read, opts.exists)
@@ -860,6 +905,10 @@ export async function runGateSelfTest(opts: {
     return results
   } finally {
     running = false
+    if (stallTold) {
+      stallTold = false
+      try { alerterW.recover(GATE_STALL_KEY, '[kapu-onteszt] HELYREALLT: az elakadt onteszt-kor veget ert, a kapuk ellenorzese folytatodik.') } catch (err) { logger.warn({ err }, 'gate self-test: stall recovery send failed') }
+    }
   }
 }
 
@@ -890,6 +939,8 @@ export function resetGateSelfTestState(): void {
   settingsHazardOpen = new Map()
   openUnverifiable = null
   running = false
+  runningSince = 0
+  stallTold = false
   prunedKeptAlerted.clear()
   bootGitAnchor = undefined
   bootAnchorIdentity = undefined
