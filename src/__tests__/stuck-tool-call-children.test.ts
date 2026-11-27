@@ -35,7 +35,7 @@ vi.mock('../web/agent-process.js', () => ({ capturePane: () => h.pane }))
 vi.mock('../web/active-model.js', () => ({ readTranscriptMtimeAcrossConfigDirs: () => null, readTranscriptMtimeFromProjectDir: () => null }))
 vi.mock('../web/inbound-probe.js', () => ({ mainConfigRoots: () => [] }))
 // STUCKOWNSID1127: keep the kill gate on the (mocked) directory-level read, off the host's real ~/.claude.
-vi.mock('../web/main-session-transcript.js', () => ({ readOwnSessionTranscript: () => ({ ok: false, reason: 'test-default' }) }))
+vi.mock('../web/main-session-transcript.js', () => ({ readOwnSessionTranscript: () => ({ ok: false, reason: 'test-default' }), tmuxPanePid: () => 100 }))
 vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'main-test' }))
 vi.mock('../web/channel-monitor.js', () => ({
   resumeMarveenSession: h.resume,

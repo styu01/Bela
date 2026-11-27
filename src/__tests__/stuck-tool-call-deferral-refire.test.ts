@@ -45,6 +45,7 @@ vi.mock('../web/active-model.js', () => ({ readTranscriptMtimeAcrossConfigDirs: 
 vi.mock('../web/inbound-probe.js', () => ({ mainConfigRoots: () => [] }))
 vi.mock('../web/main-session-transcript.js', () => ({
   readOwnSessionTranscript: (pid: number) => { h.ownPids.push(pid); return h.own },
+  tmuxPanePid: () => (h.listPanesFails ? null : 100),
 }))
 vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'main-test' }))
 vi.mock('../web/channel-monitor.js', () => ({

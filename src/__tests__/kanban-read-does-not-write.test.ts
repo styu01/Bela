@@ -105,6 +105,7 @@ describe('a sopres BE VAN KOTVE egy futo helyre -- a nema no-op elleni vedelem',
 
   it('a leallitas el is takaritja az intervallumot, mint a tobbi runnernel', () => {
     expect(webTs).toMatch(/clearInterval\(kanbanArchiveInterval\)/)
+    expect(webTs).toMatch(/stopKanbanArchiveRunner\(\)/)   // the delayed first pass is cleared too (PROGI 6176)
   })
 
   it('KONTROLL: a kereso tenyleg talal, ha van mit -- a szomszed runner ugyanigy latszik', () => {

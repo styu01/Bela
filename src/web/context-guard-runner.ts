@@ -374,12 +374,6 @@ function measureContextTokens(name: string): number | null {
   return tokens !== null && tokens > 0 ? tokens : null
 }
 
-/**
- * How long the session's transcript has been untouched (ms), or null when
- * unmeasurable. A negative reading (transcript mtime in the future, e.g. after
- * a clock change) is treated as "just now" rather than as a large idle time --
- * a wrong clock must not be able to trigger a flush.
- */
 // STUCKOWNSID1127 follow-up (PROGI msg 6169 item 3b): the idle-flush tier's "untouched since" for the
 // MAIN agent reads its OWN transcript (sessions/<pid>.json record, the same resolver as the
 // stuck-watcher's kill gate and the schedule-runner's sawTurn), not the newest file of the shared
@@ -409,6 +403,12 @@ export function guardTranscriptMtime(name: string, deps: GuardTranscriptDeps = L
   return deps.dir(workingDir, configDir)
 }
 
+/**
+ * How long the session's transcript has been untouched (ms), or null when
+ * unmeasurable. A negative reading (transcript mtime in the future, e.g. after
+ * a clock change) is treated as "just now" rather than as a large idle time --
+ * a wrong clock must not be able to trigger a flush.
+ */
 function measureIdleMs(name: string, nowMs: number): number | null {
   const mtime = guardTranscriptMtime(name)
   if (mtime === null) return null

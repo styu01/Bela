@@ -25,7 +25,18 @@ function sweep(): void {
   }
 }
 
+// Both timers are kept, so a server close stops the delayed first pass too (PROGI review msg 6176):
+// otherwise a close within the first 70 s still ran one sweep against a closing process.
+let firstPass: NodeJS.Timeout | null = null
+let interval: NodeJS.Timeout | null = null
+
 export function startKanbanArchiveRunner(): NodeJS.Timeout {
-  setTimeout(sweep, INITIAL_DELAY_MS)
-  return setInterval(sweep, INTERVAL_MS)
+  firstPass = setTimeout(() => { firstPass = null; sweep() }, INITIAL_DELAY_MS)
+  interval = setInterval(sweep, INTERVAL_MS)
+  return interval
+}
+
+export function stopKanbanArchiveRunner(): void {
+  if (firstPass) { clearTimeout(firstPass); firstPass = null }
+  if (interval) { clearInterval(interval); interval = null }
 }

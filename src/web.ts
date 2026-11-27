@@ -25,7 +25,7 @@ import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startInboxNudgeWatcher } from './web/inbox-nudge-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
-import { startKanbanArchiveRunner } from './web/kanban-archive-runner.js'
+import { startKanbanArchiveRunner, stopKanbanArchiveRunner } from './web/kanban-archive-runner.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startModelFallbackRunner } from './web/model-fallback-runner.js'
@@ -569,6 +569,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(routerInterval)
     clearInterval(scheduleInterval)
     clearInterval(kanbanArchiveInterval)
+    stopKanbanArchiveRunner()   // also the delayed first pass (PROGI 6176)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     workerLivenessCancelled = true
     if (workerLivenessInterval) clearInterval(workerLivenessInterval)

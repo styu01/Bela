@@ -43,7 +43,7 @@ import { resolveFromPath } from '../platform.js'
 import { PROJECT_ROOT } from '../config.js'
 import { capturePane } from './agent-process.js'
 import { readTranscriptMtimeFromProjectDir } from './active-model.js'
-import { readOwnSessionTranscript } from './main-session-transcript.js'
+import { readOwnSessionTranscript, tmuxPanePid } from './main-session-transcript.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { resumeMarveenSession, sendAlert, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import {
@@ -132,14 +132,10 @@ export function transcriptWrittenSinceStagnation(transcriptMtimeMs: number | nul
 // the main channels session). null on any failure (fail-open). `ps -o %cpu=` is
 // a recent decaying average on macOS/Linux -- enough to tell a 0.3% IO-wait
 // wedge from a process actively burning CPU.
+// One pane-pid helper for the whole main-session-transcript family (PROGI review msg 6176):
+// tmuxPanePid in main-session-transcript.ts, same tmux call, null on any failure.
 function mainPanePid(session: string): number | null {
-  try {
-    const panePid = execFileSync(TMUX, ['list-panes', '-t', session, '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8' })
-      .split('\n')[0]?.trim()
-    return panePid && /^\d+$/.test(panePid) ? Number(panePid) : null
-  } catch {
-    return null
-  }
+  return tmuxPanePid(session)
 }
 
 function sampleMainClaudeCpuPercent(session: string): number | null {
