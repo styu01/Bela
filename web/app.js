@@ -2326,7 +2326,22 @@ async function showCardDetail(card) {
     // 200). One load gives the fields AND the version from the same moment.
     await loadKanban()
     const fresh = kanbanCards.find((c) => c.id === card.id)
-    if (!fresh) { showToast(t('kanban.toast.save_error')); return }
+    if (!fresh) {
+      // PROGI review 6206 item 4: the board list leaves archived cards out, so a card archived (or
+      // deleted) between opening the detail view and clicking Edit is not found here. Say which,
+      // instead of a generic save error: one extra read that includes the archived cards.
+      let gone = 'kanban.toast.edit_gone'
+      try {
+        const r = await fetch('/api/kanban?includeArchived=1')
+        if (r.ok) {
+          const all = await r.json()
+          const hit = Array.isArray(all) ? all.find((c) => c.id === card.id) : null
+          if (hit && hit.archived_at) gone = 'kanban.toast.edit_archived'
+        }
+      } catch { /* the generic wording below still holds */ }
+      showToast(t(gone), 6000)
+      return
+    }
     card = fresh
     document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_edit')
     document.getElementById('cardTitle').value = card.title

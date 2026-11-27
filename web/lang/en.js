@@ -224,6 +224,8 @@ window._i18n.en = {
   'kanban.modal.breakdown_btn':  'Auto-breakdown',
   'kanban.toast.move_error':     'Error moving card',
   'kanban.toast.save_error':     'Error saving',
+  'kanban.toast.edit_archived':  'The card was archived meanwhile, so it cannot be edited. You will find it among the archived cards.',
+  'kanban.toast.edit_gone':      'The card left the board meanwhile (archived or deleted), so it cannot be edited.',
   'kanban.toast.comment_error':  'Error saving comment',
   'kanban.toast.archive_error':  'Error archiving card',
   'kanban.toast.delete_error':   'Error deleting card',

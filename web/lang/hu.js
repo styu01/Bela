@@ -224,6 +224,8 @@ window._i18n.hu = {
   'kanban.modal.breakdown_btn':  'Auto-bontás',
   'kanban.toast.move_error':     'Hiba az áthelyezés során',
   'kanban.toast.save_error':     'Hiba a mentésnél',
+  'kanban.toast.edit_archived':  'A kártyát közben archiválták, ezért nem szerkeszthető. Az archivált kártyák között megtalálod.',
+  'kanban.toast.edit_gone':      'A kártya közben eltűnt a tábláról (archiválták vagy törölték), ezért nem szerkeszthető.',
   'kanban.toast.comment_error':  'Hiba a megjegyzés mentése során',
   'kanban.toast.archive_error':  'Hiba az archiválás során',
   'kanban.toast.delete_error':   'Hiba a törlés során',

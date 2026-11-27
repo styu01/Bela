@@ -171,6 +171,38 @@ describe('web/app.js sends expected_fields from the fresh card the form was fill
     const body = app.slice(at, app.indexOf('openModal(cardModalOverlay)', at))
     expect(body.indexOf('cardEditBase = { ...card }')).toBeGreaterThan(body.indexOf('kanbanCards.find((c) => c.id === card.id)'))
   })
+  it('PROGI 6206 item 4: a card gone from the board on Edit says archived vs gone, not a generic save error', () => {
+    const at = app.indexOf("document.getElementById('cardEditBtn').onclick = async () => {")
+    const body = app.slice(at, app.indexOf('openModal(cardModalOverlay)', at))
+    const missing = body.slice(body.indexOf('if (!fresh) {'), body.indexOf('card = fresh'))
+    expect(missing).toContain("fetch('/api/kanban?includeArchived=1')")
+    expect(missing).toContain("if (hit && hit.archived_at) gone = 'kanban.toast.edit_archived'")
+    expect(missing).toContain("let gone = 'kanban.toast.edit_gone'")
+    expect(missing).not.toContain("t('kanban.toast.save_error')")
+    for (const lang of ['hu', 'en']) {
+      const src = readFileSync(join(__dirname, '..', '..', 'web', 'lang', `${lang}.js`), 'utf-8')
+      expect(src).toMatch(/'kanban\.toast\.edit_archived':\s+'[^']+'/)
+      expect(src).toMatch(/'kanban\.toast\.edit_gone':\s+'[^']+'/)
+    }
+  })
+
+  it('...and the list it reads (?includeArchived=1) carries the archived card with archived_at', async () => {
+    initDatabase(':memory:')
+    createKanbanCard({ id: 'arch1', title: 'Card' })
+    archiveKanbanCard('arch1')
+    const get = async (url: string) => {
+      const req = Object.assign(Readable.from([]), { headers: {} }) as unknown as http.IncomingMessage
+      let sent = ''
+      const res = { writeHead: vi.fn(), end: vi.fn((c?: unknown) => { if (c != null) sent += String(c) }), setHeader: vi.fn() } as unknown as http.ServerResponse
+      const u = new URL(`http://localhost${url}`)
+      await tryHandleKanban({ req, res, path: u.pathname, method: 'GET', url: u } as never)
+      return JSON.parse(sent) as Array<{ id: string; archived_at: number | null }>
+    }
+    expect((await get('/api/kanban')).some((c) => c.id === 'arch1')).toBe(false)
+    const hit = (await get('/api/kanban?includeArchived=1')).find((c) => c.id === 'arch1')
+    expect(hit?.archived_at).toBeTruthy()
+  })
+
   it('a stale_fields 409 keeps the form open like a stale_version one', () => {
     expect(app).toContain("e.conflict === 'stale_version' || e.conflict === 'stale_fields'")
   })
