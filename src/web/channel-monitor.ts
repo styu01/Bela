@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
-import { provenMainSession } from './main-session-transcript.js'
+import { provenMainSession, rememberedMainSession } from './main-session-transcript.js'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
@@ -917,7 +917,11 @@ export async function resumeMarveenSession(
     // bootcamp mass-"/login"); idempotent re-seed before every respawn.
     ensureSharedClaudeOnboarded()
 
-    const { resumeSessionId, respawnMode, continueReason } = chooseMainRespawnResume(opts.resume ?? null, existsSync, opts.unprovenReason)
+    // Not provable now (e.g. the claude process already died): the last session proven moments
+    // before, if fresh enough and its transcript still exists (BELA msg 6197 item 6).
+    const remembered = opts.resume ? null : rememberedMainSession(PROJECT_ROOT)
+    const { resumeSessionId, respawnMode, continueReason } = chooseMainRespawnResume(opts.resume ?? remembered, existsSync, opts.unprovenReason)
+    const resumeSource = opts.resume ? 'proven' : remembered ? 'remembered' : null
 
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: CLAUDE,
@@ -962,7 +966,7 @@ export async function resumeMarveenSession(
     }
 
     if (respawnMode === 'resume') {
-      logger.warn({ provider: provider.type, respawnMode, sessionId: resumeSessionId }, 'Marveen session respawned with --resume <own session id>')
+      logger.warn({ provider: provider.type, respawnMode, sessionId: resumeSessionId, resumeSource, unprovenReason: opts.unprovenReason ?? null }, 'Marveen session respawned with --resume <own session id>')
     } else {
       logger.warn({ provider: provider.type, respawnMode, continueReason }, 'Marveen session respawned with --continue')
     }

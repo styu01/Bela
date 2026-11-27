@@ -75,7 +75,7 @@ describe('wiring: resumeMarveenSession decides the mode with the chooser and han
     expect(start).toBeGreaterThan(0)
     const body = src.slice(start, src.indexOf('\n}\n', start))
     const code = body.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
-    const chooseIdx = code.indexOf('chooseMainRespawnResume(opts.resume ?? null, existsSync, opts.unprovenReason)')
+    const chooseIdx = code.indexOf('chooseMainRespawnResume(opts.resume ?? remembered, existsSync, opts.unprovenReason)')
     const buildIdx = code.indexOf('buildMainSessionRespawnCmd({')
     const passIdx = code.indexOf('resumeSessionId,', buildIdx)
     const respawnIdx = code.indexOf("'respawn-pane'")

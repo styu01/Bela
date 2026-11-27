@@ -188,12 +188,39 @@ export function provenMainSession(
   if (pid === null) return { resume: null, reason: 'no-pane-pid' }
   const own = deps.own(pid, projectRoot)
   if (!own.ok) return { resume: null, reason: own.reason }
+  rememberMainSession(projectRoot, { sessionId: own.sessionId, transcriptPath: own.path })
   return { resume: { sessionId: own.sessionId, transcriptPath: own.path }, reason: null }
 }
 
+// The LAST proven own session per project root, in memory (BELA msg 6197 item 6, PROGI 6196 on
+// 8a72094a). When the respawn has to happen after the claude process already died, its
+// sessions/<pid>.json record can no longer be proven, and a plain --continue would take the dir's
+// newest INTERACTIVE session -- a live foreign one included. Every successful proof (the guard's
+// tick, the stuck-watcher's kill gate, the stage-3 resume) refreshes this, so it holds BELA's own
+// session as of moments before the death. Used only within REMEMBER_MAX_AGE_MS and while the
+// transcript exists. Stated limit: a dashboard restart empties it (then --continue, as before).
+export const REMEMBER_MAX_AGE_MS = 6 * 60 * 60_000
+const rememberedMain = new Map<string, { sessionId: string; transcriptPath: string; at: number }>()
+export function rememberMainSession(projectRoot: string, s: { sessionId: string; transcriptPath: string }, now = Date.now()): void {
+  rememberedMain.set(projectRoot, { ...s, at: now })
+}
+export function rememberedMainSession(
+  projectRoot: string,
+  now = Date.now(),
+  exists: (path: string) => boolean = existsSync,
+): { sessionId: string; transcriptPath: string } | null {
+  const r = rememberedMain.get(projectRoot)
+  if (!r || now - r.at > REMEMBER_MAX_AGE_MS || !exists(r.transcriptPath)) return null
+  return { sessionId: r.sessionId, transcriptPath: r.transcriptPath }
+}
+/** Test seam. */
+export function _forgetRememberedMainSessions(): void { rememberedMain.clear() }
+
 export function readOwnSessionTranscript(pid: number, projectRoot: string): OwnTranscript {
   try {
-    return resolveOwnSessionTranscript(pid, projectRoot, liveOwnTranscriptDeps, [join(projectRoot, '.channels-config')])
+    const r = resolveOwnSessionTranscript(pid, projectRoot, liveOwnTranscriptDeps, [join(projectRoot, '.channels-config')])
+    if (r.ok) rememberMainSession(projectRoot, { sessionId: r.sessionId, transcriptPath: r.path })
+    return r
   } catch {
     return { ok: false, reason: 'error' }
   }
