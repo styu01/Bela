@@ -86,6 +86,35 @@ describe('symlink on the wired gate path, under the anchor', () => {
   })
 })
 
+describe('(F) a symlink inside the checkout pointing back to its root (PROGI 6338, BELA 6339)', () => {
+  it('a wired path through a link back to the checkout root: failing (was ok, the verified file ran as <root>/scripts/gate.mjs)', () => {
+    const r = repo('loop', { 'agents/x/keep.txt': '' })
+    symlinkSync(r.d, join(r.d, 'agents', 'x', 'root'))
+    const wired = join(r.d, 'agents', 'x', 'root', 'scripts', 'gate.mjs')
+    const v = chk(wired, r.d)!
+    expect(v.ok).toBe(false)
+    expect(v.detail).toContain(`szimlink a bekotott utvonalon: agents/x/root -> ${r.d}`)
+    expect(v.unverifiable).toBeUndefined()
+  })
+  it('PROGI PoC: scripts/hooks swapped for a link to the root, a pass-all gate.mjs COMMITTED at the root: failing (was ok)', () => {
+    const r = repo('loop-pass', { 'scripts/hooks/gate.mjs': GATE, 'scripts/hooks/mod.mjs': 'export function deny() { return true }\n', 'gate.mjs': 'process.exit(0)\n' })
+    const wired = join(r.d, 'scripts', 'hooks', 'gate.mjs')
+    expect(chk(wired, r.d)).toEqual(OK) // the real directory: ok (GATE + its module)
+    rmSync(join(r.d, 'scripts', 'hooks'), { recursive: true }); symlinkSync(r.d, join(r.d, 'scripts', 'hooks'))
+    const v = chk(wired, r.d)!
+    expect(v.ok).toBe(false)
+    expect(v.detail).toContain(`szimlink a bekotott utvonalon: scripts/hooks -> ${r.d}`)
+    expect(v.detail).toContain(`git -C ${r.d} restore --source=HEAD scripts/hooks`)
+  })
+  it('through an alias ABOVE the root the inner loop link is still found; the alias alone stays ok', () => {
+    const r = repo('loop-alias', { 'agents/x/keep.txt': '' })
+    const alias = join(tmp, 'alias-of-loop'); symlinkSync(r.d, alias)
+    expect(chk(join(alias, 'scripts', 'gate.mjs'), r.d)).toEqual(OK)
+    symlinkSync(r.d, join(r.d, 'agents', 'x', 'root'))
+    expect(chk(join(alias, 'agents', 'x', 'root', 'scripts', 'gate.mjs'), r.d)?.detail).toContain(`szimlink a bekotott utvonalon: agents/x/root -> ${r.d}`)
+  })
+})
+
 describe('no false alarm', () => {
   it('a symlink ABOVE the checkout root (an alias of the install path) is not the checkout\'s business: ok', () => {
     const r = repo('above')
@@ -94,14 +123,6 @@ describe('no false alarm', () => {
     // ... and a symlink swap below the root is still seen through the alias
     unlinkSync(r.gate); symlinkSync('noop.mjs', r.gate)
     expect(chk(join(alias, 'scripts', 'gate.mjs'), r.d)?.detail).toContain('szimlink a bekotott utvonalon: scripts/gate.mjs -> noop.mjs')
-  })
-  it('a wired path through a link back to the checkout root runs the verified file: ok; a swap there is still seen', () => {
-    const r = repo('loop', { 'agents/x/keep.txt': '' })
-    symlinkSync(r.d, join(r.d, 'agents', 'x', 'root'))
-    const wired = join(r.d, 'agents', 'x', 'root', 'scripts', 'gate.mjs')
-    expect(chk(wired, r.d)).toEqual(OK)
-    writeFileSync(r.gate, 'process.exit(0)\n')
-    expect(chk(wired, r.d)?.detail).toContain('scripts/gate.mjs (elter a git HEAD-tol)')
   })
   it('plain files (today\'s install): ok; a gate outside the anchor keeps the old rules', () => {
     const r = repo('plain')

@@ -229,13 +229,20 @@ export function detectGitAnchor(root: string = PROJECT_ROOT, git: GitIo = REAL_G
 // the self-test did not). Under the anchor the WIRED (logical) path is what counts: no component below the
 // checkout root may be a symlink (none is in the tracked tree today), for the gate and every local module it
 // loads. Symlinks above the checkout root (a symlinked home, say) are not the checkout's business.
-/** The deepest ancestor of `p` (p included) whose real path is `anchor`, or null. */
+// PROGI 6338 / BELA 6339 (F): the SHALLOWEST such ancestor. With the deepest one, a directory inside the
+// checkout swapped for a symlink back to the root (scripts/hooks -> <root>) became the base itself, nothing
+// below it was a symlink, and the wired scripts/hooks/<gate> was judged as <root>/<gate>: ok when a pass-all
+// file is committed there. Taking the shallowest, an alias ABOVE the root stays the base (ok), and any symlink
+// inside the checkout on the wired path is found below it. Rule: a symlink inside the checkout on a gate path
+// is always a failing entry (none is in the tracked tree today).
+/** The shallowest ancestor of `p` (p included) whose real path is `anchor`, or null. */
 function anchorBase(anchor: string, p: string): string | null {
   let a = resolve(p)
+  let found: string | null = null
   for (;;) {
-    if (canonical(a) === anchor) return a
+    if (canonical(a) === anchor) found = a
     const up = dirname(a)
-    if (up === a) return null
+    if (up === a) return found
     a = up
   }
 }
