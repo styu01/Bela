@@ -1051,9 +1051,18 @@ const MAIL_CREDENTIAL_RX = new RegExp(MAIL_CREDENTIAL_IDS_RX.source +
 // write), but this exact shape -- -n, one line-range print script, plain file operands -- cannot. It is how the fleet
 // reads these scripts (measured on the real corpus), so for the mailer-script check alone it is taken out first.
 const SED_PRINT_RX = /(^|[;&|(\n]|\s)sed\s+-n\s+(['"]?)[\d,$]+p\2((?:[ \t]+[^\s;&|<>()`$'"\\]+)+)/g
+// A mailer-script name inside a command substitution ('$(echo "python3 send_batch_daily.py 1")', backticks): the
+// substitution's OUTPUT may be run as a command (the documented open shell form "a substitution in command
+// position"), and reading a script never needs this shape -- so for these scripts it is refused outright
+// (PROGI msg 6122 probe: the only 2 of 22 forms that still passed). Mirrors nothing: MAILCRED is JS-gate only.
+const MAILER_IN_SUBST_RX = /\$\([^)]*(?:send-gmail|send_outreach|send_batch_daily)\.py|`[^`]*(?:send-gmail|send_outreach|send_batch_daily)\.py/
 export function runsMailerScript(cmd) {
   const s = String(cmd ?? '')
   if (!s.match(MAILER_SCRIPT_RX)) return false
+  // A quoted heredoc body ('<<'EOF'', '<<"EOF"', '<<\\EOF') is data: markdown there names the scripts in backticks.
+  // An unquoted body expands $(...) and backticks, so it stays in.
+  const noQuotedBodies = s.replace(HEREDOC_RE, (m0, intro) => (/^<<-?[ \t]*['"\\]/.test(intro) ? intro : m0))
+  if (MAILER_IN_SUBST_RX.test(noQuotedBodies)) return true
   return isSendInvocation(s.replace(SED_PRINT_RX, '$1true').replace(MAILER_SCRIPT_RX, 'sendmail'))
 }
 export function touchesMailCredential(cmd) {

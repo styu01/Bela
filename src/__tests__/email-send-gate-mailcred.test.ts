@@ -23,6 +23,10 @@ const RUNS: Array<[string, string]> = [
   ['the outreach sender', 'python3 send_outreach.py --to x@y.hu'],
   ['the daily batch', 'timeout 540 python3 send_batch_daily.py 40 /x/lista.xlsx 2>&1 | tail -5'],
   ['read then run', 'sed -n 1,40p scripts/send-gmail.py && python3 scripts/send-gmail.py --to a@b.hu'],
+  // PROGI 6122 probe: a substitution in command position runs its output
+  ['substitution in command position', '$(echo "python3 /x/work/send_batch_daily.py 1")'],
+  ['backtick substitution', '`echo python3 send_outreach.py --to a@b.hu`'],
+  ['substitution in an UNQUOTED heredoc body (it expands)', 'cat <<EOF\n$(python3 send_outreach.py --to a@b.hu)\nEOF'],
 ]
 const CREDENTIAL: Array<[string, string]> = [
   ['curl the key', `curl -s -H "Authorization: Bearer $T" http://localhost:3420/api/vault/${KEY}`],
@@ -38,6 +42,7 @@ const CREDENTIAL: Array<[string, string]> = [
   ['the mailbox key url-encoded, +', 'python3 -c "u = \'info%40woowebsite.eu+jelsz%C3%B3\'"'],
 ]
 const ALLOWED: Array<[string, string]> = [
+  ['backticked names in a quoted heredoc body (markdown)', "cat > DREAM.md <<'EOF'\nrun `send_batch_daily.py 40` daily\nEOF"],
   ['the mailbox address alone', 'echo info@woowebsite.eu'],
   ['the word jelszo alone', 'grep -n jelszo notes.txt'],
   ['read the outreach script', 'cat docs/projects/otfelmero-megkereses/send_outreach.py'],
