@@ -155,3 +155,63 @@ describe('channels.sh died-after-up branch wiring (local)', () => {
     expect(branch).toContain('break')
   })
 })
+
+// LOCAL (PROGI review 6212): a death inside the settle budget gets ONE late reload before the exit.
+describe('channels.sh late_reload_decision (local)', () => {
+  const WINDOW = GRACE - RELOAD_AFTER
+  function lateRun(lines: string[]): string[] {
+    const dir = mkdtempSync(join(tmpdir(), 'latereload-'))
+    try {
+      const p = join(dir, 'probe.sh')
+      writeFileSync(p, [
+        `RESPAWN_SETTLE_BUDGET=${BUDGET}`, `PLUGIN_DEAD_GRACE=${GRACE}`, `PLUGIN_RELOAD_AFTER=${RELOAD_AFTER}`,
+        sliceShellFn(CHANNELS, 'dead_after_up_verdict'), sliceShellFn(CHANNELS, 'late_reload_decision'), ...lines,
+      ].join('\n') + '\n')
+      return execFileSync('bash', [p], { encoding: 'utf-8' }).trim().split('\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  const late = (now: number, tried: boolean, supp: boolean, l: string) => lateRun([`late_reload_decision ${now} ${tried} ${supp} '${l}'`])[0]
+
+  it('a suppressed spell with no reload yet -> try; otherwise -> exit as before', () => {
+    expect(late(1000, false, true, 'none')).toBe('try')
+    expect(late(1000, true, true, 'none')).toBe('exit') // the normal reload already ran
+    expect(late(1000, false, false, 'none')).toBe('exit') // never suppressed: the normal path had its chance
+    expect(late(1000, false, true, '')).toBe('try')
+  })
+
+  it('after the late reload: wait for the same window as the normal path, then exit; a skipped one exits', () => {
+    expect(late(1000 + WINDOW - 1, true, true, '1000')).toBe('wait')
+    expect(late(1000 + WINDOW, true, true, '1000')).toBe('exit')
+    expect(late(1000, false, true, 'skipped')).toBe('exit')
+  })
+
+  it('end to end: a death at the stamp is suppressed, then gets one reload, then exits WINDOW later', () => {
+    // Death right at the restart stamp T0; 5 s ticks; the reload sent at the first post-budget tick.
+    const T0 = 1_800_000_000
+    const lines: string[] = []
+    for (let now = T0; now <= T0 + BUDGET + WINDOW + 10; now += 5) {
+      lines.push(`v=$(dead_after_up_verdict ${now} ${T0} ${T0} "$tried"); if [ "$v" = exit ]; then d=$(late_reload_decision ${now} "$tried" true "$late"); if [ "$d" = try ]; then tried=true; late=${now}; d=reload; fi; echo "${now} $v/$d"; else echo "${now} $v"; fi`)
+    }
+    const out = lateRun(['tried=false; late=none', ...lines])
+    const firstReload = out.find((l) => l.endsWith('exit/reload'))
+    expect(firstReload).toBe(`${T0 + BUDGET + 5} exit/reload`)
+    expect(out.filter((l) => l.endsWith('/reload'))).toHaveLength(1)
+    expect(out.find((l) => l.endsWith('exit/exit'))).toBe(`${T0 + BUDGET + 5 + WINDOW} exit/exit`)
+    expect(out.slice(0, out.indexOf(firstReload!)).every((l) => l.endsWith(' suppress'))).toBe(true)
+  })
+
+  it('wiring: the exit branch asks late_reload_decision, probes idle before typing, and exits only on "exit"', () => {
+    const loopStart = CHANNELS.indexOf('while $TMUX has-session -t "=$SESSION:"')
+    const loop = CHANNELS.slice(loopStart, CHANNELS.indexOf('\ndone\n', loopStart))
+    const branch = loop.slice(loop.indexOf('[ "$_dead_verdict" = "exit" ]'), loop.indexOf('[ "$_dead_verdict" = "reload" ]'))
+    const typed = branch.indexOf(['$TMUX', 'send' + '-keys', '-t', '"=$SESSION:"', "'/reload-plugins'", 'Enter'].join(' '))
+    expect(branch).toContain('_late="$(late_reload_decision "$NOW" "$PLUGIN_RELOAD_ATTEMPTED" "$PLUGIN_SUPPRESS_LOGGED" "$PLUGIN_LATE_RELOAD")"')
+    expect(branch.indexOf('if [ "$_reload_probe" = "idle" ]; then')).toBeGreaterThan(0)
+    expect(typed).toBeGreaterThan(branch.indexOf('if [ "$_reload_probe" = "idle" ]; then'))
+    expect(branch.indexOf('RESTART_REQUESTED=1')).toBeGreaterThan(branch.indexOf('if [ "$_late" = "exit" ]; then'))
+    const alive = loop.slice(loop.indexOf('if [ "$_plugin_alive" = "true" ]; then'), loop.indexOf('elif [ "$PLUGIN_SEEN_ONCE" = "true" ]; then'))
+    expect(alive).toContain('PLUGIN_LATE_RELOAD=none')
+  })
+})

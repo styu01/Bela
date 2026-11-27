@@ -1362,9 +1362,28 @@ dead_after_up_verdict() {
     echo wait
   fi
 }
+# LOCAL (PROGI review 6212): a death that fell inside the settle budget never met the "reload"
+# verdict -- when the budget ran out it was already >= PLUGIN_DEAD_GRACE, so the verdict went straight
+# to "exit". late_reload_decision gives exactly that case ONE /reload-plugins before the exit, and the
+# same patience after it as the normal path (PLUGIN_DEAD_GRACE - PLUGIN_RELOAD_AFTER). Pure, so it is
+# testable (src/__tests__/channels-dead-after-up-verdict.test.ts).
+# Args: NOW RELOAD_ATTEMPTED(true|false) SUPPRESSED_THIS_SPELL(true|false) LATE(none|skipped|<epoch>)
+# stdout, one word: try -- probe and send the one late reload; wait -- a late reload was sent and its
+# window is still open; exit -- go on with the restart (as before).
+late_reload_decision() {
+  _lr_now="$1"; _lr_tried="$2"; _lr_supp="$3"; _lr_late="$4"
+  case "$_lr_late" in
+    ''|none)
+      if [ "$_lr_tried" != "true" ] && [ "$_lr_supp" = "true" ]; then echo try; else echo exit; fi ;;
+    *[!0-9]*) echo exit ;;
+    *)
+      if [ "$((_lr_now - _lr_late))" -lt "$((PLUGIN_DEAD_GRACE - PLUGIN_RELOAD_AFTER))" ]; then echo wait; else echo exit; fi ;;
+  esac
+}
 PLUGIN_SEEN_ONCE=false
 PLUGIN_DEAD_SINCE=0
 PLUGIN_RELOAD_ATTEMPTED=false
+PLUGIN_LATE_RELOAD=none
 # LOCAL: the suppression is logged once per dead spell, not on every 5 s tick (upstream logs
 # each tick: up to RESPAWN_SETTLE_BUDGET/5 = 48 identical lines per event in channels-respawn.log).
 PLUGIN_SUPPRESS_LOGGED=false
@@ -1455,6 +1474,7 @@ while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
     PLUGIN_DEAD_SINCE=0
     PLUGIN_RELOAD_ATTEMPTED=false
     PLUGIN_SUPPRESS_LOGGED=false
+    PLUGIN_LATE_RELOAD=none
     # The plugin came up, so this host is not in the never-starting state:
     # drop the streak so the next cold start gets the fast 10-minute watchdog
     # again instead of inheriting a 40-minute budget from an old outage.
@@ -1492,10 +1512,30 @@ while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
       [ "$PLUGIN_SUPPRESS_LOGGED" = "true" ] || respawn_log "died-after-up-suppressed: $CHANNEL_PROVIDER plugin gone, but store/.channel-last-respawn ($_respawn_stamp) explains it (within ${RESPAWN_SETTLE_BUDGET}s settle budget, $((NOW - _respawn_stamp))s elapsed) -- the restart that wrote the stamp (an in-process hard restart, or this watchdog's own start) is still settling, not restarting again"
       PLUGIN_SUPPRESS_LOGGED=true
     elif [ "$_dead_verdict" = "exit" ]; then
-      echo "WARN: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart" >&2
-      respawn_log "died-after-up: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s (RESTARTCOALESCE1103 saw respawn_stamp=$_respawn_stamp, settle_budget=${RESPAWN_SETTLE_BUDGET}s -- did not explain the gap) -- exiting for service-manager restart -- mcp-log tail: $(mcp_plugin_log_tail)"
-      RESTART_REQUESTED=1
-      break
+      _late="$(late_reload_decision "$NOW" "$PLUGIN_RELOAD_ATTEMPTED" "$PLUGIN_SUPPRESS_LOGGED" "$PLUGIN_LATE_RELOAD")"
+      if [ "$_late" = "try" ]; then
+        # The same discipline as the reload branch: only into a provably idle pane. Not idle -> no
+        # second chance, the restart goes ahead as before.
+        _reload_probe="$($TMUX capture-pane -t "=$SESSION:" -e -p 2>/dev/null | probe_pane_input_state)"
+        if [ "$_reload_probe" = "idle" ]; then
+          $TMUX send-keys -t "=$SESSION:" '/reload-plugins' Enter
+          PLUGIN_RELOAD_ATTEMPTED=true
+          PLUGIN_LATE_RELOAD=$NOW
+          _late=wait
+          respawn_log "died-after-up-late-reload-attempt: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s, the death fell inside the settle budget -- sent /reload-plugins, $((PLUGIN_DEAD_GRACE - PLUGIN_RELOAD_AFTER))s before the restart"
+        else
+          PLUGIN_LATE_RELOAD=skipped
+          _late=exit
+        fi
+        unset _reload_probe
+      fi
+      if [ "$_late" = "exit" ]; then
+        echo "WARN: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart" >&2
+        respawn_log "died-after-up: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s (RESTARTCOALESCE1103 saw respawn_stamp=$_respawn_stamp, settle_budget=${RESPAWN_SETTLE_BUDGET}s -- did not explain the gap) -- exiting for service-manager restart -- mcp-log tail: $(mcp_plugin_log_tail)"
+        RESTART_REQUESTED=1
+        break
+      fi
+      unset _late
     elif [ "$_dead_verdict" = "reload" ]; then
       # RELOADDEADGRACE1040: the only thing measured to reliably revive a
       # dead/absent plugin (RELOADPLUGINSABSENT1032, measured 2026-10-31 on
