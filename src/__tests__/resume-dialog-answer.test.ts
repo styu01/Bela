@@ -7,7 +7,8 @@ vi.mock('../web/owner-escalation.js', async (orig) => ({
   clearOwnerEscalation: (k: string) => { esc.cleared.push(k) },
 }))
 
-import { detectsResumeDialog, resumeDialogKeys } from '../pane-state.js'
+import { detectsResumeDialog, resumeDialogKeys, resumeDialogNeedsArrow, resumeDialogNudgeKeys } from '../pane-state.js'
+const MAIN_SESSION = 'bela-channels'
 import { dismissResumeSummaryModalIfPresent } from '../web/agent-process.js'
 
 // BELA 6227 item 4 / PROGI 6226 (3b). The shapes below are built from the 2.1.326 binary (the dialog
@@ -106,46 +107,123 @@ describe('resumeDialogKeys: summary when offered, else Resume, never a new conve
   })
 })
 
-describe('dismissResumeSummaryModalIfPresent (tmux layer injected)', () => {
+describe('dismissResumeSummaryModalIfPresent (tmux layer injected; PROGI 6252 A-E)', () => {
   beforeEach(() => { esc.escalated.length = 0; esc.cleared.length = 0 })
   function io(frames: (string | null)[]) {
     const sent: string[] = []
+    const waits: { at: number; ms: number }[] = []
     let n = 0
-    return { sent, io: { capture: () => frames[Math.min(n++, frames.length - 1)], send: (_s: string, _h: string | null, k: string) => { sent.push(k) }, wait: async () => {} } }
+    return {
+      sent, waits,
+      io: {
+        capture: () => frames[Math.min(n++, frames.length - 1)],
+        send: (_s: string, _h: string | null, k: string) => { sent.push(k) },
+        wait: async (ms: number) => { waits.push({ at: sent.length, ms }) },
+      },
+    }
   }
   const landed = moveTo(IDLE_FOCUS_NEW_WITH_DESC, /❯ Start a new/, /^ {2}Resume from summary/)
+  const IDLE = '──────\n❯ \n──────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  const FOCUS_RESUME_NO_SUMMARY = pane(['❯ Resume', '  Start a new conversation'])
+  const HINT = (p: string) => p.replace('Enter to confirm · Esc to resume', '↑/↓ pick a row first · Enter to confirm · Esc to dismiss')
 
-  it('idle trigger on 2.1.326: Down, re-check on the summary row, Enter; nothing escalated', async () => {
-    const f = io([IDLE_FOCUS_NEW_WITH_DESC, landed])
-    await dismissResumeSummaryModalIfPresent('agent-a', null, f.io)
+  it('answered: settle >= 1 s before any key, Down, re-check, Enter, and the dialog is seen gone', async () => {
+    const f = io([IDLE_FOCUS_NEW_WITH_DESC, IDLE_FOCUS_NEW_WITH_DESC, landed, IDLE])
+    expect(await dismissResumeSummaryModalIfPresent('agent-a', null, f.io)).toBe('answered')
     expect(f.sent).toEqual(['Down', 'Enter'])
+    expect(f.waits.find((w) => w.at === 0)!.ms).toBeGreaterThanOrEqual(1000) // (C)
     expect(esc.escalated).toEqual([])
   })
-  it('the move does not land: NO Enter, escalated once, cleared when the dialog is gone', async () => {
-    const f = io([IDLE_FOCUS_NEW_WITH_DESC, IDLE_FOCUS_NEW_WITH_DESC])
-    await dismissResumeSummaryModalIfPresent('agent-b', null, f.io)
-    expect(f.sent).toEqual(['Down'])
-    expect(esc.escalated.map((e) => e.key)).toEqual(['resume-dialog-blocked:agent-b'])
-    expect(esc.escalated[0].belaText).not.toMatch(/—| -- /)
-    const g = io([IDLE_FOCUS_NEW_WITH_DESC, IDLE_FOCUS_NEW_WITH_DESC])
-    await dismissResumeSummaryModalIfPresent('agent-b', null, g.io)
-    expect(esc.escalated.length).toBe(1) // once per spell
-    const h = io(['──────\n❯ \n──────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'])
-    await dismissResumeSummaryModalIfPresent('agent-b', null, h.io)
-    expect(h.sent).toEqual([])
-    expect(esc.cleared).toEqual(['resume-dialog-blocked:agent-b'])
+
+  it('(A) PROGI PoC: the Enter is swallowed (dialog still up): not "answered"; Esc closes it -> dismissed, no escalation', async () => {
+    const f = io([FOCUS_RESUME_NO_SUMMARY, FOCUS_RESUME_NO_SUMMARY, FOCUS_RESUME_NO_SUMMARY, IDLE])
+    expect(await dismissResumeSummaryModalIfPresent('agent-b', null, f.io)).toBe('dismissed')
+    expect(f.sent).toEqual(['Enter', 'Escape'])
+    expect(esc.escalated).toEqual([])
   })
-  it('an unknown shape: nothing sent at all, escalated', async () => {
-    const f = io([pane(['  Resume', '  Start a new conversation'])])
-    await dismissResumeSummaryModalIfPresent('agent-c', null, f.io)
+
+  it('(A)+(D) Enter swallowed and Esc does not close it either: ONE escalation naming Esc as a way out; cleared when gone', async () => {
+    const stuck = () => io([FOCUS_RESUME_NO_SUMMARY])
+    expect(await dismissResumeSummaryModalIfPresent('agent-c', null, stuck().io)).toBe('blocked')
+    expect(await dismissResumeSummaryModalIfPresent('agent-c', null, stuck().io)).toBe('blocked')
+    expect(esc.escalated.map((e) => e.key)).toEqual(['resume-dialog-blocked:agent-c'])
+    expect(esc.escalated[0].belaText).toContain('vagy Esc (folytatja, uj beszelgetest nem indit)')
+    expect(esc.escalated[0].belaText).not.toMatch(/—| -- /)
+    expect(await dismissResumeSummaryModalIfPresent('agent-c', null, io([IDLE]).io)).toBe('absent')
+    expect(esc.cleared).toEqual(['resume-dialog-blocked:agent-c'])
+  })
+
+  it('(B) cursor already on the target but "pick a row first": the Up nudge (a no-op on the first row), re-check, Enter', async () => {
+    const hinted = HINT(FOCUS_RESUME_NO_SUMMARY)
+    expect(resumeDialogNeedsArrow(hinted)).toBe(true)
+    expect(resumeDialogNudgeKeys(hinted)).toEqual(['Up'])
+    const f = io([hinted, hinted, FOCUS_RESUME_NO_SUMMARY, IDLE])
+    expect(await dismissResumeSummaryModalIfPresent('agent-d', null, f.io)).toBe('answered')
+    expect(f.sent).toEqual(['Up', 'Enter'])
+  })
+
+  it('(B) nudge keys off the first row: Up then Down (one away, one back)', () => {
+    const p = HINT(moveTo(IDLE_FOCUS_NEW_WITH_DESC, /❯ Start a new/, /^ {2}Resume from summary/))
+    expect(resumeDialogNudgeKeys(p)).toEqual(['Up', 'Down'])
+  })
+
+  it('(B) the hint still there after the nudge: no Enter, Esc path', async () => {
+    const hinted = HINT(FOCUS_RESUME_NO_SUMMARY)
+    const f = io([hinted, hinted, hinted, IDLE])
+    expect(await dismissResumeSummaryModalIfPresent('agent-e', null, f.io)).toBe('dismissed')
+    expect(f.sent).toEqual(['Up', 'Escape'])
+  })
+
+  it('the move does not land: no Enter, Esc; still up -> escalated', async () => {
+    const f = io([IDLE_FOCUS_NEW_WITH_DESC])
+    expect(await dismissResumeSummaryModalIfPresent('agent-f', null, f.io)).toBe('blocked')
+    expect(f.sent).toEqual(['Down', 'Escape'])
+    expect(f.sent).not.toContain('Enter')
+    expect(esc.escalated.length).toBe(1)
+  })
+
+  it('an unknown shape: Esc first (dismiss / resume, never a new conversation)', async () => {
+    const unk = pane(['  Resume', '  Start a new conversation'])
+    const f = io([unk, unk, IDLE])
+    expect(await dismissResumeSummaryModalIfPresent('agent-g', null, f.io)).toBe('dismissed')
+    expect(f.sent).toEqual(['Escape'])
+  })
+
+  it('the old numbered dialog gets no Esc when it cannot be answered: escalated directly', async () => {
+    const oldUnk = OLD_NUMBERED.replace('❯ 1. Resume from summary (recommended)', '  1. Resume from summary (recommended)')
+    const f = io([oldUnk])
+    expect(await dismissResumeSummaryModalIfPresent('agent-h', null, f.io)).toBe('blocked')
     expect(f.sent).toEqual([])
     expect(esc.escalated.length).toBe(1)
   })
-  it('no dialog: nothing sent, nothing escalated', async () => {
-    const f = io(['──────\n❯ \n──────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'])
-    await dismissResumeSummaryModalIfPresent('agent-d', null, f.io)
+
+  it('(E) the dialog under a visible idle footer: an alert, no key, once', async () => {
+    const under = [...HEAD, '❯ Resume', '  Start a new conversation', '', '─'.repeat(40), '❯ ', '─'.repeat(40), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
+    expect(detectsResumeDialog(under)).toBeNull()
+    const f = io([under])
+    expect(await dismissResumeSummaryModalIfPresent('agent-i', null, f.io)).toBe('alerted')
+    expect(await dismissResumeSummaryModalIfPresent('agent-i', null, io([under]).io)).toBe('alerted')
+    expect(f.sent).toEqual([])
+    expect(esc.escalated.map((e) => e.key)).toEqual(['resume-dialog-footer:agent-i'])
+  })
+
+  it('BELA live evidence 2026-11-27 14:49:26: a QUOTED "Resume from summary" in bela-channels drew "1"+Enter from the old code; now nothing', async () => {
+    const quoted = [
+      '⏺ A logban: "Dismissed Claude Code resume-from-summary modal" -- a "Resume from summary" szoveg az en paneemben volt idezve.',
+      '',
+      '─'.repeat(80), '❯ ', '─'.repeat(80),
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(/Resume from summary/.test(quoted)).toBe(true) // the old trigger fired on this
+    const f = io([quoted])
+    expect(await dismissResumeSummaryModalIfPresent(MAIN_SESSION, null, f.io)).toBe('absent')
     expect(f.sent).toEqual([])
     expect(esc.escalated).toEqual([])
-    expect(esc.cleared).toEqual([])
+  })
+
+  it('no dialog: absent, nothing sent', async () => {
+    const f = io([IDLE])
+    expect(await dismissResumeSummaryModalIfPresent('agent-j', null, f.io)).toBe('absent')
+    expect(f.sent).toEqual([])
   })
 })

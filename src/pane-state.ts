@@ -992,6 +992,54 @@ export function resumeDialogKeys(pane: string): string[] | null {
   return [...move, 'Enter']
 }
 
+// PROGI 6252 (read from the 2.1.326 JS source, xFi / Vle): on the idle trigger the dialog SWALLOWS Enter
+// while the draft under it is not empty (needsArrow: the router may have typed a message while the dialog was
+// up); any Up / Down clears that, even when the focus does not move, and the footer then stops showing
+// "↑/↓ pick a row first". Up on the first row is a no-op there.
+const RESUME_PICK_A_ROW_RX = /pick a row first/
+
+/** The resume dialog's footer asks for an arrow first (an Enter would be swallowed). Pure. */
+export function resumeDialogNeedsArrow(pane: string): boolean {
+  if (!pane) return false
+  return RESUME_PICK_A_ROW_RX.test(pane.split('\n').slice(-RESUME_LIVE_REGION_LINES).join('\n'))
+}
+
+/** The arrow "nudge" that clears needsArrow without changing the target: Up on the first option row (a
+ *  no-op there), otherwise Up then Down (one away, one back). null when the shape is not understood. Pure. */
+export function resumeDialogNudgeKeys(pane: string): string[] | null {
+  if (!pane) return null
+  const lines = pane.split('\n')
+  let cursorIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(CURSOR_GLYPH)) { cursorIdx = i; break }
+  }
+  if (cursorIdx < 0) return null
+  const kinds = lines.map(resumeRowKind)
+  const isOption = (k: ResumeRow) => k != null && k !== 'desc'
+  if (!isOption(kinds[cursorIdx])) return null
+  let first = cursorIdx
+  while (first > 0 && kinds[first - 1] != null) first--
+  for (let i = first; i < cursorIdx; i++) if (isOption(kinds[i])) return ['Up', 'Down']
+  return ['Up']
+}
+
+/** PROGI 6252 (E): the dialog seems to be up although an idle footer is visible (detectsResumeDialog says
+ *  null there, by its quote guard). Only for an alert, never for a key: the exact title row plus both a
+ *  "Resume" and a "Start a new conversation" option row in the live region, not busy. Pure. */
+export function resumeDialogUnderIdleFooter(pane: string): boolean {
+  if (!pane || !pane.trim()) return false
+  const lines = pane.split('\n')
+  const busyRegion = lines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
+  for (const rx of BUSY_INDICATORS) {
+    if (rx.test(busyRegion)) return false
+  }
+  if (!hasIdleFooter(lines)) return false
+  const live = lines.slice(-RESUME_LIVE_REGION_LINES)
+  const titleRow = live.some((l) => l.replace(/[\u2502|]/g, '').trim() === 'Resume this conversation?')
+  const kinds = live.map(resumeRowKind)
+  return titleRow && kinds.includes('resume') && kinds.includes('new')
+}
+
 /**
  * Classify the pane as a Claude Code first-run gate, or null when it is a
  * normal (busy / idle / typing) surface. Pure + dependency-free.

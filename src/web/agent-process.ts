@@ -26,6 +26,9 @@ import {
   firstRunAcceptKeys,
   detectsResumeDialog,
   resumeDialogKeys,
+  resumeDialogNeedsArrow,
+  resumeDialogNudgeKeys,
+  resumeDialogUnderIdleFooter,
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { beginRestart, endRestart } from './restart-lock.js'
@@ -1839,38 +1842,101 @@ async function dismissSurveyModalIfPresent(session: string, host: string | null 
 // after the move before Enter (answerDialogFromPane). An uncertain shape gets NO key and is escalated (BELA
 // first, the owner if it stays).
 const resumeDialogBlocked = new Set<string>()
+const resumeDialogFooterAlerted = new Set<string>()
+// PROGI 6252 (C): "Resume from summary" is refused within 1000 ms of the dialog appearing; wait a bit more
+// before any key, and as long again before judging the result (A).
+export const RESUME_DIALOG_SETTLE_MS = 1200
+
+export type ResumeDialogOutcome = 'absent' | 'answered' | 'dismissed' | 'blocked' | 'alerted'
 
 export async function dismissResumeSummaryModalIfPresent(
   session: string,
   host: string | null = null,
   io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
-): Promise<void> {
+): Promise<ResumeDialogOutcome> {
+  const escKey = `resume-dialog-blocked:${session}`
   try {
-    const pane = io.capture(session, host)
-    const kind = pane != null ? detectsResumeDialog(pane) : null
+    let pane = io.capture(session, host)
+    let kind = pane != null ? detectsResumeDialog(pane) : null
     if (kind == null) {
-      if (pane != null && resumeDialogBlocked.delete(session)) clearOwnerEscalation(`resume-dialog-blocked:${session}`)
-      return
+      // (E) the dialog under a visible idle footer: an alert, never a key.
+      if (pane != null && resumeDialogUnderIdleFooter(pane)) {
+        if (!resumeDialogFooterAlerted.has(session)) {
+          resumeDialogFooterAlerted.add(session)
+          const text = `A(z) ${session} session kepernyojen egy "Resume this conversation?" dialogus latszik, de alatta az ures beviteli sor is: ezt az alakot nem valaszolom meg automatikusan. Nezd meg: tmux attach -t ${session}; ha tenyleg fent van, a nyilakkal a "Resume from summary" (vagy a "Resume") sor, majd Enter, vagy Esc (folytatja, uj beszelgetest nem indit).`
+          escalateToOwner({ key: `resume-dialog-footer:${session}`, belaText: `[resume-dialog] ${text}`, ownerText: `⚠️ ${text} BÉLA mar ertesitve volt errol, de nem oldodott meg.` })
+        }
+        return 'alerted'
+      }
+      if (pane != null) {
+        if (resumeDialogBlocked.delete(session)) clearOwnerEscalation(escKey)
+        if (resumeDialogFooterAlerted.delete(session)) clearOwnerEscalation(`resume-dialog-footer:${session}`)
+      }
+      return 'absent'
     }
-    const res = await answerDialogFromPane(session, host, pane as string, resumeDialogKeys, io)
+    // (C) no key before the dialog has been up for more than a second.
+    await io.wait(RESUME_DIALOG_SETTLE_MS)
+    pane = io.capture(session, host)
+    kind = pane != null ? detectsResumeDialog(pane) : null
+    if (kind == null) return 'absent'
+    let res = await (async (): Promise<'answered' | 'blocked'> => {
+      const keys = resumeDialogKeys(pane as string)
+      if (keys == null) return 'blocked'
+      // (B) the cursor already on the target but the footer asks for an arrow first: an Enter would be
+      // swallowed. Nudge (Up on the first row is a no-op; otherwise Up then Down), re-check, then Enter.
+      if (keys.length === 1 && resumeDialogNeedsArrow(pane as string)) {
+        const nudge = resumeDialogNudgeKeys(pane as string)
+        if (nudge == null) return 'blocked'
+        for (const k of nudge) { io.send(session, host, k); await io.wait(ACCEPT_DIALOG_KEY_GAP_MS) }
+        await io.wait(ACCEPT_DIALOG_VERIFY_MS)
+        const again = io.capture(session, host)
+        if (again == null || resumeDialogNeedsArrow(again)) return 'blocked'
+        const k2 = resumeDialogKeys(again)
+        if (k2 == null || k2.length !== 1) return 'blocked'
+        io.send(session, host, 'Enter')
+        return 'answered'
+      }
+      return answerDialogFromPane(session, host, pane as string, resumeDialogKeys, io)
+    })()
     if (res === 'answered') {
-      // /compact (Resume from summary) starts immediately and can run for minutes; the dialog is gone.
-      await io.wait(300)
-      logger.info({ session, kind }, 'Answered the Claude Code resume dialog from the pane (summary when offered, else resume; never a new conversation)')
-      return
+      // (A) judge the result: an Enter can be swallowed or refused silently; a dialog still up is 'blocked'.
+      await io.wait(RESUME_DIALOG_SETTLE_MS)
+      const after = io.capture(session, host)
+      if (after != null && detectsResumeDialog(after) == null) {
+        logger.info({ session, kind }, 'Answered the Claude Code resume dialog from the pane (summary when offered, else resume; never a new conversation)')
+        if (resumeDialogBlocked.delete(session)) clearOwnerEscalation(escKey)
+        return 'answered'
+      }
+      res = 'blocked'
+      logger.warn({ session, kind }, 'Resume dialog still up after the Enter (swallowed or refused)')
     }
-    logger.warn({ session, kind }, 'Resume dialog in a shape not understood (or the move did not land): NO Enter sent, escalating')
+    // (D) uncertain shape, a move that did not land, or an Enter that did not take: Esc first (on the
+    // "Resume this conversation?" dialog Esc is dismiss / resume, never a new conversation), then look again.
+    // The old numbered dialog gets no Esc (its Esc is not read from the source): straight to escalation.
+    if (kind === 'resume-conversation') {
+      io.send(session, host, 'Escape')
+      await io.wait(RESUME_DIALOG_SETTLE_MS)
+      const afterEsc = io.capture(session, host)
+      if (afterEsc != null && detectsResumeDialog(afterEsc) == null) {
+        logger.warn({ session }, 'Resume dialog not answerable from the pane: dismissed with Esc (resumes, no new conversation)')
+        if (resumeDialogBlocked.delete(session)) clearOwnerEscalation(escKey)
+        return 'dismissed'
+      }
+    }
+    logger.warn({ session, kind }, 'Resume dialog in a shape not understood, the Enter did not take and Esc did not close it: escalating')
     if (!resumeDialogBlocked.has(session)) {
       resumeDialogBlocked.add(session)
-      const text = `A(z) ${session} session egy "Resume this conversation?" (folytatas) dialoguson all, de az alakjat nem ismerem fel biztosan, ezert NEM nyomtam Entert (a rossz valasz uj beszelgetest inditana, kontextusvesztessel). Valaszd ki kezzel: tmux attach -t ${session}, a nyilakkal a "Resume from summary" (vagy ha nincs, a "Resume") sort, majd Enter. Addig a session nem kap uzenetet.`
+      const text = `A(z) ${session} session egy "Resume this conversation?" (folytatas) dialoguson all, es automatikusan nem tudtam lezarni (az alakot nem ismertem fel biztosan, vagy az Enter / Esc nem hatott). Valaszd ki kezzel: tmux attach -t ${session}, a nyilakkal a "Resume from summary" (vagy ha nincs, a "Resume") sort, majd Enter, vagy Esc (folytatja, uj beszelgetest nem indit). Addig a session nem kap uzenetet.`
       escalateToOwner({
-        key: `resume-dialog-blocked:${session}`,
+        key: escKey,
         belaText: `[resume-dialog] ${text}`,
         ownerText: `⚠️ ${text} BÉLA mar ertesitve volt errol, de nem oldodott meg.`,
       })
     }
+    return 'blocked'
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/answer the resume dialog')
+    return 'blocked'
   }
 }
 
