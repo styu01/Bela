@@ -70,6 +70,7 @@ import {
   clearPendingSetup,
   PENDING_LOGIN_TTL_S,
   PENDING_SETUP_TTL_S,
+  TotpStoreError,
   type TotpRecord,
 } from '../dashboard-totp.js'
 import {
@@ -177,6 +178,12 @@ export const TOTP_NOT_ENABLED = { error: 'Two-step sign-in is off.', code: 'totp
 export const TOTP_SETUP_MISSING = { error: 'Start the setup first (or again: it expired).', code: 'totp_setup_missing' }
 export const TOTP_CODE_REQUIRED = { error: 'A code is required.', code: 'totp_code_required' }
 
+/** DOCKERHTTPS1119: the owner ping when the second factor is turned off on the web (password + code). */
+export function totpDisabledNotice(username: string): string {
+  return `🔑 Kétlépcsős belépés kikapcsolva a dashboardon (jelszóval és kóddal): "${username}". ` +
+    'Ha nem te voltál, a jelszavad és egy kódod mással is megvan: változtasd meg a jelszót, és kapcsold vissza a kétlépcsős belépést.'
+}
+
 function noStoreJson(res: http.ServerResponse, body: unknown, status: number): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' })
   res.end(JSON.stringify(body))
@@ -223,7 +230,8 @@ export function checkSecondFactor(rec: TotpRecord, rawCode: string, now: number 
  *  break-glass there is `npm run dashboard-user -- totp:off`. */
 export function ownerSessionUser(auth: RouteContext['auth'], req: http.IncomingMessage): string | null {
   if (auth?.kind === 'session') return auth.user ?? null
-  if (auth?.kind === 'token') return sessionUserFromCookie(req)
+  // A per-agent token (none in this fork today; upstream's tokenAgent) is never the owner, cookie or not.
+  if (auth?.kind === 'token' && !(auth as { tokenAgent?: unknown }).tokenAgent) return sessionUserFromCookie(req)
   return null
 }
 
@@ -285,14 +293,18 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
     recordSuccess(usernameLc)
     // DOCKERHTTPS1119: with the second factor on, the right password gives no session, only a pending sign-in that
     // POST /api/auth/login/totp completes with a code. A damaged store refuses (fail closed), never logs in on the
-    // password alone.
+    // password alone, for a user whose database flag is on. With the flag off the password is enough (the flag is the
+    // source of truth, see ../dashboard-totp.ts), so a damaged file does not lock out every user.
     let totp: TotpRecord | undefined
     try {
       totp = getTotpForUser(user)
     } catch (err) {
-      logger.error({ err: (err as Error).message }, 'login: the two-step sign-in store is unreadable, login refused')
-      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
-      return true
+      if (user.totp_enabled || !(err instanceof TotpStoreError)) {
+        logger.error({ err: (err as Error).message }, 'login: the two-step sign-in store is unreadable, login refused')
+        noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+        return true
+      }
+      logger.warn({ err: err.message, username: user.username }, 'login: the two-step sign-in store is unreadable; the flag is off, password login allowed')
     }
     if (totp) {
       const pending = createPendingLogin(user.id, user.username)
@@ -533,6 +545,8 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
     removeTotpRecord(user.id)
     logConfigChange('security.totp_disable', null, user.username, auth!.kind)
     logger.info({ username: user.username }, 'two-step sign-in: disabled')
+    // The same owner ping as the machine break-glass (dashboard-user totp:off).
+    void notifySecurityEvent(totpDisabledNotice(user.username))
     noStoreJson(res, { ok: true, enabled: false }, 200)
     return true
   }

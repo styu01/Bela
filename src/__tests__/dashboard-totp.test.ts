@@ -13,6 +13,7 @@ import { _resetThrottleForTest } from '../web/login-throttle.js'
 import { _setTotpStorePathForTest, _resetTotpStateForTest, getTotpRecord, PENDING_LOGIN_TTL_S } from '../web/dashboard-totp.js'
 import { hotp, base32Decode, base32Encode, matchTotp, totpStepAt, hashBackupCode, findBackupCode, otpauthUri } from '../web/totp.js'
 import { logger } from '../logger.js'
+import { notifySecurityEvent } from '../notify.js'
 import type { RouteContext } from '../web/routes/types.js'
 
 vi.mock('../notify.js', () => ({
@@ -379,14 +380,19 @@ describe('the secret on the server', () => {
     expect(r.json().code).toBe('totp_required')
   })
 
-  it('a damaged store fails closed even where the database flag is off (a record without the flag still counts)', async () => {
+  it('a damaged store: a user whose flag is OFF signs in with the password; a user whose flag is on gets 503', async () => {
+    // Dani (#2911 review): the flag is the source of truth, so a damaged file no longer locks out every user.
     await seedUser()
+    expect((await call('POST', '/api/auth/users', { auth: ALICE, body: { username: 'bob', password: PW } })).res.statusCode).toBe(201)
     await enableFor()
-    getDb().prepare('UPDATE dashboard_users SET totp_enabled = 0').run()
     writeFileSync(storeFile, '{not json')
-    const r = await passwordStep()
-    expect(r.res.statusCode).toBe(503)
-    expect(r.res.headers['Set-Cookie']).toBeUndefined()
+    const bob = await passwordStep('bob')
+    expect(bob.res.statusCode).toBe(200)
+    expect(cookieOf(bob.res)).not.toBe('')
+    const alice = await passwordStep()
+    expect(alice.res.statusCode).toBe(503)
+    expect(alice.json().code).toBe('totp_store_unavailable')
+    expect(alice.res.headers['Set-Cookie']).toBeUndefined()
   })
 
   it('a damaged store fails closed: the right password gets 503, never a session', async () => {
@@ -543,6 +549,25 @@ describe('turning it off', () => {
     expect((await passwordStep()).res.statusCode).toBe(200)
   })
 
+  it('a successful web disable pings the owner exactly once, naming the user', async () => {
+    const { secret } = await setup()
+    vi.mocked(notifySecurityEvent).mockClear()
+    const r = await call('POST', '/api/auth/totp/disable', { auth: ALICE, body: { password: PW, code: codeAt(secret) } })
+    expect(r.res.statusCode).toBe(200)
+    expect(vi.mocked(notifySecurityEvent)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(notifySecurityEvent).mock.calls[0]![0]).toContain('"alice"')
+  })
+
+  it('a refused web disable (wrong code, wrong password, no code) pings no one', async () => {
+    const { secret } = await setup()
+    vi.mocked(notifySecurityEvent).mockClear()
+    expect((await call('POST', '/api/auth/totp/disable', { auth: ALICE, body: { password: PW, code: '000000' } })).res.statusCode).toBe(401)
+    expect((await call('POST', '/api/auth/totp/disable', { auth: ALICE, body: { password: 'wrong-password-x', code: codeAt(secret) } })).res.statusCode).toBe(401)
+    expect((await call('POST', '/api/auth/totp/disable', { auth: ALICE, body: { password: PW } })).res.statusCode).toBe(400)
+    expect(vi.mocked(notifySecurityEvent)).not.toHaveBeenCalled()
+    expect(getTotpRecord(getDashboardUser('alice')!.id)).toBeDefined()
+  })
+
   it('with the password and an unused backup code (the lost-phone case): off', async () => {
     const { backup } = await setup()
     const r = await call('POST', '/api/auth/totp/disable', { auth: ALICE, body: { password: PW, code: backup[0] } })
@@ -568,5 +593,36 @@ describe('turning it off', () => {
     const r = await call('DELETE', '/api/auth/users/alice', { auth: ALICE })
     expect(r.res.statusCode).toBe(200)
     expect(getTotpRecord(id)).toBeUndefined()
+  })
+})
+
+// BELA 6404 port: this fork's owner proof for the second-factor routes (ownerSessionUser) and the status flag the
+// Settings block keys on. Not in upstream's file: upstream has mayActAsOwner / owner_session from its own gate.
+describe('this fork: ownerSessionUser and /api/auth/status owner_session', () => {
+  it('status: owner_session false for the bare token and a device key, true for a session and for the token with the login cookie', async () => {
+    await seedUser()
+    const cookie = cookieOf((await passwordStep()).res)
+    const st = async (auth: RouteContext['auth'], headers?: Record<string, string>) => (await call('GET', '/api/auth/status', { auth, headers })).json().owner_session
+    expect(await st(TOKEN)).toBe(false)
+    expect(await st({ kind: 'device', device: 'mac', deviceId: 1 } as RouteContext['auth'])).toBe(false)
+    expect(await st({ kind: 'device', device: 'mac', deviceId: 1 } as RouteContext['auth'], { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })).toBe(false)
+    expect(await st(ALICE)).toBe(true)
+    expect(await st(TOKEN, { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })).toBe(true)
+    expect(await st(TOKEN, { cookie: `${SESSION_COOKIE_NAME}=not-a-session` })).toBe(false)
+  })
+  it('a device key WITH the login cookie is still refused (no Bridge owner branch in this fork)', async () => {
+    await seedUser()
+    const cookie = cookieOf((await passwordStep()).res)
+    const r = await call('POST', '/api/auth/totp/setup', { auth: { kind: 'device', device: 'mac', deviceId: 1 } as RouteContext['auth'], headers: { cookie: `${SESSION_COOKIE_NAME}=${cookie}` } })
+    expect(r.res.statusCode).toBe(403)
+    expect(r.json().code).toBe('owner_session_required')
+  })
+  it('the token with a revoked (logged out) login cookie is refused', async () => {
+    await seedUser()
+    const cookie = cookieOf((await passwordStep()).res)
+    await call('POST', '/api/auth/logout', { auth: ALICE, headers: { cookie: `${SESSION_COOKIE_NAME}=${cookie}` } })
+    _clearSessionCacheForTest()
+    const r = await call('POST', '/api/auth/totp/setup', { auth: TOKEN, headers: { cookie: `${SESSION_COOKIE_NAME}=${cookie}` } })
+    expect(r.res.statusCode).toBe(403)
   })
 })

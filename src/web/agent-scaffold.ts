@@ -501,6 +501,13 @@ export function ensureAgentStalenessHook(name: string): boolean {
   return true
 }
 
+// DOCKERHTTPS1119 (upstream 8a96be49): the dashboard login's second-factor store (src/web/dashboard-totp.ts). No
+// sub-agent reads it, so the Read tool is denied on it for every sub-agent, pushed on every spawn (this function
+// rebuilds permissions.deny). It is a text fence on the Read tool, not an OS boundary: the agents run as the same OS
+// user. The `//**/` form is upstream's MEASURED one (Claude Code 2.1.326, 2026-11-19): `Read(**/store/...)` let the
+// Read tool read the file from a sub-agent cwd two levels below, this form and an absolute `//` path refused.
+export const SUBAGENT_TOTP_STORE_DENY = 'Read(//**/store/.dashboard-totp.json)'
+
 export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemplate): void {
   const agentRoot = agentDir(name)
   const settingsDir = join(agentRoot, '.claude')
@@ -518,6 +525,8 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   // allow), so this is a fail-closed layer; the self-pace-gate hook below covers
   // the Bash escape routes a name-deny cannot reach. (2026-06-26 autonom-kor fix.)
   if (agentGetsGovernanceGates(name)) denyList.push(...SELF_PACE_TOOL_DENY)
+  // DOCKERHTTPS1119 (upstream 8a96be49): no sub-agent reads the dashboard login's second-factor store.
+  if (agentGetsGovernanceGates(name) && !denyList.includes(SUBAGENT_TOTP_STORE_DENY)) denyList.push(SUBAGENT_TOTP_STORE_DENY)
   existing.permissions = {
     allow: profile.filesystem.allow.map(p => resolveProfilePlaceholders(p, ctx)),
     deny: denyList,
