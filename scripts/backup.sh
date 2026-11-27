@@ -300,6 +300,9 @@ command -v node >/dev/null 2>&1 || die "required command is missing: node"
 #     excluded below) -- these are what state/credential files actually are,
 #     and a stray large *file* is comparatively rare and easy to add to the
 #     denylist if one ever shows up.
+#   agent-package-credential.json (and its interrupted-write tmp files): the agent package device token
+#     (upstream 3f30ff34 MIOAGENTINSTALL1114, plan 6.4): one per machine, never carried; after a restore the
+#     owner connects again.
 #   - directories: ALLOWLIST ONLY (nothing is swept in unless explicitly
 #     named) -- a new directory must be a deliberate decision, never a
 #     silent default. store/agent-taskstate/ is state, added explicitly.
@@ -312,6 +315,7 @@ if [[ -d store ]]; then
     ! -name '*.bak-*' \
     ! -name 'context-guard-last-pane-*.txt' \
     ! -name usage-history.jsonl \
+    ! -name agent-package-credential.json ! -name 'agent-package-credential.json.*.tmp' \
     -print >> "${REPOLIST}"
   # Explicit directory allowlist. store/projects/, store/reference-docs/, and
   # store/references/ (client/business content, real but potentially large --

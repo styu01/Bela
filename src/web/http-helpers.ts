@@ -53,6 +53,40 @@ export function readBody(
   })
 }
 
+// For routes whose body is OPTIONAL or bounded (upstream 3f30ff34's helper, ported for the agent package routes;
+// BELA 6404): a cut-off or oversized body must not let the route run on defaults. This answers the request (413 over
+// the limit, 400 otherwise) and returns null, so the caller stops.
+export async function readBodyOrRefuse(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  opts: { maxBytes?: number } = {},
+): Promise<Buffer | null> {
+  try {
+    return await readBody(req, opts)
+  } catch (err) {
+    if (err instanceof RequestBodyTooLargeError) {
+      json(res, { error: `Request body too large (max ${err.limit} bytes)`, code: 'body-too-large' }, 413)
+    } else {
+      json(res, { error: 'The request body did not arrive in full; nothing was done', code: 'incomplete-body' }, 400)
+    }
+    return null
+  }
+}
+
+/** A 405 that names the allowed methods (Allow header + body), so a wrong method is not read as a wrong id. */
+export function methodNotAllowed(res: http.ServerResponse, method: string, allowed: readonly string[]): void {
+  const allow = allowed.join(', ')
+  res.writeHead(405, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'private, no-store',
+    Allow: allow,
+  })
+  res.end(JSON.stringify({
+    error: `Method ${method} not allowed here. Allowed: ${allow}.`,
+    hint: 'The method is the problem, not the id in the path.',
+  }))
+}
+
 export function json(res: http.ServerResponse, data: unknown, status = 200): void {
   // Cache-Control: private, no-store prevents CDN / proxy caching of API
   // responses that may contain user-specific data or session state. Without

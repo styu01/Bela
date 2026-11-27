@@ -266,6 +266,21 @@ export const OWNER_SESSION_REQUIRED = {
   code: 'owner_session_required',
 }
 
+export const OWNER_LOGIN_SETUP_REQUIRED_ERROR = 'This needs the dashboard login (an owner session), and no dashboard login exists yet. Create one first: Settings, Security, dashboard login. Then sign in and try again.'
+
+/** The 403 an owner gate (mayActAsOwner) answers with (upstream refuseOwner, ported with the agent package routes;
+ *  BELA 6404). Always code owner_session_required; the per-route text, unless no dashboard login exists yet, when it
+ *  says to create one first. */
+export function refuseOwner(res: http.ServerResponse, msg: string = OWNER_SESSION_REQUIRED.error, extra: Record<string, unknown> = {}): void {
+  const setup = countDashboardUsers(true) === 0
+  json(res, {
+    ...OWNER_SESSION_REQUIRED,
+    error: msg,
+    ...extra,
+    ...(setup ? { setup_required: true, error: OWNER_LOGIN_SETUP_REQUIRED_ERROR } : {}),
+  }, 403)
+}
+
 function totpOwner(auth: RouteContext['auth'], req: http.IncomingMessage, res: http.ServerResponse): ReturnType<typeof getDashboardUser> | null {
   const name = ownerSessionUser(auth, req)
   const user = name ? getDashboardUser(name) : undefined

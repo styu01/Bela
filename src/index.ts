@@ -22,6 +22,7 @@ import { ensureHeartbeatAgent, shouldBootHeartbeatAgent, HEARTBEAT_AGENT_NAME } 
 import { startAgentProcess } from './web/agent-process.js'
 import { renameSharedCredentialsIfSafe, fleetTokenBootPass } from './web/claude-credentials-guard.js'
 import { startWebServer } from './web.js'
+import { removeCredentialTmpLeftovers } from './web/agent-package/remote.js'
 import { logger } from './logger.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
@@ -472,6 +473,15 @@ async function main(): Promise<void> {
   // Database
   initDatabase()
   logger.info('Adatbazis inicializalva')
+
+  // MIOAGENTINSTALL1114 T3: an atomic write of the agent package credential interrupted between write and rename
+  // leaves its tmp file (holding the token) in the store; nothing else ever removes it.
+  try {
+    const removed = removeCredentialTmpLeftovers()
+    if (removed > 0) logger.info({ removed }, 'agent package credential: interrupted-write leftovers removed')
+  } catch (err) {
+    logger.warn({ err }, 'agent package credential leftover cleanup did not run')
+  }
 
   // Backfill embeddings for memories saved before Ollama was available.
   // Fire-and-forget: a missing or slow Ollama instance must not block startup.
