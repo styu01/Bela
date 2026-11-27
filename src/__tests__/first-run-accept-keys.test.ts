@@ -227,3 +227,29 @@ describe('wiring contracts', () => {
     expect(CHANNEL_MONITOR).toMatch(/\} else if \(res === 'blocked'\) \{[\s\S]{0,900}?alertOwnerOrBela\(t, 'first-run-blocked'/)
   })
 })
+
+// BELA 6227 / PROGI 6226: after a SIGSTOP/SIGCONT the old frame stays on screen above the redrawn one,
+// so the pane holds two glyph rows. The LAST one is the live cursor.
+describe('two glyph rows (stale frame kept above the live one)', () => {
+  const live = load(TRUST[0])
+  const staleAbove = ['   ❯ No, exit', '     Yes, I trust this folder', '', live].join('\n')
+  const liveOnYes = moveCursor(live, /❯ No, exit/, /Yes, I trust this folder/)
+
+  it('the live cursor (lower) on No: Down + Enter', () => {
+    expect(firstRunAcceptKeys(staleAbove)).toEqual(['Down', 'Enter'])
+  })
+  it('a stale frame with its cursor on Yes above a live cursor on No: Down + Enter, never a bare Enter', () => {
+    const p = ['   No, exit', ' ❯ Yes, I trust this folder', '', live].join('\n')
+    expect(firstRunAcceptKeys(p)).toEqual(['Down', 'Enter'])
+  })
+  it('the live cursor already on Yes under a stale No frame: a bare Enter', () => {
+    expect(firstRunAcceptKeys(['   ❯ No, exit', '     Yes, I trust this folder', '', liveOnYes].join('\n'))).toEqual(['Enter'])
+  })
+  it('answerAcceptDialog re-verifies on the live (last) cursor too', async () => {
+    const sent: string[] = []
+    const after = ['   ❯ No, exit', '     Yes, I trust this folder', '', liveOnYes].join('\n')
+    const io = { capture: () => after, send: (_s: string, _h: string | null, k: string) => { sent.push(k) }, wait: async () => {} }
+    expect(await answerAcceptDialog('agent-x', null, staleAbove, io)).toBe('answered')
+    expect(sent).toEqual(['Down', 'Enter'])
+  })
+})

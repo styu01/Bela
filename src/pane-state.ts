@@ -855,7 +855,13 @@ const FIRST_RUN_GATES: Array<{ kind: FirstRunGateKind; rx: RegExp }> = [
 export function firstRunAcceptKeys(pane: string): string[] | null {
   if (!pane || !pane.trim()) return null
   const lines = pane.split('\n')
-  const cursorIdx = lines.findIndex(l => l.includes(CURSOR_GLYPH))
+  // The LAST glyph row is the live cursor (BELA 6227, PROGI 6226): after a SIGSTOP/SIGCONT the old
+  // frame stays on screen above the redrawn one, so a pane can hold two "❯ No, exit" rows; the first
+  // one is stale. (Manual loop: the ES2022 target has no Array.prototype.findLastIndex.)
+  let cursorIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(CURSOR_GLYPH)) { cursorIdx = i; break }
+  }
   if (cursorIdx < 0) return null
 
   // The options are the contiguous run of non-blank lines around the cursor.
