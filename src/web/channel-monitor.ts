@@ -1870,7 +1870,8 @@ function gatherRecoveryFacts(agent: string): RecoveryFacts {
   let inProgress: RecoveryFacts['inProgress'] = []
   try {
     // listKanbanCards() already excludes archived cards (archived_at IS NULL
-    // in its own query), so no separate check is needed here.
+    // in its own query), so no separate check is needed here. Since cca1e519
+    // it is a pure read: this brief no longer archives cards as a side effect.
     inProgress = listKanbanCards()
       .filter((c) => c.assignee === agent && c.status === 'in_progress')
       .map((c) => ({ id: c.id, title: c.title }))

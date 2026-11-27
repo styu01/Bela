@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
-  listKanbanCards, createKanbanCard, updateKanbanCard, parentWouldCycle,
+  listKanbanCards, kanbanAssigneeExists, createKanbanCard, updateKanbanCard, parentWouldCycle,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard, unarchiveKanbanCard,
   getKanbanComments, addKanbanComment, getKanbanCardEvents, listKanbanProjects,
   getKanbanCard, getChildCards, getDb,
@@ -199,6 +199,35 @@ export function buildHeartbeatSummaryResponse(
   }
 }
 
+/**
+ * Parse the `includeArchived` query parameter (upstream cca1e519).
+ *
+ * Three-valued on purpose: true / false / null-meaning-REJECT. The bug this replaces was a
+ * two-valued read where every input collapsed into "false" -- `?includeArchived=1` came back with
+ * the archived cards missing and no complaint. Bare presence (`?includeArchived`) reads as TRUE:
+ * the common URL idiom, and it errs toward returning MORE rows.
+ */
+export function parseIncludeArchived(raw: string | null): boolean | null {
+  if (raw === null) return false
+  const v = raw.trim().toLowerCase()
+  if (v === '' || v === '1' || v === 'true' || v === 'yes' || v === 'on') return true
+  if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false
+  return null
+}
+
+// LOCAL (BELA msg 6167): `limit` is honoured, not refused -- agents on this install send it
+// (?limit=1, ?limit=3 in their transcripts). A positive integer up to KANBAN_LIST_LIMIT_MAX;
+// absent -> undefined (no limit); anything else -> null meaning REJECT with a 400, never a silent
+// "no limit".
+export const KANBAN_LIST_LIMIT_MAX = 10_000
+export function parseKanbanLimit(raw: string | null): number | undefined | null {
+  if (raw === null) return undefined
+  const v = raw.trim()
+  if (!/^\d+$/.test(v)) return null
+  const n = Number(v)
+  return n >= 1 && n <= KANBAN_LIST_LIMIT_MAX ? n : null
+}
+
 export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, auth } = ctx
 
@@ -206,8 +235,58 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // Embed each card's labels in one extra JOIN query (getLabelsForAllCards)
     // instead of an N+1 per-card lookup, so the footer-pill UI gets
     // everything it needs in a single round trip.
+    //
+    // Query parameters (upstream cca1e519 + LOCAL limit, BELA msg 6167): unknown -> a LOUD 400 that
+    // names the accepted set, like /api/messages. A silently dropped parameter is worse than a
+    // refused one: the caller gets MORE than it asked for (the whole board as "its" cards) and no
+    // signal. Inventory 2026-11-27 of the non-agent callers -- web/app.js (4 GET /api/kanban, no
+    // query), scripts/, store/, ~/.claude/scheduled-tasks (SKILL.md + task-config.json), skills,
+    // every CLAUDE.md and templates/, src/ internal calls, crontab, systemd user units: NONE sends a
+    // query parameter here. The agents' own calls (transcripts): ?limit= and ?assignee=; both are in
+    // the set below and both take effect.
+    const KNOWN_PARAMS = new Set(['agent', 'assignee', 'includeArchived', 'limit'])
+    const unknown = [...ctx.url.searchParams.keys()].filter((k) => !KNOWN_PARAMS.has(k))
+    if (unknown.length) {
+      json(res, {
+        error: 'unknown query parameter',
+        unknown,
+        known: [...KNOWN_PARAMS],
+        hint: 'a lapok szurese "agent" (vagy "assignee"); EGY lapot a /api/kanban/<id> utvonal ad, nem a ?id= parameter',
+      }, 400)
+      return true
+    }
+    const includeArchived = parseIncludeArchived(ctx.url.searchParams.get('includeArchived'))
+    if (includeArchived === null) {
+      json(res, {
+        error: 'Az includeArchived értéke érvénytelen. Elfogadott: 1, true, yes, on, 0, false, no, off (vagy érték nélkül = igaz).',
+      }, 400)
+      return true
+    }
+    const limit = parseKanbanLimit(ctx.url.searchParams.get('limit'))
+    if (limit === null) {
+      json(res, { error: `A limit értéke érvénytelen. Elfogadott: egész szám 1 és ${KANBAN_LIST_LIMIT_MAX} között.` }, 400)
+      return true
+    }
+    // `assignee=` means the same as `agent=` (the dashboard and the agents' CLAUDE.md teach
+    // different names for it). An unrecognised name 400s instead of silently matching nothing:
+    // accepted are the configured names (OWNER_NAME, BOT_NAME, the fleet -- what
+    // /api/kanban/assignees advertises) or any assignee already on the board, case-insensitively.
+    const agentRaw = ctx.url.searchParams.get('agent') ?? ctx.url.searchParams.get('assignee')
+    const agent = agentRaw !== null && agentRaw.trim() !== '' ? agentRaw.trim() : undefined
+    if (agent !== undefined) {
+      const wanted = agent.toLowerCase()
+      const isConfigured = [OWNER_NAME, BOT_NAME, ...listAgentNames()].some((n) => n.toLowerCase() === wanted)
+      if (!isConfigured && !kanbanAssigneeExists(agent)) {
+        json(res, {
+          error: 'unknown agent',
+          agent,
+          hint: 'lásd GET /api/kanban/assignees az elfogadott nevekért, vagy egy a táblán már szereplő assignee (kis/nagybetű mindegy)',
+        }, 400)
+        return true
+      }
+    }
     const labelsByCard = getLabelsForAllCards()
-    const cards = listKanbanCards().map((card) => ({ ...card, labels: labelsByCard.get(card.id) ?? [] }))
+    const cards = listKanbanCards({ includeArchived, agent, limit }).map((card) => ({ ...card, labels: labelsByCard.get(card.id) ?? [] }))
     jsonMaybeGzip(req, res, cards)
     return true
   }

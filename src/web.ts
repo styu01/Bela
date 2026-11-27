@@ -25,6 +25,7 @@ import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startInboxNudgeWatcher } from './web/inbox-nudge-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
+import { startKanbanArchiveRunner } from './web/kanban-archive-runner.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startModelFallbackRunner } from './web/model-fallback-runner.js'
@@ -337,6 +338,13 @@ export function startWebServer(port = 3420): http.Server {
   const scheduleInterval = webOnly ? undefined : startScheduleRunner()
   if (!webOnly) logger.info('Schedule runner started (60s poll)')
 
+  // upstream cca1e519: the kanban archive sweep used to ride along on every listKanbanCards() call,
+  // so reading the board wrote to it. It is a scheduled job now -- and it MUST be started here, or
+  // KANBAN_ARCHIVE_DONE_DAYS silently stops doing anything. Same webOnly gate as every neighbouring
+  // runner: a web-only (staging) instance never archives.
+  const kanbanArchiveInterval = webOnly ? undefined : startKanbanArchiveRunner()
+  if (!webOnly) logger.info('Kanban archive runner started (60min poll, 70s offset)')
+
   // Pre-start the interactive agent worker (subscription backend) so the first
   // heartbeat / scheduled generation after boot does not pay the cold-boot
   // latency. runViaWorker still lazy-starts + restarts it on demand, so this is
@@ -560,6 +568,7 @@ export function startWebServer(port = 3420): http.Server {
   server.close = (cb?: (err?: Error) => void) => {
     clearInterval(routerInterval)
     clearInterval(scheduleInterval)
+    clearInterval(kanbanArchiveInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     workerLivenessCancelled = true
     if (workerLivenessInterval) clearInterval(workerLivenessInterval)

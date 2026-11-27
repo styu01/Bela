@@ -219,7 +219,22 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   // enough to curl on a schedule; the point is that a growing queue behind a
   // busy agent becomes visible BEFORE someone mistakes it for lost messages.
   if (path === '/api/messages/backlog' && method === 'GET') {
-    json(res, getPendingBacklogByAgent())
+    // upstream cca1e519: the same rule as /api/messages and /api/kanban -- an unknown parameter is
+    // a LOUD 400, a strict set. The endpoint used to drop `agent=` silently and return the whole
+    // fleet's backlog. Inventory 2026-11-27: no non-agent caller sends a query parameter here.
+    const KNOWN_PARAMS = new Set(['agent', 'assignee'])
+    const unknown = [...url.searchParams.keys()].filter((k) => !KNOWN_PARAMS.has(k))
+    if (unknown.length) {
+      json(res, {
+        error: 'unknown query parameter',
+        unknown,
+        known: [...KNOWN_PARAMS],
+        hint: 'a backlog szurese "agent" (vagy "assignee"); parameter nelkul a TELJES flotta jon',
+      }, 400)
+      return true
+    }
+    const agent = (url.searchParams.get('agent') ?? url.searchParams.get('assignee') ?? '').trim() || undefined
+    json(res, getPendingBacklogByAgent(agent))
     return true
   }
 

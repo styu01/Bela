@@ -446,15 +446,15 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_recurring_events_card ON kanban_recurring_template_events(card_id, created_at)`)
 
-  // listKanbanCards()'s auto-archive sweep (below) treats a card's updated_at
+  // sweepArchivedKanbanCards()'s auto-archive sweep (below) treats a card's updated_at
   // as "when did this card last change", and archives a done card once that
   // timestamp is older than KANBAN_ARCHIVE_DONE_DAYS. Both production status
   // writers (updateKanbanCard, moveKanbanCard) always bump updated_at in the
   // same statement as the status change -- but a raw SQL UPDATE that only
   // touches status (kanban 0664aadf: an ad hoc status fix) leaves the OLD
   // updated_at in place, so a card that just became 'done' looks like it has
-  // been sitting untouched for weeks and gets archived on the very next page
-  // load, before anyone sees it. Self-healing rather than a CHECK constraint,
+  // been sitting untouched for weeks and gets archived on the very next sweep
+  // (hourly since cca1e519; before it, the very next page load), before anyone sees it. Self-healing rather than a CHECK constraint,
   // same reasoning as agent_messages_delivered_needs_ts above: the point is
   // to keep updated_at honest for any writer, not to police the write path.
   db.exec(`
@@ -1979,16 +1979,55 @@ export interface KanbanRecurringTemplateEvent {
   created_at: number
 }
 
-export function listKanbanCards(): KanbanCard[] {
+/**
+ * Archive `done` cards older than KANBAN_ARCHIVE_DONE_DAYS. Returns how many it archived.
+ *
+ * Upstream cca1e519: this used to run inside listKanbanCards(), so READING the board WROTE to it
+ * -- on this install every dashboard board load and every recovery-brief (channel-monitor) read
+ * ran this UPDATE first (measured 2026-11-27: 278 cards, 243 archived, 0 eligible-but-unarchived,
+ * because some read always swept them first). It is a scheduled job now
+ * (src/web/kanban-archive-runner.ts) and the read path no longer touches archived_at.
+ */
+export function sweepArchivedKanbanCards(): number {
   const archiveDays = Number(getEffectiveSettingValue('KANBAN_ARCHIVE_DONE_DAYS'))
   const archiveCutoff = Math.floor(Date.now() / 1000) - archiveDays * 86400
-  // Auto-archive done cards older than KANBAN_ARCHIVE_DONE_DAYS days
-  db.prepare(
+  const res = db.prepare(
     "UPDATE kanban_cards SET archived_at = ? WHERE status = 'done' AND archived_at IS NULL AND updated_at < ?"
   ).run(Math.floor(Date.now() / 1000), archiveCutoff)
+  return res.changes
+}
+
+// A PURE READ, deliberately (upstream cca1e519): the archive sweep moved to
+// sweepArchivedKanbanCards() above.
+//
+// includeArchived: the function used to hard-code the filter with no way for a caller to ask
+// otherwise, so /api/kanban answered "all cards" with a narrowed set and no error. Default false
+// keeps the board's behaviour.
+// agent: filtered HERE, server-side, because a caller cannot verify a filter that never ran; the
+// route used to drop `agent=` silently and hand back the whole table. COLLATE NOCASE: configured
+// names are capitalised (Istvan) while most stored assignees are lowercase.
+// limit (LOCAL, BELA msg 6167): the first N cards in board order. Agents on this install send
+// ?limit= (seen in their transcripts); the route now honours it instead of ignoring it.
+export function listKanbanCards(
+  opts: { includeArchived?: boolean; agent?: string; limit?: number } = {},
+): KanbanCard[] {
+  const conds: string[] = []
+  const vals: unknown[] = []
+  if (!opts.includeArchived) conds.push('archived_at IS NULL')
+  if (opts.agent) { conds.push('assignee = ? COLLATE NOCASE'); vals.push(opts.agent) }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')} ` : ''
+  const limit = opts.limit !== undefined ? 'LIMIT ?' : ''
+  if (opts.limit !== undefined) vals.push(opts.limit)
   return db
-    .prepare('SELECT rowid AS seq, * FROM kanban_cards WHERE archived_at IS NULL ORDER BY sort_order ASC')
-    .all() as KanbanCard[]
+    .prepare(`SELECT rowid AS seq, * FROM kanban_cards ${where}ORDER BY sort_order ASC ${limit}`)
+    .all(...vals) as KanbanCard[]
+}
+
+// Whether any card -- archived included -- is assigned to `name`, case-insensitively. The
+// kanban `agent=` filter accepts such a name even when it is not a configured agent (this board
+// has 'codex' and 'Istvan' cards), so they stay filterable.
+export function kanbanAssigneeExists(name: string): boolean {
+  return db.prepare('SELECT 1 FROM kanban_cards WHERE assignee = ? COLLATE NOCASE LIMIT 1').get(name) !== undefined
 }
 
 export function getKanbanCard(id: string): KanbanCard | undefined {
@@ -2621,14 +2660,16 @@ export function markMessageDelivered(id: number): boolean {
 // never going to pick it up.
 export type AgentBacklog = { agent: string; pending: number; oldestAgeSeconds: number }
 
-export function getPendingBacklogByAgent(): AgentBacklog[] {
+export function getPendingBacklogByAgent(agent?: string): AgentBacklog[] {
   const now = Math.floor(Date.now() / 1000)
+  // upstream cca1e519: the `agent` filter runs server-side; the route used to drop it and hand the
+  // caller the WHOLE fleet's backlog to read as its own (same class as /api/kanban's agent=).
   const rows = db.prepare(
     `SELECT to_agent AS agent, COUNT(*) AS pending, MIN(created_at) AS oldest
        FROM agent_messages
-      WHERE status = 'pending'
+      WHERE status = 'pending'${agent ? ' AND to_agent = ?' : ''}
       GROUP BY to_agent`,
-  ).all() as { agent: string; pending: number; oldest: number }[]
+  ).all(...(agent ? [agent] : [])) as { agent: string; pending: number; oldest: number }[]
   return rows
     .map(r => ({ agent: r.agent, pending: r.pending, oldestAgeSeconds: Math.max(0, now - r.oldest) }))
     // oldest-first: whoever has been waiting longest is the one worth looking at

@@ -1069,7 +1069,7 @@ window._i18n.hu = {
   'settings.desc.KANBAN_WIP_WARN_COLOR':       'A WIP-badge színe a figyelmeztetési küszöb (WARN_PCT) felett, limit előtt.',
   'settings.desc.KANBAN_WIP_FULL_COLOR':       'A WIP-badge színe, amikor az oszlop pontosan a limiten áll.',
   'settings.desc.KANBAN_WIP_OVER_COLOR':       'A WIP-badge színe, amikor az oszlop túllépte a limitet.',
-  'settings.desc.KANBAN_ARCHIVE_DONE_DAYS':    'Ennyi napnál régebbi "done" kártyák automatikusan archiválódnak a listKanbanCards() hívásakor.',
+  'settings.desc.KANBAN_ARCHIVE_DONE_DAYS':    'Ennyi napnál régebbi "done" kártyák automatikusan archiválódnak. Az óránként futó kanban-archiváló runner végzi (nem a lekérdezés).',
   'settings.desc.KANBAN_AGING_WARN_H':         'Ennyi óra inaktivitás után jelenik meg az első (sárga) aging-jelzés a kártyán.',
   'settings.desc.KANBAN_AGING_CAUTION_H':      'Ennyi óra inaktivitás után vált narancssárgára az aging-jelzés.',
   'settings.desc.KANBAN_AGING_CRITICAL_H':     'Ennyi óra inaktivitás után vált pirosra (kritikus) az aging-jelzés.',

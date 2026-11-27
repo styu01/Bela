@@ -752,7 +752,7 @@ window._i18n.en = {
   'settings.desc.KANBAN_WIP_WARN_COLOR':       'WIP badge color above the warning threshold (WARN_PCT), before the limit.',
   'settings.desc.KANBAN_WIP_FULL_COLOR':       'WIP badge color when the column is exactly at the limit.',
   'settings.desc.KANBAN_WIP_OVER_COLOR':       'WIP badge color when the column has exceeded the limit.',
-  'settings.desc.KANBAN_ARCHIVE_DONE_DAYS':    'Cards in "done" older than this many days are automatically archived when listKanbanCards() is called.',
+  'settings.desc.KANBAN_ARCHIVE_DONE_DAYS':    'Cards in "done" older than this many days are automatically archived by the hourly kanban archive runner (not by reading the board).',
   'settings.desc.KANBAN_AGING_WARN_H':         'Hours of inactivity after which the first (yellow) aging indicator appears on a card.',
   'settings.desc.KANBAN_AGING_CAUTION_H':      'Hours of inactivity after which the aging indicator turns orange.',
   'settings.desc.KANBAN_AGING_CRITICAL_H':     'Hours of inactivity after which the aging indicator turns red (critical).',
