@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
-  listKanbanCards, kanbanAssigneeExists, createKanbanCard, updateKanbanCard, writeKanbanCard, parentWouldCycle,
+  listKanbanCards, kanbanAssigneeExists, createKanbanCard, updateKanbanCard, writeKanbanCard, writeKanbanCardIfFieldsUnchanged, KANBAN_VERSIONED_FIELDS, parentWouldCycle,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard, unarchiveKanbanCard,
   getKanbanComments, addKanbanComment, getKanbanCardEvents, listKanbanProjects,
   getKanbanCard, getChildCards, getDb,
@@ -489,7 +489,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // and `expected_version` (a hand-built partial body). Neither is ever written as a column. A
     // malformed value is a 400, not "no check": a caller that believes it sent a guard must not get
     // an unguarded write.
-    const { version, expected_version, ...data } = parsed as Record<string, unknown>
+    const { version, expected_version, expected_fields, ...data } = parsed as Record<string, unknown>
     const versionError = (v: unknown) => v !== undefined && !(Number.isSafeInteger(v) && (v as number) >= 0)
     if (versionError(version) || versionError(expected_version)) {
       json(res, { error: '"version" / "expected_version" must be a non-negative integer (the version the card was read at)' }, 400)
@@ -500,6 +500,22 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       return true
     }
     const expectedVersion = (expected_version ?? version) as number | undefined
+    // PROGI review 6192 (KOCKAZAT 4): `expected_fields` -- the values the caller based its edit on, for
+    // the fields it writes (the dashboard edit form). Checked field by field (writeKanbanCardIfFieldsUnchanged):
+    // only a change to one of THOSE fields refuses the write. Keys must be PUT-writable columns, values
+    // plain JSON scalars; anything else is a 400, not an unchecked write.
+    let expectedFields: Record<string, unknown> | undefined
+    if (expected_fields !== undefined) {
+      const okShape = expected_fields !== null && typeof expected_fields === 'object' && !Array.isArray(expected_fields)
+        && Object.entries(expected_fields as Record<string, unknown>).every(([k, v]) =>
+          (KANBAN_VERSIONED_FIELDS as readonly string[]).includes(k)
+          && (v === null || ['string', 'number', 'boolean'].includes(typeof v)))
+      if (!okShape) {
+        json(res, { error: `"expected_fields" must be an object of { field: value } for these fields: ${KANBAN_VERSIONED_FIELDS.join(', ')}` }, 400)
+        return true
+      }
+      expectedFields = expected_fields as Record<string, unknown>
+    }
     let recurringTemplateChanging = false
     if (Object.hasOwn(data, 'is_recurring_template')) {
       if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
@@ -521,8 +537,21 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
         json(res, { error: data.parent_id === id ? 'Egy kártya nem lehet a saját szülője' : 'Ez a szülő-kapcsolat kört zárna be' }, 409); return true
       }
     }
-    const written = writeKanbanCard(id, data, recurringTemplateChanging ? describeAuthActor(auth) : undefined, expectedVersion)
+    const actorForEvents = recurringTemplateChanging ? describeAuthActor(auth) : undefined
+    // Both given: the field check and the version check, in the one immediate write.
+    const written = expectedFields
+      ? writeKanbanCardIfFieldsUnchanged(id, data, expectedFields, actorForEvents, expectedVersion)
+      : writeKanbanCard(id, data, actorForEvents, expectedVersion)
     if (written.ok) { json(res, { ok: true, version: written.version }); return true }
+    if (written.reason === 'stale_fields') {
+      json(res, {
+        error: `A kártya közben megváltozott azokban a mezőkben, amelyeket most mentenél (${written.fields.join(', ')}): semmi nem mentődött. Olvasd be újra, és a jelenlegi változatra tedd rá a módosításodat.`,
+        conflict: 'stale_fields',
+        fields: written.fields,
+        current_version: written.current_version,
+      }, 409)
+      return true
+    }
     if (written.reason === 'stale') {
       // An instruction, not a diagnosis: the next act has to be a re-read; reposting the same body
       // is exactly the overwrite this refused.

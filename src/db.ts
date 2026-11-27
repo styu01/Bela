@@ -2140,6 +2140,41 @@ export type KanbanCardWriteResult =
   | { ok: true; version: number }
   | { ok: false; reason: 'not_found' }
   | { ok: false; reason: 'stale'; current_version: number }
+  | { ok: false; reason: 'stale_fields'; fields: string[]; current_version: number }
+
+// The stored value as a comparable primitive. is_recurring_template is 0/1 in the row but a boolean
+// in a dashboard body; undefined (a key the snapshot lacked) means "no value", like NULL.
+function kanbanFieldComparable(field: string, value: unknown): unknown {
+  if (value === undefined) return null
+  if (field === 'is_recurring_template') return value ? 1 : 0
+  return value
+}
+
+/**
+ * FIELD-LEVEL lost-update check (PROGI review msg 6192, KOCKAZAT 4). `expectedFields` holds, for
+ * each field the caller writes, the value it based its edit on (the dashboard form: the values of
+ * the fresh card it was filled from). The write is refused ('stale_fields') only when one of THOSE
+ * fields changed since -- a status / sort_order / archived_at / parent_id move by an agent or the
+ * scheduler while the owner types no longer refuses the owner's save, while a description (or any
+ * written field) changed meanwhile still does. Read, compare and write run in ONE immediate
+ * transaction, so no other process can slip a change in between.
+ */
+export function writeKanbanCardIfFieldsUnchanged(
+  id: string,
+  fields: Partial<Omit<KanbanCard, 'id' | 'created_at' | 'version'>>,
+  expectedFields: Record<string, unknown>,
+  recurringTemplateActor?: string,
+  expectedVersion?: number | null,
+): KanbanCardWriteResult {
+  return db.transaction((): KanbanCardWriteResult => {
+    const card = getKanbanCard(id)
+    if (!card) return { ok: false, reason: 'not_found' }
+    const changed = Object.keys(expectedFields).filter((k) =>
+      kanbanFieldComparable(k, (card as unknown as Record<string, unknown>)[k]) !== kanbanFieldComparable(k, expectedFields[k]))
+    if (changed.length) return { ok: false, reason: 'stale_fields', fields: changed, current_version: card.version }
+    return writeKanbanCard(id, fields, recurringTemplateActor, expectedVersion)
+  }).immediate()
+}
 
 // The boolean form for callers that make no claim about what they read.
 export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at' | 'version'>>, recurringTemplateActor?: string): boolean {

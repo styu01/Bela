@@ -1852,6 +1852,12 @@ function getDragAfterElement(col, y) {
 // object, so without this it would be the one UI write that can still replace someone else's text.
 // null = a new card, or a card from a server without versions: the PUT then goes unchecked.
 let cardEditBaseVersion = null
+// The fresh card the edit form was filled from (PROGI review 6192, KOCKAZAT 4). On save the form
+// sends, for the fields it writes, the values it was filled from (`expected_fields`); the server
+// refuses only if one of THOSE changed meanwhile -- a status / order / archive move by an agent no
+// longer refuses the owner's save, a description written meanwhile still does.
+let cardEditBase = null
+const CARD_FORM_FIELDS = ['title', 'description', 'assignee', 'priority', 'project', 'is_recurring_template', 'due_date']
 
 function openNewCardModal(status) {
   document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_new')
@@ -1863,6 +1869,7 @@ function openNewCardModal(status) {
   document.getElementById('cardRecurringTemplate').checked = false
   document.getElementById('cardEditId').value = ''
   cardEditBaseVersion = null
+  cardEditBase = null
   document.getElementById('cardEditStatus').value = status || 'planned'
   populateAssigneeSelect('cardAssignee')
   populateProjectSuggestions()
@@ -1903,7 +1910,11 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
 
   try {
     if (editId) {
-      if (cardEditBaseVersion !== null) data.expected_version = cardEditBaseVersion
+      if (cardEditBase) {
+        data.expected_fields = Object.fromEntries(CARD_FORM_FIELDS.map((k) => [k, cardEditBase[k] === undefined ? null : cardEditBase[k]]))
+      } else if (cardEditBaseVersion !== null) {
+        data.expected_version = cardEditBaseVersion
+      }
       const res = await fetch(`/api/kanban/${encodeURIComponent(editId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -1911,7 +1922,7 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
       })
       if (!res.ok) {
         const e = await res.json().catch(() => ({}))
-        if (res.status === 409 && e.conflict === 'stale_version') {
+        if (res.status === 409 && (e.conflict === 'stale_version' || e.conflict === 'stale_fields')) {
           // The modal STAYS OPEN: the typed text is the only copy of it.
           showToast(t('kanban.toast.stale_version_form'), 8000)
           return
@@ -2322,6 +2333,7 @@ async function showCardDetail(card) {
     document.getElementById('cardEditId').value = card.id
     // Taken at FILL time, not at save time: it must describe the text the user edits on top of.
     cardEditBaseVersion = Number.isInteger(card.version) ? card.version : null
+    cardEditBase = { ...card }
     document.getElementById('cardEditStatus').value = card.status
     populateAssigneeSelect('cardAssignee', card.assignee)
     populateProjectSuggestions()
