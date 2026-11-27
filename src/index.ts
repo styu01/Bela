@@ -9,6 +9,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { runLsof } from './lsof.js'
 import type { Server as HttpServer } from 'node:http'
@@ -26,6 +27,7 @@ import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
 import { startStoreWatcher, stopStoreWatcher } from './store-watcher.js'
+import { shouldRunBackgroundServices, ALLOW_SECOND_INSTANCE_SERVICES_KEY } from './web/hook-registration-guard.js'
 import { AGENTS_BASE_DIR } from './web/agent-config.js'
 import {
   acquirePortLock,
@@ -477,6 +479,19 @@ async function main(): Promise<void> {
     if (count > 0) logger.info({ count }, 'Embedding backfill befejezve')
   }).catch(err => logger.warn({ err }, 'Embedding backfill hiba (Ollama nem elerheto)'))
 
+  // PROGI 6352 / BELA 6357: the second-instance decision of the dashboard's background services (web.ts,
+  // upstream 2c093a10) for the services started HERE too. A worktree checkout or a temp-dir clone (or a WEB_ONLY
+  // staging instance) must not start the heartbeat agent on the shared tmux server, run the Telegram invite
+  // auto-approve monitor against the shared ~/.claude/channels/telegram/access.json, send the owner a daily digest,
+  // or watch the channel audit / store files. MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES=1 in the process environment
+  // opts in, as for the dashboard services. The memory decay sweep stays: it only touches this instance's own DB.
+  const services = shouldRunBackgroundServices({
+    projectRoot: PROJECT_ROOT, webOnly: process.env['WEB_ONLY'] === 'true', tmpDir: tmpdir(),
+    allowSecondInstance: process.env[ALLOW_SECOND_INSTANCE_SERVICES_KEY] === '1',
+  })
+  const servicesOff = !services.run
+  if (servicesOff) logger.warn({ reason: services.reason }, 'Second instance / WEB_ONLY: heartbeat agent, invite monitor, daily digest, channel-request and store watchers not started')
+
   // Memory decay (24h cycle)
   runDecaySweep()
   decayInterval = setInterval(runDecaySweep, 24 * 60 * 60 * 1000)
@@ -506,7 +521,7 @@ async function main(): Promise<void> {
     }, msUntil)
     logger.info({ nextRun: target.toLocaleString('hu-HU') }, 'Napi naplo utemezve')
   }
-  scheduleDailyDigest()
+  if (!servicesOff) scheduleDailyDigest()
 
   // Heartbeat -- 2026-06-02 architecture switch: the dedicated channel-less
   // `heartbeat` sub-agent now handles the hourly summary via the scheduled-
@@ -545,7 +560,9 @@ async function main(): Promise<void> {
       .catch((err) => logger.warn({ err }, 'credentials-guard: fleet-token boot pass failed'))
   }, 15_000)
 
-  if (shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
+  if (servicesOff) {
+    logger.info('Heartbeat agent boot-start skipped (second instance / WEB_ONLY)')
+  } else if (shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
     ensureHeartbeatAgent()
     logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
     const heartbeatStart = await startAgentProcess(HEARTBEAT_AGENT_NAME)
@@ -566,14 +583,16 @@ async function main(): Promise<void> {
   // No-op for non-discord providers.
   ensureDiscordChannelGroup()
 
-  // Telegram invite auto-approve monitor (one-click pairing).
-  startInviteMonitor(MAIN_AGENT_ID, AGENTS_BASE_DIR)
+  if (!servicesOff) {
+    // Telegram invite auto-approve monitor (one-click pairing).
+    startInviteMonitor(MAIN_AGENT_ID, AGENTS_BASE_DIR)
 
-  // Slack channel request watcher (audit.jsonl -> pending_channel_requests).
-  startChannelRequestWatcher()
+    // Slack channel request watcher (audit.jsonl -> pending_channel_requests).
+    startChannelRequestWatcher()
 
-  // Store file audit watcher
-  startStoreWatcher()
+    // Store file audit watcher
+    startStoreWatcher()
+  }
 
   // Web dashboard
   webServer = startWebServer(WEB_PORT)

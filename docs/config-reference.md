@@ -404,7 +404,7 @@ A főbb konfigurációs változók a launchd plist-ben (`~/Library/LaunchAgents/
 | `ANTHROPIC_API_KEY` | Claude API kulcs |
 | `OWNER_NAME` | A tulajdonos neve (pl. "Jónás Gergő") |
 | `BOT_NAME` | A főágens neve (pl. "Jarvis") |
-| `WEB_ONLY` | `true` = minden háttér-szolgáltatás ki (ütemező, router, monitorok, worker-előindítás). **Csak a folyamat környezetéből hat** (`WEB_ONLY=true node dist/index.js`); a `.env`-be írva hatástalan, mert nincs dotenv |
+| `WEB_ONLY` | `true` = minden háttér-szolgáltatás ki (ütemező, router, monitorok, worker-előindítás, és az `index.ts` saját szolgáltatásai: heartbeat-ágens indítás, Telegram meghívó-figyelő, napi napló, channel-request és store-figyelő). **Csak a folyamat környezetéből hat** (`WEB_ONLY=true node dist/index.js`); a `.env`-be írva hatástalan, mert nincs dotenv |
 | `MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES` | Egy második példány (git worktree, ideiglenes mappában álló klón) WEB_ONLY nélkül sem futtat háttér-szolgáltatást, nem tölti fel a globális ütemezett feladatokat, és nem indít workert, mert az ütemezője a globális ütemezett feladatokat az élő sessionökbe lőné. `1` = mégis fusson (szándékos teszt-példány), és ezt indításkor figyelmeztetésként naplózza. **Csak a folyamat környezetéből hat**, mint a `WEB_ONLY`. Második példánynak a git worktree és az ideiglenes mappában (`/tmp`, `/private/tmp`, `/var/folders`, az OS tmpdir) álló klón számít: egy ezeken KÍVÜLI sima `git clone` telepítésnek számít, ott a szolgáltatások futnak, tehát ott a `WEB_ONLY=true` a védelem |
 
 ---

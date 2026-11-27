@@ -382,7 +382,7 @@ Key configuration variables live in the launchd plist (`~/Library/LaunchAgents/c
 | `ANTHROPIC_API_KEY` | Claude API key |
 | `OWNER_NAME` | Owner name (e.g. "Jónás Gergő") |
 | `BOT_NAME` | Main agent name (e.g. "Jarvis") |
-| `WEB_ONLY` | `true` = every background service off (schedule runner, router, monitors, worker pre-start). **Read from the process environment only** (`WEB_ONLY=true node dist/index.js`); a `.env` line has no effect, there is no dotenv |
+| `WEB_ONLY` | `true` = every background service off (schedule runner, router, monitors, worker pre-start, and the services `index.ts` starts itself: the heartbeat agent, the Telegram invite monitor, the daily digest, the channel-request and store watchers). **Read from the process environment only** (`WEB_ONLY=true node dist/index.js`); a `.env` line has no effect, there is no dotenv |
 | `MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES` | A second instance (git worktree, a clone under a temp dir) runs no background services even without WEB_ONLY, seeds no global scheduled tasks and starts no worker, because its schedule runner would fire the global scheduled tasks into the live sessions. `1` = run them anyway (a deliberate test instance), logged as a warning at start. **Process environment only**, as `WEB_ONLY`. A second instance is a git worktree or a clone under a temp dir (`/tmp`, `/private/tmp`, `/var/folders`, the OS tmpdir): a plain `git clone` OUTSIDE those counts as an install and runs the services, so there `WEB_ONLY=true` is the guard |
 
 ---
