@@ -91,7 +91,7 @@ describe('resume give-up', () => {
     const body = RUNNER_SRC.slice(start, end)
     const noneBranch = body.indexOf("if (decision.action === 'none') {")
     expect(noneBranch).toBeGreaterThan(-1)
-    const wiring = body.indexOf('if (decision.reason === RESUME_GIVE_UP_REASON) await reportResumeGiveUp(name)')
+    const wiring = body.indexOf('if (decision.reason === RESUME_GIVE_UP_REASON) await reportResumeGiveUp(name, running)')
     expect(wiring).toBeGreaterThan(noneBranch)
     // inside the none-branch: before that branch's own early return
     expect(wiring).toBeLessThan(body.indexOf('return', noneBranch))
@@ -102,7 +102,7 @@ describe('resume give-up', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1)
     expect(createAgentMessage).toHaveBeenCalledTimes(1)
     const [from, to, text] = vi.mocked(createAgentMessage).mock.calls[0]
-    expect(from).toBe('samu')
+    expect(from).toBe('system') // not the sub-agent: its pending outbound must stay clean (PROGI 6136 (4))
     expect(to).toBe('marveen')
     expect(text).toContain('"samu"')
     expect(text).toContain('NEM ment ki')
@@ -116,7 +116,7 @@ describe('resume give-up', () => {
     await reportResumeGiveUp('marveen')
     expect(createAgentMessage).toHaveBeenCalledTimes(1)
     const [from, to, text] = vi.mocked(createAgentMessage).mock.calls[0]
-    expect(from).toBe('marveen')
+    expect(from).toBe('system')
     expect(to).toBe('marveen')
     expect(text).toContain('"marveen"')
     expect(notifyChannel).not.toHaveBeenCalled()
@@ -133,5 +133,11 @@ describe('resume give-up', () => {
     expect(text).toContain('"samu"')
     expect(text).toContain(`${READY_TIMEOUT_MS / 60_000} percen belul`)
     expect(text).toContain('/x/HANDOFF.md')
+  })
+
+  it('an agent that is not running gets no notice, only a log line (PROGI 6136 (4))', async () => {
+    await reportResumeGiveUp('samu', false)
+    expect(createAgentMessage).not.toHaveBeenCalled()
+    expect(notifyChannel).not.toHaveBeenCalled()
   })
 })

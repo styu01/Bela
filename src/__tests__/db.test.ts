@@ -597,3 +597,12 @@ describe('getDispatchedPendingStats -- the gate does not count reports upward, i
     expect(getDispatchedPendingStats('gs-main3', NOW, CUTOFF, 'gs-main3').count).toBe(0)
   })
 })
+
+// PROGI msg 6136 (4): the context-guard's resume give-up notice comes from 'system', so it never sits in the
+// sub-agent's own pending-outbound count.
+describe('getDispatchedPendingStats -- a system notice about a sub-agent is not that sub-agent\'s outbound', () => {
+  it('a give-up notice from system to the main agent leaves the sub-agent at 0', () => {
+    createAgentMessage('system', 'gu-main', '[CONTEXT-GUARD] A(z) "gu-sub" agent restartja utan ...', 'context-guard resume give-up notice')
+    expect(getDispatchedPendingStats('gu-sub', Date.now(), 2 * 60 * 60 * 1000, 'gu-main').count).toBe(0)
+  })
+})

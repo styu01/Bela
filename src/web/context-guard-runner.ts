@@ -310,11 +310,19 @@ export function resumeGiveUpNotice(name: string, handoffPath: string): string {
  * BELA first, never straight to his Telegram. So the main agent's notice lands in its own inbox too: the router
  * delivers it once that session takes prompts, which is exactly when it can act on it. No new direct-Telegram path.
  */
-export async function reportResumeGiveUp(name: string): Promise<void> {
+export async function reportResumeGiveUp(name: string, running = true): Promise<void> {
+  // PROGI msg 6136 (4), BELA msg 6137: an agent that is not running has nothing to resume into -- a stopped agent is
+  // not an alarm. Log only; the pending-resume record is already dropped when the state leaves await-ready.
+  if (!running) {
+    logger.info({ name }, 'context-guard: resume given up for an agent that is not running -- no notice')
+    return
+  }
   logger.warn({ name }, 'context-guard: resume give-up -- the restarted session never became ready, resume prompt not sent')
   const text = resumeGiveUpNotice(name, handoffPathFor(name))
   try {
-    createAgentMessage(name, MAIN_AGENT_ID, text, 'context-guard resume give-up notice')
+    // Sender 'system', like the restart gate's alert (cbef8ef4): written in the SUB-agent's name it counted as that
+    // agent's own pending outbound work (getDispatchedPendingStats) and held its /clear gate shut (PROGI msg 6136 (4)).
+    createAgentMessage('system', MAIN_AGENT_ID, text, 'context-guard resume give-up notice')
   } catch (err) {
     logger.error({ err, name }, 'context-guard: FAILED TO RAISE the resume give-up notice')
   }
@@ -536,7 +544,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
     dropPendingResume(name, decision.reason)
   }
   if (decision.action === 'none') {
-    if (decision.reason === RESUME_GIVE_UP_REASON) await reportResumeGiveUp(name)
+    if (decision.reason === RESUME_GIVE_UP_REASON) await reportResumeGiveUp(name, running)
     // Idle-flush non-decisions carry the measurement that blocked them
     // ("quiet for only 4m of 20m"), which is the only way to see the tier
     // failing to reach its threshold. It matters because the idle clock is the
