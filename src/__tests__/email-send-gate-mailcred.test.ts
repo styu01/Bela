@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest'
 import { gateDecision, runsMailerScript, touchesMailCredential, buildCredentialMsg } from '../../scripts/email-send-gate.mjs'
 
 const KEY = 'gmail_kiss_i_god_app_pw'
+const KEY2 = 'info@woowebsite.eu jelszó'
 const bash = (command: string) => gateDecision('Bash', { command })
 
 const RUNS: Array<[string, string]> = [
@@ -30,8 +31,15 @@ const CREDENTIAL: Array<[string, string]> = [
   ['heredoc builds the URL', "python3 - <<'EOF'\nurl = 'http://localhost:3420/api/vault/' + key\nEOF"],
   ['node reads vault.js by key', `node -e "import('/home/kisss/marveen/dist/web/vault.js').then(m => console.log(m.getSecret('${KEY}')))"`],
   ['wget without scheme', 'wget -qO- localhost:3420/api/vault/x'],
+  // fixup (PROGI 6134 (3)): the second SMTP credential, the woowebsite.eu mailbox password, in its spellings
+  ['node reads the mailbox password by key', `node -e "import('/home/kisss/marveen/dist/web/vault.js').then(v => v.getSecret('${KEY2}'))"`],
+  ['the mailbox key with a \\u00f3 escape', `python3 -c "k = 'info@woowebsite.eu jelsz\\u00f3'; print(len(k))"`],
+  ['the mailbox key url-encoded, %20', 'python3 -c "u = \'info%40woowebsite.eu%20jelsz%C3%B3\'"'],
+  ['the mailbox key url-encoded, +', 'python3 -c "u = \'info%40woowebsite.eu+jelsz%C3%B3\'"'],
 ]
 const ALLOWED: Array<[string, string]> = [
+  ['the mailbox address alone', 'echo info@woowebsite.eu'],
+  ['the word jelszo alone', 'grep -n jelszo notes.txt'],
   ['read the outreach script', 'cat docs/projects/otfelmero-megkereses/send_outreach.py'],
   ['grep in it', 'grep -n "SUBJECT =" send_outreach.py'],
   ['sed -n print', 'sed -n 1,40p scripts/send-gmail.py'],

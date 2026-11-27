@@ -1032,14 +1032,21 @@ const MANAGE_EMAIL_SEND_OPS = new Set(['send', 'reply', 'replyall', 'forward'])
 // (1) Running one of the mailer scripts, in any spelling the send-invocation rules understand (path, ./, env, sh -c,
 //     interpreter code, heredoc, pipes...): the script name is read as a sender name for that check, so reading the
 //     file ('cat', 'grep', 'sed -n') stays allowed while every way of running it is refused.
-// (2) Touching the credential: the mail app password's vault id anywhere in the command (curl, python -c, a heredoc,
+// (2) Touching the credential: either SMTP credential's vault id anywhere in the command (curl, python -c, a heredoc,
 //     node importing vault.js), or the secret-value endpoint /api/vault/<id> used as an endpoint (after a host or
 //     port, or followed by an id character). A mention like grep "/api/vault/" or "/api/vault/<id>" stays allowed.
 // Stated limit: this is a name rule, not an access control. A copied/renamed script or another vault id read through
 // vault.js is not seen; the real control is restricting the vault value route to the main agent (separate task).
 // The bare name is enough: the replacement keeps any directory in front, and the send rules judge the basename.
 const MAILER_SCRIPT_RX = /(?:send-gmail|send_outreach|send_batch_daily)\.py(?![\w.-])/g
-const MAIL_CREDENTIAL_RX = /gmail_kiss_i_god_app_pw|(?:https?:\/\/|localhost|127\.0\.0\.1|\[::1\]|:\d{2,5})[^\s'"`]*\/api\/vault\/|\/api\/vault\/[A-Za-z0-9_%$.@{-]/i
+// MAILCRED1127 fixup (PROGI msg 6134 (3), BELA msg 6135): this host holds TWO SMTP credentials in the vault -- the
+// Gmail app password and the woowebsite.eu mailbox password ("info@woowebsite.eu jelszo" with an accented o, the
+// default key of send_outreach.py). Both ids are matched in every spelling seen in commands: plain (the prefix up to
+// "jelsz" also covers a ó escape), and URL-encoded (%40 for @, %20 or + for the space), as urllib.parse.quote
+// and curl --data-urlencode write them.
+const MAIL_CREDENTIAL_IDS_RX = /gmail_kiss_i_god_app_pw|info(?:@|%40)woowebsite\.eu(?: |%20|\+)jelsz/i
+const MAIL_CREDENTIAL_RX = new RegExp(MAIL_CREDENTIAL_IDS_RX.source +
+  /|(?:https?:\/\/|localhost|127\.0\.0\.1|\[::1\]|:\d{2,5})[^\s'"`]*\/api\/vault\/|\/api\/vault\/[A-Za-z0-9_%$.@{-]/.source, 'i')
 // 'sed -n 1,40p FILE...' only prints: sed is not a never-exec program for the name layer (its e/w commands run and
 // write), but this exact shape -- -n, one line-range print script, plain file operands -- cannot. It is how the fleet
 // reads these scripts (measured on the real corpus), so for the mailer-script check alone it is taken out first.
