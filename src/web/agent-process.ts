@@ -2524,9 +2524,16 @@ export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
-  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; onDialogBlocked?: 'send' | 'abort' | 'abort-blocked' } = {},
-): Promise<'sent' | 'aborted-busy' | 'skipped-locked' | 'aborted-dialog'> {
+  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; onDialogBlocked?: 'send' | 'abort' | 'abort-blocked'; stillWanted?: () => boolean } = {},
+): Promise<'sent' | 'aborted-busy' | 'skipped-locked' | 'aborted-dialog' | 'aborted-stale'> {
   const lockMode: SendLockMode = opts.lockMode ?? 'deliver'
+  // PROGI 6026 / BELA 6054 (router re-read AFTER the wait): opts.stillWanted is asked once, as late as
+  // possible: after the modal dismissals, the wait-until-idle budget (up to 12 s) and the per-pane lock wait,
+  // immediately before the first keystroke, inside the lock. false: nothing is typed and 'aborted-stale' is
+  // returned. The message router passes a re-read of the row's status, so a row closed during those waits
+  // (a PUT /api/messages/:id, an operator fix) is not typed. It is not asked again before the submit-retry
+  // Enters: by then the text is in the box. A throw counts as true (the caller's own read decides nothing).
+  // Only a caller that passes it can get 'aborted-stale'.
   // BELA 6297 (B): opts.onDialogBlocked 'abort' (the scheduler's callers): when the resume or the model-consent
   // handler leaves its dialog up ('blocked' / 'alerted'; it escalated), nothing is typed and 'aborted-dialog'
   // is returned, so the caller can queue a retry. The default 'send' keeps the historical must-deliver path.
@@ -2614,7 +2621,15 @@ export async function sendPromptToSession(
   // is the per-session critical section. Held under a per-pane in-process mutex
   // (session-send-lock): normal delivery is fail-open (a stuck holder must not
   // silence the fleet); a `recover` caller skips instead of racing a live send.
-  const emitToPane = async (): Promise<'sent'> => {
+  const emitToPane = async (): Promise<'sent' | 'aborted-stale'> => {
+  if (opts.stillWanted) {
+    let wanted = true
+    try { wanted = opts.stillWanted() } catch (err) { logger.warn({ err, session }, 'sendPromptToSession: stillWanted threw; sending') }
+    if (!wanted) {
+      logger.info({ session }, 'sendPromptToSession: the caller no longer wants this prompt (checked after the waits, before typing); nothing typed')
+      return 'aborted-stale'
+    }
+  }
   // Pre-flight buffer-clear when a stale preamble is detected. Reading
   // the pane is best-effort: a capture failure here means we cannot
   // prove the buffer is clean, but proceeding without the clear is no
@@ -2733,7 +2748,7 @@ export async function sendPromptToSession(
     // is visible rather than silently degrading into re-interleaving.
     logger.warn({ session }, 'sendPromptToSession: delivery lock wait budget elapsed; sent WITHOUT the per-pane lock (fail-open) -- a holder may be wedged')
   }
-  return 'sent'
+  return lockResult.value ?? 'sent'
 }
 
 // How long to wait between the two capture samples when the first one

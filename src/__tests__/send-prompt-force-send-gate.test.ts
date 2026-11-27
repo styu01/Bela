@@ -20,13 +20,14 @@ describe('sendPromptToSession waitForIdle gate', () => {
   it('sendPromptToSession accepts a waitForIdle option', () => {
     const sigIdx = AGENT_PROCESS.indexOf('export async function sendPromptToSession(')
     expect(sigIdx).toBeGreaterThan(0)
-    const sig = AGENT_PROCESS.slice(sigIdx, sigIdx + 300)
+    const sig = AGENT_PROCESS.slice(sigIdx, sigIdx + 420)
     // The opts bag grew onBusyTimeout/idleTimeoutMs for the inbox-nudge
     // watcher (an OPTIONAL prompt aborts instead of best-effort-typing into a
     // busy pane); waitForIdle stays the first, default-ON member. DELIVLOCK805
     // added lockMode (per-pane delivery mutex: deliver/recover/held).
     // BELA 6297 (B) added onDialogBlocked (the scheduler's no-typing-into-a-dialog-left-up opt-in).
-    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode;\s*onDialogBlocked\?:\s*'send'\s*\|\s*'abort'\s*\|\s*'abort-blocked'\s*\}/)
+    // PROGI 6026 / BELA 6054 added stillWanted (the router's re-read after the waits, before typing).
+    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode;\s*onDialogBlocked\?:\s*'send'\s*\|\s*'abort'\s*\|\s*'abort-blocked';\s*stillWanted\?:\s*\(\)\s*=>\s*boolean\s*\}/)
   })
 
   it('the gate defaults ON (waitForIdle !== false) so all other callers keep it', () => {

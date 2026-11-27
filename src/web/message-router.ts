@@ -779,7 +779,23 @@ export async function runMessageRouterTick(): Promise<void> {
         // BELA 6313 E1 / PROGI 6312: 'abort-blocked' -- if a resume / model-consent dialog is up that its
         // handler could not answer ('blocked', escalated), nothing is typed: the best-effort send after the
         // idle wait would put its Enter on the dialog's focused row (a model switch, a new conversation).
-        const delivery = await sendPromptToSession(session, prefix + wrapped, host, { onDialogBlocked: 'abort-blocked' })
+        // PROGI 6026 / BELA 6054: the re-read above runs BEFORE sendPromptToSession, which can itself wait (the
+        // idle budget, the per-pane lock). stillWanted re-reads once more after those waits, right before the
+        // first keystroke; a row closed meanwhile is skipped the same way, not re-closed.
+        const delivery = await sendPromptToSession(session, prefix + wrapped, host, {
+          onDialogBlocked: 'abort-blocked',
+          stillWanted: () => getMessageStatus(msg.id) === 'pending',
+        })
+        if (delivery === 'aborted-stale') {
+          logger.info(
+            { id: msg.id, from: msg.from_agent, to: msg.to_agent, liveStatus: getMessageStatus(msg.id) },
+            'message-router: row is no longer pending after the idle / lock wait, skipping delivery (nothing typed)',
+          )
+          routerInjectFailures.delete(msg.id)
+          routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
+          routerUsagePauseNotified.delete(msg.id)
+          continue
+        }
         if (delivery === 'aborted-dialog') {
           // Not a failure: the row stays pending (no routerInjectFailures increment, so it can never turn
           // 'failed' this way), no markMessageDelivered; it goes out on the first tick after the dialog is gone.

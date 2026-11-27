@@ -19,7 +19,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const mockGetPendingMessages = vi.fn()
 const mockMarkDelivered = vi.fn((..._a: unknown[]) => true)
 const mockMarkFailed = vi.fn((..._a: unknown[]) => true)
-const mockSendPrompt = vi.fn(async (..._a: unknown[]) => 'sent' as const)
+const mockSendPrompt = vi.fn(async (..._a: unknown[]): Promise<string> => 'sent')
 // The live status of each row, as the DB would answer it RIGHT NOW -- the test
 // mutates this mid-tick to model a change landing while the tick runs.
 const liveStatus = new Map<number, string | null>()
@@ -120,7 +120,7 @@ describe('message router: the row is re-read before it is delivered', () => {
     liveStatus.clear()
     mockMarkDelivered.mockReturnValue(true)
     mockMarkFailed.mockReturnValue(true)
-    mockSendPrompt.mockImplementation(async () => 'sent' as const)
+    mockSendPrompt.mockImplementation(async () => 'sent')
   })
 
   it('does not deliver a row closed while the tick was running', async () => {
@@ -175,5 +175,52 @@ describe('message router: the row is re-read before it is delivered', () => {
 
     expect(mockGetMessageStatus).toHaveBeenCalledTimes(3)
     expect(mockGetMessageStatus.mock.calls.map((c) => c[0])).toEqual([701, 702, 703])
+  })
+})
+
+describe('PROGI 6026 / BELA 6054: the row is re-read once more AFTER sendPromptToSession\'s own waits', () => {
+  // sendPromptToSession waits (modal dismissals, the idle budget up to 12 s, the per-pane lock) after the
+  // router's re-read. The router hands it stillWanted; the real function asks it right before the first
+  // keystroke (send-prompt-still-wanted.test.ts) and returns 'aborted-stale' when it says no. Modelled here.
+  type Opts = { stillWanted?: () => boolean; onDialogBlocked?: string }
+  const sendLikeTheRealOne = (closeDuringWait?: number) => async (...a: unknown[]) => {
+    const opts = (a[3] ?? {}) as Opts
+    if (closeDuringWait != null) liveStatus.set(closeDuringWait, 'done') // lands during the idle / lock wait
+    if (opts.stillWanted && !opts.stillWanted()) return 'aborted-stale'
+    return 'sent'
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    liveStatus.clear()
+    mockMarkDelivered.mockReturnValue(true)
+    mockMarkFailed.mockReturnValue(true)
+  })
+
+  it('a row closed during the send\'s wait is not typed, not marked delivered and not re-closed', async () => {
+    snapshot([801])
+    mockSendPrompt.mockImplementation(sendLikeTheRealOne(801))
+    await runMessageRouterTick()
+    expect(mockSendPrompt).toHaveBeenCalledTimes(1)
+    expect((mockSendPrompt.mock.calls[0][3] as Opts).onDialogBlocked).toBe('abort-blocked')
+    expect(mockMarkDelivered).not.toHaveBeenCalled()
+    expect(mockMarkFailed).not.toHaveBeenCalled()
+    expect(liveStatus.get(801)).toBe('done')
+  })
+
+  it('stillWanted reads THIS row: closing another row meanwhile does not stop it; the next row is skipped by the early re-read', async () => {
+    snapshot([811, 812])
+    mockSendPrompt.mockImplementation(sendLikeTheRealOne(812))
+    await runMessageRouterTick()
+    expect(mockSendPrompt).toHaveBeenCalledTimes(1)
+    expect(mockMarkDelivered.mock.calls.map((c) => c[0])).toEqual([811])
+  })
+
+  it('POSITIVE CONTROL: an untouched row asked after the wait still goes out', async () => {
+    snapshot([821, 822])
+    mockSendPrompt.mockImplementation(sendLikeTheRealOne())
+    await runMessageRouterTick()
+    expect(mockMarkDelivered.mock.calls.map((c) => c[0])).toEqual([821, 822])
+    for (const c of mockSendPrompt.mock.calls) expect(typeof (c[3] as Opts).stillWanted).toBe('function')
   })
 })
