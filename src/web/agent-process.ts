@@ -62,7 +62,7 @@ import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInher
 import { loadProfileTemplate } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
 import { writeAgentSettingsFromProfile, ensureFleetBaseRulesSection, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection } from './agent-scaffold.js'
-import { packageStartRefusal, prepareFallbackClaudeMd } from './agent-package/install.js'
+import { packageStartRefusal, reportPackageLayersAtStart, prepareFallbackClaudeMd } from './agent-package/install.js'
 import { packageApprovalRefusal } from './agent-package/approval.js'
 import { OWNER_DRIVE_FOLDER } from '../config.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
@@ -1498,6 +1498,9 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     logger.warn({ name, refusal: packageRefusal }, 'agent start refused by the package guard')
     return { ok: false, error: packageRefusal }
   }
+  // Upstream 7eaef333 (PRI3HARDEN1118 point 2): PACKAGE.md + LOCAL.md scanned in report mode on every start, as the
+  // EPERM fallback does; nothing is blocked here.
+  reportPackageLayersAtStart(name, dir)
 
   // Remote agents are handled entirely by the ssh path above (with its own
   // start guard), before any local already-running check / scaffolding.
