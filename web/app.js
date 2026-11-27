@@ -2176,9 +2176,9 @@ async function showCardDetail(card) {
           }
         }
         if (!r.ok) throw new Error('PUT failed')
-        // The next whole-card write from this same view must carry the NEW version.
-        const saved = await r.json().catch(() => ({}))
-        if (Number.isInteger(saved.version)) card.version = saved.version
+        // No version copy here (PROGI review 6192): the response's version also counts changes this
+        // `card` object never saw, so copying it made a later form save look current and overwrite
+        // them. The edit form takes its fields and version from a fresh load instead (cardEditBtn).
         card.assignee = newVal
         assigneeValueEl.textContent = newVal ? newVal : '-- nincs --'
         showToast(t('kanban.toast.assignee_updated'))
@@ -2229,8 +2229,7 @@ async function showCardDetail(card) {
         body: JSON.stringify({ parent_id: newParentId }),
       })
       if (r.ok) {
-        const saved = await r.json().catch(() => ({}))
-        if (Number.isInteger(saved.version)) card.version = saved.version
+        // No version copy (see the assignee edit above).
         card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card)
       } else if (r.status === 409 && (await r.json().catch(() => ({}))).conflict === 'stale_version') {
         showToast(t('kanban.toast.stale_version'), 6000)
@@ -2300,8 +2299,17 @@ async function showCardDetail(card) {
   }
 
   // Edit button
-  document.getElementById('cardEditBtn').onclick = () => {
+  document.getElementById('cardEditBtn').onclick = async () => {
     closeModal(cardDetailOverlay)
+    // PROGI review 6192: fill the form from a FRESH load, not from the `card` object captured when
+    // the detail view opened. That object went stale under the user's own status change (a /move
+    // bumps the version, the object kept the old one -> a false 409 on save) and under the inline
+    // edits' version copy (a newer version over older fields -> an agent's text overwritten with a
+    // 200). One load gives the fields AND the version from the same moment.
+    await loadKanban()
+    const fresh = kanbanCards.find((c) => c.id === card.id)
+    if (!fresh) { showToast(t('kanban.toast.save_error')); return }
+    card = fresh
     document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_edit')
     document.getElementById('cardTitle').value = card.title
     document.getElementById('cardDesc').value = card.description || ''
