@@ -61,14 +61,21 @@ describe('the wizard sends a custom provider apart from the model id', () => {
 })
 
 describe('POST /api/agents stores the custom provider', () => {
+  // LOCAL ADAPTATION (BELA 6404): the checks and the base writes live in agent-create.ts (shared with the agent
+  // package installer); the route runs the checks, answers a refusal, and only then writes the base.
   it('the provider is checked before anything is created, and written right after the model', () => {
-    const check = POST.indexOf('if (customProvider && !loadCustomProvider(customProvider))')
-    const scaffold = POST.indexOf('scaffoldAgentDir(name)')
-    const writeModel = POST.indexOf('writeAgentModel(name, model)')
-    const writeProvider = POST.indexOf('if (customProvider) writeAgentCustomProvider(name, customProvider)')
-    expect(check).toBeGreaterThan(-1)
-    expect(scaffold).toBeGreaterThan(check)
-    expect(writeProvider).toBeGreaterThan(writeModel)
+    const CREATE = readFileSync(new URL('../web/agent-create.ts', import.meta.url), 'utf-8')
+    const checks = between(CREATE, 'export async function checkAgentCreatable(', '\n}\n')
+    const base = between(CREATE, 'export function writeAgentBase(', '\n}\n')
+    expect(checks).toContain('if (customProvider && !loadCustomProvider(customProvider))')
+    expect(base.indexOf('if (base.customProvider) writeAgentCustomProvider(name, base.customProvider)')).toBeGreaterThan(base.indexOf('writeAgentModel(name, base.model)'))
+    expect(base.indexOf('writeAgentModel(name, base.model)')).toBeGreaterThan(base.indexOf('scaffoldAgentDir(name)'))
+    const call = POST.indexOf('await checkAgentCreatable(')
+    const refuse = POST.indexOf('if (refusal) { json(res, refusal.body, refusal.status); return true }')
+    const write = POST.indexOf('writeAgentBase(name, {')
+    expect(call).toBeGreaterThan(-1)
+    expect(refuse).toBeGreaterThan(call)
+    expect(write).toBeGreaterThan(refuse)
   })
 
   const AGENT = '__test-wizard-cp'

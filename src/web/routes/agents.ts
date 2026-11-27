@@ -16,6 +16,7 @@ import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
 import { listCustomProviders, loadCustomProvider } from '../custom-providers.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
+import { checkAgentCreatable, writeAgentBase, refuseIfCliCannotLaunch } from '../agent-create.js'
 import {
   agentDir,
   agentConfigRoot,
@@ -577,23 +578,9 @@ function listAgentSummaries(): AgentSummary[] {
   return listAgentNames().map(getAgentSummary)
 }
 
-/**
- * Server-side guard for picker writes. An unavailable model must be refused
- * here too: a stale/browserless client must not create a session that 400s on
- * its first prompt. A failed measurement deliberately stays fail-open.
- */
-export async function refuseIfCliCannotLaunch(model: string): Promise<Record<string, unknown> | null> {
-  const cli = await measureClaudeCliVersion({ fresh: true })
-  if (!isModelUnsupportedByCli(model, cli.version)) return null
-  const requirement = CLAUDE_MODEL_MIN_CLI[model.replace(/\[[^\]]*\]$/, '')]
-  return {
-    error: 'model not launchable by the installed Claude Code CLI',
-    model,
-    installedCli: cli.version,
-    minCli: requirement?.minCli ?? null,
-    message: `A telepített Claude Code ${cli.version} nem futtatja a(z) ${model} modellt (legalább ${requirement?.minCli ?? '?'} kell; mérve: ${requirement?.measured ?? 'n/a'}). Frissítsd a CLI-t, vagy válassz támogatott modellt.`,
-  }
-}
+// The picker-write CLI guard lives in agent-create.ts now (the create checks call it); re-exported so its importers
+// keep their address.
+export { refuseIfCliCannotLaunch } from '../agent-create.js'
 
 // Max inter-agent messages a single main-agent inbox drain returns. The rest
 // stay pending (FIFO) for the next turn's drain -- bounds the context a single
@@ -902,24 +889,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const model = resolveModelId(rawModel || DEFAULT_MODEL)
     const profileId = (rawProfile || 'default').trim() || 'default'
 
-    if (!name) { json(res, { error: 'Name is required' }, 400); return true }
-    // Checked before anything is created: an agent on a missing provider would not start. A non-string
-    // customProvider is refused too (as in the PUT), not silently dropped into a provider-less "custom:" agent.
-    if (data.customProvider !== undefined && data.customProvider !== null && data.customProvider !== '' && !customProvider) {
-      json(res, { error: 'customProvider must be null or the id of an existing custom provider (Settings > Providers)' }, 400); return true
-    }
-    if (customProvider && !loadCustomProvider(customProvider)) { json(res, { error: `Unknown custom provider: ${customProvider}` }, 400); return true }
-    const cliGate = await refuseIfCliCannotLaunch(model)
-    if (cliGate) { json(res, cliGate, 422); return true }
-    if (!description) { json(res, { error: 'Description is required' }, 400); return true }
-    if (existsSync(agentDir(name))) { json(res, { error: 'Agent already exists' }, 409); return true }
-
-    scaffoldAgentDir(name)
-    writeAgentModel(name, model)
-    if (customProvider) writeAgentCustomProvider(name, customProvider)
-    writeAgentSecurityProfile(name, profileId)
-    writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
-    if (rawName && rawName !== name) writeAgentDisplayName(name, rawName)
+    // The create refusals and the base writes live in agent-create.ts, shared with the agent package installer.
+    const refusal = await checkAgentCreatable(name, model, customProvider, {
+      requireDescription: true, description, rawCustomProvider: data.customProvider,
+    })
+    if (refusal) { json(res, refusal.body, refusal.status); return true }
+    writeAgentBase(name, { model, profileId, customProvider, displayName: rawName || undefined })
 
     logger.info({ name, description }, 'Generating agent CLAUDE.md and SOUL.md...')
     // Set when the personality fell back to a template. The response is deferred

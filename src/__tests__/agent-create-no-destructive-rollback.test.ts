@@ -35,10 +35,11 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
 }
 
-// The create handler: from the scaffold call to the success response.
+// The create handler: from the base writes (writeAgentBase, which scaffolds; agent-create.ts since the agent package
+// port, BELA 6404) to the success response.
 function createHandlerBody(code: string): string {
-  const start = code.indexOf('scaffoldAgentDir(name)')
-  expect(start, 'scaffoldAgentDir call not found').toBeGreaterThan(-1)
+  const start = code.indexOf('writeAgentBase(name, {')
+  expect(start, 'writeAgentBase call not found').toBeGreaterThan(-1)
   const end = code.indexOf("json(res, { ok: true, name })", start)
   expect(end, 'create-handler success response not found').toBeGreaterThan(-1)
   return code.slice(start, end)

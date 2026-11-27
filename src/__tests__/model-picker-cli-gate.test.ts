@@ -52,7 +52,10 @@ describe('model picker CLI gate', () => {
     const route = readFileSync(join(REPO, 'src/web/routes/agents.ts'), 'utf8')
     const html = readFileSync(join(REPO, 'web/index.html'), 'utf8')
     const app = readFileSync(join(REPO, 'web/app.js'), 'utf8')
-    expect(route).toContain('const cliGate = await refuseIfCliCannotLaunch(model)')
+    // LOCAL ADAPTATION (BELA 6404): the create writer's gate runs in checkAgentCreatable (agent-create.ts).
+    const create = readFileSync(join(REPO, 'src/web/agent-create.ts'), 'utf8')
+    expect(create).toContain('const cliGate = await refuseIfCliCannotLaunch(model)')
+    expect(route).toContain('await checkAgentCreatable(')
     expect(route).toContain('refuseIfCliCannotLaunch(String(data.model))')
     expect(html.split('<option value="claude-opus-5-5[1m]"').length - 1).toBe(2)
     expect(html.split('<option value="claude-opus-5-5"').length - 1).toBe(0)
