@@ -62,6 +62,72 @@ export function gateTargets(): GateTarget[] {
   return targets
 }
 
+// BELA 6355 / PROGI 6354 (settings integrity): Claude Code hands a settings file's "env" block to every hook
+// process (measured 2026-11-27, CC 2.1.326: NODE_OPTIONS, PYTHONPATH and PATH arrive in the hook shell), and
+// "disableAllHooks" / "allowManagedHooksOnly" switch the hooks off outright. The gate commands defend the
+// interpreter (unset NODE_OPTIONS, python3 -I), but a PATH entry can still replace `timeout` or `python3`, and
+// LD_* / BASH_ENV / ENV load code into every program the hook starts. None of this is set anywhere today, so
+// any such key is told: per file, at boot and every pass, through the same escalation path (BELA first, the
+// owner if it stays), with a HELYREALLT once the file is clean or gone.
+export interface SettingsFile { agent: string; path: string }
+
+/** Every settings file Claude Code loads for an agent of this install: the user level (the main agent's
+ *  ~/.claude and its isolated .channels-config copy; a sub-agent's .claude-config) and the project level
+ *  (.claude/settings.json and the git-ignored .claude/settings.local.json). Missing files are skipped. */
+export function settingsIntegrityFiles(): SettingsFile[] {
+  const files: SettingsFile[] = [
+    { agent: MAIN_AGENT_ID, path: agentSettingsPath(MAIN_AGENT_ID) },
+    { agent: MAIN_AGENT_ID, path: join(PROJECT_ROOT, '.channels-config', 'settings.json') },
+    { agent: MAIN_AGENT_ID, path: join(PROJECT_ROOT, '.claude', 'settings.json') },
+    { agent: MAIN_AGENT_ID, path: join(PROJECT_ROOT, '.claude', 'settings.local.json') },
+  ]
+  for (const name of listAgentNames()) {
+    if (name === MAIN_AGENT_ID) continue
+    const dir = agentDir(name)
+    files.push(
+      { agent: name, path: agentSettingsPath(name) },
+      { agent: name, path: join(dir, '.claude', 'settings.local.json') },
+      { agent: name, path: join(dir, '.claude-config', 'settings.json') },
+    )
+  }
+  return files
+}
+
+const HAZARD_ENV_EXACT = new Set(['PATH', 'BASH_ENV', 'ENV'])
+const HAZARD_ENV_PREFIXES = ['LD_', 'DYLD_', 'NODE_', 'PYTHON']
+export const HOOK_SWITCH_KEYS = ['disableAllHooks', 'allowManagedHooksOnly'] as const
+
+/** The hazards in one settings file's text: env keys that redirect the programs a hook runs or load code
+ *  into them, and a hook switch that is set (any value but false). Pure. Unparseable text: [] (the
+ *  unreadable-settings check owns that case for the gate files). */
+export function findSettingsHazards(raw: string): string[] {
+  let settings: unknown
+  try { settings = JSON.parse(raw.replace(/^\uFEFF/, '')) } catch { return [] }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return []
+  const obj = settings as Record<string, unknown>
+  const out: string[] = []
+  const env = obj.env
+  if (env && typeof env === 'object' && !Array.isArray(env)) {
+    for (const k of Object.keys(env as Record<string, unknown>).sort()) {
+      if (HAZARD_ENV_EXACT.has(k) || HAZARD_ENV_PREFIXES.some((p) => k.startsWith(p))) out.push(`env.${k}`)
+    }
+  }
+  for (const k of HOOK_SWITCH_KEYS) if (k in obj && obj[k] !== false) out.push(k)
+  return out
+}
+
+export const settingsHazardRecoveryText = (path: string): string =>
+  `[kapu-onteszt] HELYREALLT: ${path} mar nem tartalmaz hook-kornyezeti vagy hook-kapcsolo kulcsot (vagy mar nincs meg).`
+
+export function settingsHazardText(f: SettingsFile, hazards: readonly string[]): string {
+  const env = hazards.filter((h) => h.startsWith('env.'))
+  const sw = hazards.filter((h) => !h.startsWith('env.'))
+  const effects: string[] = []
+  if (env.length) effects.push(`az "env" blokk (${env.join(', ')}) minden hook-folyamatba bekerul: a PATH a kapu-parancsok programjait (timeout, python3, a shell) cserelheti le, az LD_* / DYLD_* / BASH_ENV / ENV / NODE_* / PYTHON* kodot tolthet be, igy a kapu atengedhet`)
+  if (sw.length) effects.push(`a(z) ${sw.join(', ')} kapcsolo a hookokat kikapcsolja: annal az agensnel minden kapu NEM FUT`)
+  return `[kapu-onteszt] SETTINGS-INTEGRITAS: agens ${f.agent}, fajl ${f.path}: ${effects.join('; ')}. Ma ilyen beallitas sehol nincs, tehat ez uj. Teendo: nezd meg, ki irta be (git log / a fajl ideje), es ha nem szandekos, torold a kulcsot; a sub-agens .claude/settings.json-t a kovetkezo spawn ujrageneralja, a tobbit kezzel.`
+}
+
 /** The gate hooks wired in the PreToolUse section of each target's settings. Pure (reader injected). */
 export function collectGateEntries(targets: readonly GateTarget[], read: (path: string) => string | null): GateEntry[] {
   return collectGateEntriesWithStatus(targets, read).entries
@@ -542,6 +608,8 @@ let openUnverifiable: UnverifiableOpen | null = null
 let unreadableStreak = new Map<string, number>()
 const unreadableEscalated = new Set<string>()
 export const UNREADABLE_SETTINGS_PASSES = 2
+// BELA 6355: settings files with a hazard, path -> the hazard signature it was raised for.
+let settingsHazardOpen = new Map<string, string>()
 
 /** A settings file that exists but cannot be read / parsed for UNREADABLE_SETTINGS_PASSES passes in a row is
  *  itself escalated (BELA first, the owner if it stays): Claude Code then either does not start or runs that
@@ -617,6 +685,8 @@ export async function runGateSelfTest(opts: {
   /** BELA 6319 (B): the install's git checkout taken at dashboard start (default: the one startGateSelfTest
    *  detected; none when it was not started); null: not a clone, an unverifiable gate is skipped. */
   gitAnchor?: string | null
+  /** BELA 6355: the settings files the integrity scan reads (default: settingsIntegrityFiles()). */
+  settingsFiles?: SettingsFile[]
 } = {}): Promise<GateRunResult[]> {
   if (running) return []
   running = true
@@ -667,6 +737,39 @@ export async function runGateSelfTest(opts: {
       for (const path of u.clear) {
         unreadableEscalated.delete(path)
         try { alerterU.recover(`gate-settings-unreadable:${path}`, `[kapu-onteszt] HELYREALLT: ${path} ujra olvashato (vagy mar nincs meg).`) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+      }
+    }
+    {
+      // BELA 6355: settings integrity, one escalation per file. A file that cannot be read this pass keeps its
+      // open escalation (a write caught mid-way must not tell a false all-clear); a missing file is clean.
+      const alerterS = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
+      const exists = opts.exists ?? existsSync
+      const seen = new Set<string>()
+      // A test that injects its own targets scans only the settings files it injects too (never the host's).
+      for (const f of opts.settingsFiles ?? (opts.targets ? [] : settingsIntegrityFiles())) {
+        if (seen.has(f.path)) continue
+        seen.add(f.path)
+        const raw = read(f.path)
+        if (raw == null && exists(f.path)) continue
+        const hazards = raw == null ? [] : findSettingsHazards(raw)
+        const sig = hazards.join(',')
+        const prev = settingsHazardOpen.get(f.path)
+        const key = `gate-settings-integrity:${f.path}`
+        if (hazards.length && sig !== prev) {
+          if (prev !== undefined) { try { clearOwnerEscalation(key) } catch { /* not open */ } }
+          settingsHazardOpen.set(f.path, sig)
+          logger.error({ agent: f.agent, path: f.path, hazards }, 'gate self-test: settings file carries a hook-environment / hook-switch hazard -- escalating')
+          try { alerterS.fail(key, settingsHazardText(f, hazards)) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
+        } else if (!hazards.length && prev !== undefined) {
+          settingsHazardOpen.delete(f.path)
+          logger.info({ path: f.path }, 'gate self-test: settings file clean again')
+          try { alerterS.recover(key, settingsHazardRecoveryText(f.path)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+        }
+      }
+      // A file no longer in the list (its agent was removed) is gone: its escalation closes.
+      for (const path of [...settingsHazardOpen.keys()].filter((p) => !seen.has(p))) {
+        settingsHazardOpen.delete(path)
+        try { alerterS.recover(`gate-settings-integrity:${path}`, settingsHazardRecoveryText(path)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
       }
     }
     const rec = reconcileGateEscalations(openGates, results, unreadable)
@@ -742,6 +845,7 @@ export function resetGateSelfTestState(): void {
   openGates = new Map()
   unreadableStreak = new Map()
   unreadableEscalated.clear()
+  settingsHazardOpen = new Map()
   openUnverifiable = null
   running = false
   prunedKeptAlerted.clear()

@@ -43,6 +43,18 @@ a PYTHONPATH és a PATH is megérkezik a hook-shellbe). Ezért:
 Nyitott (külön döntés): a `timeout`, a `python3` és a shell maga is a PATH-on keresett program, egy
 `"env"` blokkbeli PATH ezeket lecserélheti.
 
+## Settings-integritás (önteszt-rész)
+
+Ugyanez az önteszt (boot +90 mp, majd 15 percenként) végignézi a Claude Code által betöltött összes settings
+fájlt: a fő ágensnél a `~/.claude/settings.json`, a `.channels-config/settings.json`, a `.claude/settings.json`
+és a `.claude/settings.local.json`; minden sub-ágensnél a `.claude/settings.json`, a `.claude/settings.local.json`
+és a `.claude-config/settings.json`. Fájlonként egy eszkaláció indul (előbb BÉLA, ha megmarad, a tulajdonos), ha
+- az `"env"` blokkban `PATH`, `BASH_ENV`, `ENV`, vagy `LD_*`, `DYLD_*`, `NODE_*`, `PYTHON*` kulcs áll (ez minden
+  hook-folyamatba bekerül: a kapu programjait lecserélheti, kódot tölthet be), vagy
+- a `disableAllHooks` / `allowManagedHooksOnly` kapcsoló be van állítva (bármi, ami nem `false`).
+Változáskor újra jelez, tiszta (vagy eltűnt) fájlnál `HELYREALLT`. Egy épp olvashatatlan fájl nyitva tartja a
+jelzést. 2026-11-27-én egyik fájlban sincs ilyen kulcs.
+
 ## Önteszt (`src/web/gate-self-test.ts`)
 
 Bootkor (+90 mp) és 15 percenként minden bekötött kapu-parancs pontosan úgy fut, ahogy a settings-ben
