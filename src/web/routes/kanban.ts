@@ -27,8 +27,13 @@ import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import type { RouteContext } from './types.js'
 
-function recurringTemplateFieldIsValid(value: unknown): value is boolean {
-  return typeof value === 'boolean'
+// A boolean, or the 0/1 the column itself holds. LOCAL fix (2026-11-27): GET /api/kanban returns
+// is_recurring_template as the stored INTEGER (measured live: 1, typeof number), and the dashboard's
+// inline assignee / parent edits PUT the whole card back ({...card, assignee}) -- so a boolean-only
+// check answered every one of those edits with a 400. Anything else (strings, 2, null) is still
+// refused. Callers read the value with !!, which treats 0/1 like false/true.
+function recurringTemplateFieldIsValid(value: unknown): value is boolean | 0 | 1 {
+  return typeof value === 'boolean' || value === 0 || value === 1
 }
 
 // Istvan's explicit call (2026-09-23): no authorization is required to mark a
