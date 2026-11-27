@@ -371,7 +371,24 @@ run_guard() {
   CLAUDE_Q="$(printf '%q' "$CLAUDE")"
   # W2: %q-quote the (config-overridable) plugin id, same treatment as the model.
   local PLUGIN_Q; PLUGIN_Q="$(printf '%q' "$RESPAWN_PLUGIN")"
-  local RESPAWN_CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" && $CLAUDE_Q --dangerously-skip-permissions ${MODEL_FLAG}--channels $PLUGIN_Q"
+  # CUSTPROVWATCHDOG1125 (upstream 5fa62e92, ported): the main agent's custom provider, decided BEFORE the
+  # respawn-pane -k below kills the pane: a provider that cannot be used leaves the running session as it is. This
+  # fork's guard respawns on the shared root (no CLAUDE_CONFIG_DIR), so the helper gets no config dir and stamps a
+  # key approval where that respawn reads it. No provider (the normal case): nothing changes.
+  local CUSTOM_PROVIDER_ENV="" _cp_rc NODE_BIN; NODE_BIN="$(command -v node || true)"
+  . "$INSTALL_DIR/scripts/main-custom-provider-env.sh" 2>/dev/null || main_custom_provider_env() { :; }
+  CUSTOM_PROVIDER_ENV="$(main_custom_provider_env "$INSTALL_DIR" "$NODE_BIN" "" "$STORE/channels-failures.log")"
+  _cp_rc=$?
+  if [ "$_cp_rc" -ne 0 ]; then
+    log "main-agent custom provider configured but broken (helper exit $_cp_rc, see channels-failures.log) -- NO respawn, the running session is left as it is"
+    return 0
+  fi
+  if [ -n "$CUSTOM_PROVIDER_ENV" ]; then
+    # the provider's model rides ANTHROPIC_MODEL; a --model flag would override it (as in channels.sh)
+    MODEL_FLAG=""
+    log "main-agent custom-provider env injected"
+  fi
+  local RESPAWN_CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" && ${CUSTOM_PROVIDER_ENV}$CLAUDE_Q --dangerously-skip-permissions ${MODEL_FLAG}--channels $PLUGIN_Q"
 
   log "stuck modal not cleared by Escape -- respawn-pane $SESSION (respawn #$((count+1)))"
   # G: alert ONLY after the respawn-pane actually succeeds, so a failed respawn

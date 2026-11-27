@@ -185,6 +185,7 @@ MODEL_FLAG=""
 # never lands in the RESPAWN_CMD string passed to tmux respawn-pane (visible
 # via ps/pane history otherwise).
 CFG_ENV=""
+CUSTOM_PROVIDER_ENV=""
 if [ -n "$NODE_BIN" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
   _cfg_line="$("$NODE_BIN" "$INSTALL_DIR/scripts/main-agent-isolated-config.mjs" "$CHANNEL_PROVIDER" 2>>"$STORE/channels-failures.log" || true)"
   _cfg_mode="${_cfg_line%%	*}"
@@ -197,12 +198,28 @@ if [ -n "$NODE_BIN" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
     fi
     log "main-agent $_cfg_mode CLAUDE_CONFIG_DIR=$_cfg_dir"
   fi
-  unset _cfg_line _cfg_mode _cfg_dir
+  # CUSTPROVWATCHDOG1125 (upstream 5fa62e92, ported): the main agent's custom provider, decided BEFORE the
+  # respawn-pane -k below kills the pane: a provider that is configured but cannot be used leaves the running session
+  # as it is (no respawn). No provider (the normal case): nothing changes.
+  . "$INSTALL_DIR/scripts/main-custom-provider-env.sh" 2>/dev/null || main_custom_provider_env() { :; }
+  _cp_dir=""; [ -n "$CFG_ENV" ] && _cp_dir="$_cfg_dir"
+  CUSTOM_PROVIDER_ENV="$(main_custom_provider_env "$INSTALL_DIR" "$NODE_BIN" "$_cp_dir" "$STORE/channels-failures.log")"
+  _cp_rc=$?
+  if [ "$_cp_rc" -ne 0 ]; then
+    log "main-agent custom provider configured but broken (helper exit $_cp_rc, see channels-failures.log) -- NO respawn, the running session is left as it is"
+    exit 0
+  fi
+  if [ -n "$CUSTOM_PROVIDER_ENV" ]; then
+    # the provider's model rides ANTHROPIC_MODEL; a --model flag would override it (as in channels.sh)
+    MODEL_FLAG=""
+    log "main-agent custom-provider env injected"
+  fi
+  unset _cfg_line _cfg_mode _cfg_dir _cp_dir _cp_rc
 fi
 
 # Full PATH with .bun/bin -- without it the respawned bun telegram bridge does
 # not come up and the session is channel-less.
-RESPAWN_CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" && export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 && ${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${CHANNEL_PROVIDER}@claude-plugins-official${EXTRA_CHANNELS}"
+RESPAWN_CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" && export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 && ${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${CHANNEL_PROVIDER}@claude-plugins-official${EXTRA_CHANNELS}"
 
 reason="keepalive stale ${age}s"
 [ "$STALE" != true ] && reason=""
