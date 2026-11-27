@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawn, execFileSync } from 'node:child_process'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { join, dirname, relative, isAbsolute, resolve } from 'node:path'
 import { loadavg } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, WEB_PORT } from '../config.js'
 import { logger } from '../logger.js'
@@ -39,6 +39,8 @@ export interface GateRunResult {
   detail: string
   /** A deadline / kill / signal failure: worth one re-run before alerting (PROGI 6248 ii). */
   timeoutLike?: boolean
+  /** The gate file (or a local module it loads) differs from git HEAD (BELA 6270): also re-checked once. */
+  integrity?: boolean
 }
 
 /** Every settings file a gate can be wired in, with the project dir its session runs in. */
@@ -139,8 +141,94 @@ export function gateScriptPath(command: string, gate: string, projectDir: string
   return null
 }
 
+// BELA 6270 / PROGI 6268: the benign call cannot tell a working gate from one whose content was swapped for
+// a script that lets everything through (it passes the benign call too). So the gate file, and every local
+// module it loads, is compared with its blob in git HEAD of the checkout it lives in: `git hash-object
+// --path` (the path's attributes applied, as git itself would store it) against `git rev-parse HEAD:<path>`.
+// A file outside any git checkout (an install that is not a clone) is not verifiable and is skipped; a file
+// in a checkout but not in HEAD, or different from it, is a failing entry with its own effect text.
+export interface GitIo { run: (cwd: string, args: readonly string[]) => string | null }
+const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES']
+export const REAL_GIT: GitIo = {
+  run: (cwd, args) => {
+    try {
+      const env = { ...process.env }
+      for (const k of GIT_ENV_DROP) delete env[k]
+      return execFileSync('git', [...args], { cwd, env, encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    } catch {
+      return null
+    }
+  },
+}
+
+const MJS_IMPORT_RX = /(?:^|[\s;])(?:import|export)\s[^'"`]*?from\s*['"](\.{1,2}\/[^'"]+)['"]|(?:^|[\s;])import\s*\(?\s*['"](\.{1,2}\/[^'"]+)['"]/gm
+const PY_IMPORT_RX = /^\s*(?:from\s+([A-Za-z_][\w]*)\s+import\b|import\s+([A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*))/gm
+
+/** The gate script and the local files it loads, recursively: relative static / dynamic imports of a JS
+ *  module, same-directory modules of a Python script. Pure over `read` / `exists`. */
+export function gateScriptClosure(
+  script: string,
+  read: (path: string) => string | null,
+  exists: (path: string) => boolean = existsSync,
+): string[] {
+  const seen: string[] = []
+  const todo = [script]
+  while (todo.length) {
+    const f = todo.shift() as string
+    if (seen.includes(f)) continue
+    seen.push(f)
+    const src = read(f)
+    if (src == null) continue
+    const deps: string[] = []
+    if (/\.(?:mjs|js|cjs)$/.test(f)) {
+      for (const m of src.matchAll(MJS_IMPORT_RX)) deps.push(resolve(dirname(f), m[1] ?? m[2]))
+    } else if (f.endsWith('.py')) {
+      for (const m of src.matchAll(PY_IMPORT_RX)) {
+        const names = m[1] ? [m[1]] : m[2].split(',').map((x) => x.trim())
+        for (const n of names) deps.push(join(dirname(f), `${n}.py`))
+      }
+    }
+    for (const d of deps) if (exists(d) && !seen.includes(d)) todo.push(d)
+  }
+  return seen
+}
+
+/** null: not verifiable (not in a git checkout). Otherwise ok, or the files that are not HEAD's content. */
+export function checkGateIntegrity(
+  script: string,
+  git: GitIo = REAL_GIT,
+  read: (path: string) => string | null = (p) => { try { return readFileSync(p, 'utf-8') } catch { return null } },
+  exists: (path: string) => boolean = existsSync,
+): { ok: boolean; detail: string } | null {
+  let real = script
+  try { real = realpathSync(script) } catch { /* checked by the caller: it exists */ }
+  const top = git.run(dirname(real), ['rev-parse', '--show-toplevel'])
+  if (!top) return null
+  const bad: string[] = []
+  for (const f of gateScriptClosure(real, read, exists)) {
+    let fr = f
+    try { fr = realpathSync(f) } catch { /* keep */ }
+    const rel = relative(top, fr)
+    if (rel.startsWith('..') || isAbsolute(rel)) { bad.push(`${fr} (a repon kivul)`); continue }
+    const head = git.run(top, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`])
+    if (!head) { bad.push(`${rel} (nincs a git HEAD-ben)`); continue }
+    const work = git.run(top, ['hash-object', `--path=${rel}`, '--', fr])
+    if (work !== head) bad.push(`${rel} (elter a git HEAD-tol)`)
+  }
+  if (!bad.length) return { ok: true, detail: '' }
+  const files = bad.map((b) => b.replace(/ \(.*\)$/, ''))
+  return {
+    ok: false,
+    detail: `a kapu tartalma nem a verziokezelt: ${bad.join(', ')} (repo: ${top}). Nezd meg: git -C ${top} diff HEAD ${files.join(' ')}; ha nem szandekos: git -C ${top} restore --source=HEAD ${files.join(' ')}`,
+  }
+}
+
 /** Run one wired gate command exactly as written, with a benign call on stdin. Never throws. */
-export function runGateCommand(entry: GateEntry, port: number | string = WEB_PORT): Promise<GateRunResult> {
+export function runGateCommand(
+  entry: GateEntry,
+  port: number | string = WEB_PORT,
+  integrity?: (script: string) => { ok: boolean; detail: string } | null,
+): Promise<GateRunResult> {
   const cwd = existsSync(entry.projectDir) ? entry.projectDir : PROJECT_ROOT
   const call = benignToolCall(entry.matcher, cwd, port)
   const input = JSON.stringify({
@@ -152,6 +240,11 @@ export function runGateCommand(entry: GateEntry, port: number | string = WEB_POR
   const script = gateScriptPath(entry.command, entry.gate, cwd)
   if (script != null && script.startsWith('/') && !existsSync(script)) {
     return Promise.resolve({ entry, ok: false, detail: `a kapu fajlja hianyzik: ${script}`, timeoutLike: false })
+  }
+  if (integrity && script != null && script.startsWith('/')) {
+    let v: { ok: boolean; detail: string } | null = null
+    try { v = integrity(script) } catch { v = null }
+    if (v != null && !v.ok) return Promise.resolve({ entry, ok: false, detail: v.detail, timeoutLike: false, integrity: true })
   }
   return new Promise((resolve) => {
     let stdout = ''
@@ -206,16 +299,21 @@ const isWrapped = (e: GateEntry) => e.command.includes(GATE_FAIL_CLOSED_TAG)
  *  them through UNCHECKED (PROGI 6248 iii). The load average is given for a timeout-like failure (ii). */
 export function gateFailureText(failed: readonly GateRunResult[], load: readonly number[] = loadavg()): string {
   const lines = failed.map((r) => {
-    const effect = isWrapped(r.entry)
-      ? 'az illeszkedo hivasok TILTVA'
-      : 'a kapu nem fut, a hivasok ellenorzes NELKUL mennek ki'
+    const effect = r.integrity
+      ? 'ismeretlen: a kapu nem a verziokezelt kodot futtatja, akar mindent atengedhet'
+      : isWrapped(r.entry)
+        ? 'az illeszkedo hivasok TILTVA'
+        : 'a kapu nem fut, a hivasok ellenorzes NELKUL mennek ki'
     return `- agens: ${r.entry.agent}, kapu: ${r.entry.gate} (matcher: ${r.entry.matcher || '(mind)'}), beallitas: ${r.entry.settingsPath}, ${r.detail}. Hatas: ${effect}.`
   })
   const timed = failed.some((r) => r.timeoutLike)
+  const tampered = failed.some((r) => r.integrity)
   return [
     `[kapu-onteszt] KAPU HIBA: ${failed.length} bekotott kapu-bejegyzes egy artalmatlan hivason elbukott, vagy nem fut.${timed ? ` Idotullepes jellegu hiba (60 mp mulva ujrafuttatva is), load: ${load.map((x) => x.toFixed(2)).join(' ')}.` : ''}`,
     ...lines,
-    'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkoze nincs kapuzva. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
+    tampered
+      ? 'Teendo: a verziokezelttol eltero kapu-fajlt ellenorizni (ki es miert modositotta), es ha nem szandekos, visszaallitani a git HEAD tartalmara; ha szandekos, commitolni. 60 mp mulva ujraellenorizve is elter. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.'
+      : 'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkoze nincs kapuzva. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
   ].join('\n')
 }
 
@@ -332,6 +430,8 @@ export async function runGateSelfTest(opts: {
   load?: () => number[]
   exists?: (path: string) => boolean
   now?: () => number
+  /** BELA 6270: the git layer of the integrity check (injectable); null switches the check off. */
+  git?: GitIo | null
 } = {}): Promise<GateRunResult[]> {
   if (running) return []
   running = true
@@ -339,15 +439,24 @@ export async function runGateSelfTest(opts: {
     const read = opts.read ?? ((p: string) => { try { return readFileSync(p, 'utf-8') } catch { return null } })
     const { entries, unreadable } = collectGateEntriesWithStatus(opts.targets ?? gateTargets(), read, opts.exists)
     const results: GateRunResult[] = []
+    // BELA 6270: one integrity verdict per gate script per pass (the same file is wired in many settings).
+    const git = opts.git === undefined ? REAL_GIT : opts.git
+    const verdicts = new Map<string, { ok: boolean; detail: string } | null>()
+    const integrity = git == null ? undefined : (script: string) => {
+      if (!verdicts.has(script)) verdicts.set(script, checkGateIntegrity(script, git, undefined, opts.exists))
+      return verdicts.get(script) ?? null
+    }
     // Sequential on purpose: ~30 short processes every 15 minutes, never a burst on a loaded host.
-    for (const e of entries) results.push(await runGateCommand(e, opts.port))
+    for (const e of entries) results.push(await runGateCommand(e, opts.port, integrity))
     // PROGI 6248 (ii): a timeout-like failure (deadline, kill, signal) on a loaded host is given one more
-    // chance 60 s later; only a second failure counts.
-    const timed = results.map((r, i) => (!r.ok && r.timeoutLike ? i : -1)).filter((i) => i >= 0)
+    // chance 60 s later; only a second failure counts. BELA 6270: an integrity mismatch too (a pass that
+    // caught a checkout / cherry-pick between its file writes and its HEAD move), with a fresh verdict.
+    const timed = results.map((r, i) => (!r.ok && (r.timeoutLike || r.integrity) ? i : -1)).filter((i) => i >= 0)
     if (timed.length) {
-      logger.warn({ count: timed.length, load: loadavg() }, 'gate self-test: timeout-like gate failures, one re-run in 60 s before alerting')
+      logger.warn({ count: timed.length, load: loadavg() }, 'gate self-test: timeout-like or integrity gate failures, one re-run in 60 s before alerting')
       await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? GATE_SELF_TEST_RETRY_DELAY_MS))
-      for (const i of timed) results[i] = await runGateCommand(results[i].entry, opts.port)
+      verdicts.clear()
+      for (const i of timed) results[i] = await runGateCommand(results[i].entry, opts.port, integrity)
     }
     const d = diffGateStates(lastStates, results)
     lastStates = d.next
