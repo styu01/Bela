@@ -359,6 +359,32 @@ describe('pruneStaleHookEntries on the fail-closed gate wrapper', () => {
 describe('boot wiring', () => {
   it('web.ts passes the live PROJECT_ROOT to the boot prune, so a missing live fail-closed gate is kept', () => {
     const src = readFileSync(join(__dirname, '..', 'web.ts'), 'utf-8')
-    expect(src).toContain('pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName), PROJECT_ROOT)')
+    expect(src).toMatch(/pruneStaleHooksFromSettingsFile\(agentSettingsPath\(agentName\), PROJECT_ROOT[,)]/)
+  })
+})
+
+describe('the kept case is handed to the caller (BELA 6223 a)', () => {
+  it('pruneStaleHooksFromSettingsFile calls onKeptFailClosed with the kept commands, and not for a pruned entry', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-guard-kept-'))
+    try {
+      const mark = 'governance-kapu (fail-closed)'
+      const live = `"/n" "${join(dir, 'scripts', 'email-send-gate.mjs')}"; else x; fi; echo "${mark}"`
+      const gone = `"/n" "/old/root/scripts/self-pace-gate.mjs"; else x; fi; echo "${mark}"`
+      const settingsPath = join(dir, 'settings.json')
+      writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [
+        { matcher: 'Bash', hooks: [{ type: 'command', command: live }] },
+        { matcher: 'Bash', hooks: [{ type: 'command', command: gone }] },
+      ] } }))
+      const kept: string[][] = []
+      const removed = pruneStaleHooksFromSettingsFile(settingsPath, dir, (c) => { kept.push(c) })
+      expect(kept).toEqual([[live]])
+      expect(removed).toEqual([gone])
+      // no callback, no kept entry: nothing is called
+      const kept2: string[][] = []
+      pruneStaleHooksFromSettingsFile(settingsPath, undefined, (c) => { kept2.push(c) })
+      expect(kept2).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

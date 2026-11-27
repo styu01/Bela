@@ -15,6 +15,7 @@ import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureAgentStalenessHook, ensureEgressGate, ensureGovernanceGateCommands, ensureQuarantineReader, watchEgressAllowlistForReaderRender, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection, ensureSkillsPathTrapSection } from './web/agent-scaffold.js'
 import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
+import { startGateSelfTest, reportPruneKept } from './web/gate-self-test.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
@@ -503,6 +504,7 @@ export function startWebServer(port = 3420): http.Server {
   // once the worktree is deleted. A failing (exit 2) UserPromptSubmit hook
   // then BLOCKS every prompt and deafens the main agent (2026-07-11 incident).
   const hookDecision = shouldRegisterHooks({ projectRoot: PROJECT_ROOT, webOnly, tmpDir: tmpdir() })
+  let gateSelfTestInterval: NodeJS.Timeout | undefined
   if (!hookDecision.register) {
     logger.info({ reason: hookDecision.reason, projectRoot: PROJECT_ROOT }, 'Hook registration skipped')
   } else {
@@ -518,7 +520,8 @@ export function startWebServer(port = 3420): http.Server {
         // Self-heal FIRST: drop entries this app previously wrote whose script
         // file no longer exists (e.g. a deleted worktree instance's paths), so
         // the re-registration below lands on a clean, unblocked settings file.
-        pruned.push(...pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName), PROJECT_ROOT))
+        pruned.push(...pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName), PROJECT_ROOT,
+          (kept) => reportPruneKept(agentName, agentSettingsPath(agentName), kept)))
         if (ensureAgentHooks(agentName)) patched.push(agentName)
         if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
         if (ensureEgressGate(agentName)) egressPatched.push(agentName)
@@ -542,6 +545,11 @@ export function startWebServer(port = 3420): http.Server {
     } catch (err) {
       logger.warn({ err }, 'Agent hook backfill skipped')
     }
+    // BELA 6223 a: run every wired gate command as written, at boot (+90 s) and every 15 min, and tell the
+    // main agent when one stops passing a benign call. Same isolation rule as the settings writes above: a
+    // worktree / temp / WEB_ONLY instance never runs it (shouldRegisterHooks is false there).
+    gateSelfTestInterval = startGateSelfTest()
+    logger.info('Gate self-test started (15min poll, 90s initial delay)')
   }
 
   try {
@@ -588,6 +596,7 @@ export function startWebServer(port = 3420): http.Server {
     if (federationPollerInterval) clearInterval(federationPollerInterval)
     if (capabilityRunnerInterval) clearInterval(capabilityRunnerInterval)
     clearInterval(tokenCollectInterval)
+    if (gateSelfTestInterval) clearInterval(gateSelfTestInterval)
     return origClose(cb)
   }
 

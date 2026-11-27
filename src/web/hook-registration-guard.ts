@@ -237,7 +237,13 @@ export function pruneStaleHookEntries(
 // untouched (never destroy a user's settings on a parse error). Returns the
 // pruned command strings for logging. `liveRoot` is the root this install runs its shipped hooks from:
 // a fail-closed gate missing under its scripts/ or scripts/hooks/ is kept, with an error log.
-export function pruneStaleHooksFromSettingsFile(settingsPath: string, liveRoot?: string): string[] {
+export function pruneStaleHooksFromSettingsFile(
+  settingsPath: string,
+  liveRoot?: string,
+  // BELA 6223 a: the "kept" case is also reported to the main agent (web.ts passes gate-self-test's
+  // reportPruneKept); this module stays free of that import.
+  onKeptFailClosed?: (commands: string[]) => void,
+): string[] {
   if (!existsSync(settingsPath)) return []
   let settings: Record<string, unknown>
   try {
@@ -250,6 +256,9 @@ export function pruneStaleHooksFromSettingsFile(settingsPath: string, liveRoot?:
   const { changed, removed, keptFailClosed } = pruneStaleHookEntries(settings, { fileExists: existsSync, expectedScriptDirs })
   for (const command of keptFailClosed) {
     logger.error({ settingsPath, command }, 'boot-hook-prune: a fail-closed gate is missing where this install expects it; kept, it denies until the file is back')
+  }
+  if (keptFailClosed.length && onKeptFailClosed) {
+    try { onKeptFailClosed(keptFailClosed) } catch { /* reporting never breaks the prune */ }
   }
   if (changed) atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return removed
