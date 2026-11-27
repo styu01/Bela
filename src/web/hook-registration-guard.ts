@@ -246,8 +246,13 @@ export function pruneStaleHooksFromSettingsFile(
 ): string[] {
   if (!existsSync(settingsPath)) return []
   let settings: Record<string, unknown>
+  // BELA 6300: a leading UTF-8 BOM (Claude Code reads such a file) is dropped for the parse and kept on a
+  // rewrite, so the file's bytes change only where entries were pruned.
+  let bom = ''
   try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>
+    const raw = readFileSync(settingsPath, 'utf-8')
+    if (raw.startsWith('\uFEFF')) bom = '\uFEFF'
+    settings = JSON.parse(bom ? raw.slice(1) : raw) as Record<string, unknown>
   } catch {
     return []
   }
@@ -260,6 +265,6 @@ export function pruneStaleHooksFromSettingsFile(
   if (keptFailClosed.length && onKeptFailClosed) {
     try { onKeptFailClosed(keptFailClosed) } catch { /* reporting never breaks the prune */ }
   }
-  if (changed) atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  if (changed) atomicWriteFileSync(settingsPath, bom + JSON.stringify(settings, null, 2))
   return removed
 }

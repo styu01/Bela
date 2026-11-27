@@ -43,6 +43,20 @@ describe('collectGateEntries', () => {
   })
 })
 
+describe('BELA 6300: a settings file with a leading UTF-8 BOM', () => {
+  it('is parsed (Claude Code reads it), not reported unreadable; a BOM before broken JSON is still unreadable', async () => {
+    const { collectGateEntriesWithStatus } = await import('../web/gate-self-test.js')
+    const bomOk = join(tmp, 'bom-ok.json'); const bomBad = join(tmp, 'bom-bad.json')
+    writeFileSync(bomOk, '\uFEFF' + settingsWith([{ matcher: 'Bash', command: 'node "/x/scripts/self-pace-gate.mjs"' }]))
+    writeFileSync(bomBad, '\uFEFF{ not json')
+    const r = collectGateEntriesWithStatus([
+      { agent: 'bomok', settingsPath: bomOk, projectDir: tmp }, { agent: 'bombad', settingsPath: bomBad, projectDir: tmp },
+    ], read)
+    expect(r.entries.map((e) => [e.agent, e.gate])).toEqual([['bomok', 'self-pace-gate.mjs']])
+    expect([...r.unreadable]).toEqual([bomBad])
+  })
+})
+
 describe('benignToolCall', () => {
   it('the first candidate the matcher selects; Bash otherwise (and for a bad regex)', () => {
     expect(benignToolCall('Bash|.*send_email.*|.*manage_email.*', tmp).tool_name).toBe('Bash')

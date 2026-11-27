@@ -256,6 +256,22 @@ describe('pruneStaleHooksFromSettingsFile', () => {
     }
   })
 
+  it('BELA 6300: a BOM-prefixed file is pruned too, and the BOM is kept on the rewrite', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-guard-test-'))
+    try {
+      const settingsPath = join(dir, 'settings.json')
+      const gone = `python3 ${join(dir, '.claude', 'worktrees', 'agent-gone', 'voice-reply-directive.py')}`
+      writeFileSync(settingsPath, '\uFEFF' + JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: gone, timeout: 60 }] }] } }, null, 2))
+      expect(pruneStaleHooksFromSettingsFile(settingsPath)).toHaveLength(1)
+      const raw = readFileSync(settingsPath, 'utf-8')
+      expect(raw.startsWith('\uFEFF')).toBe(true)
+      expect(raw.slice(1, 2)).toBe('{')
+      expect(JSON.stringify(JSON.parse(raw.slice(1)))).not.toContain('agent-gone')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('leaves a missing or unparseable file untouched', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hook-guard-test-'))
     try {

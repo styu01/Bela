@@ -79,7 +79,10 @@ export function collectGateEntriesWithStatus(
       continue
     }
     let settings: unknown
-    try { settings = JSON.parse(raw) } catch { unreadable.add(t.settingsPath); continue }
+    // BELA 6300 / PROGI 6299: a leading UTF-8 BOM is dropped before the parse. Claude Code 2.1.326 loads the
+    // hooks of a BOM-prefixed settings.json (measured, user and project level), so such a file is readable
+    // to it and must not be reported 'unreadable' (JSON.parse alone throws on the BOM).
+    try { settings = JSON.parse(raw.replace(/^\uFEFF/, '')) } catch { unreadable.add(t.settingsPath); continue }
     const ptu = (settings as { hooks?: { PreToolUse?: unknown } })?.hooks?.PreToolUse
     if (!Array.isArray(ptu)) continue
     for (const group of ptu as { matcher?: unknown; hooks?: unknown }[]) {
