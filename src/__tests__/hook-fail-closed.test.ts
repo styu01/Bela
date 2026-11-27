@@ -267,3 +267,10 @@ describe('the real security gates on a disposable copy', () => {
     }, 60_000)
   }
 })
+
+describe('the boot prune knows the wrapper', () => {
+  it('FAIL_CLOSED_MARK (hook-registration-guard) is the scaffold\'s GATE_FAIL_CLOSED_TAG', async () => {
+    const { FAIL_CLOSED_MARK } = await import('../web/hook-registration-guard.js')
+    expect(FAIL_CLOSED_MARK).toBe(GATE_FAIL_CLOSED_TAG)
+  })
+})

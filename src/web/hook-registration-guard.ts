@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { logger } from '../logger.js'
 
 // Guard + self-heal for hook registration into user-global settings.json.
 //
@@ -138,7 +139,9 @@ type HookGroup = { hooks?: CommandHook[]; [k: string]: unknown }
 function ourScriptPaths(command: string, knownScripts: readonly string[]): string[] {
   const paths: string[] = []
   for (const raw of command.split(/\s+/)) {
-    const token = raw.replace(/^['"]+|['"]+$/g, '')
+    // The fail-closed gate wrapper (agent-scaffold failClosedGateRun) writes `"<node>" "<path>"; else ...`:
+    // a token can end in `";`. The trailing ; is stripped before the quotes (upstream 42775042, ported).
+    const token = raw.replace(/^['"]+/, '').replace(/;+$/, '').replace(/['"]+$/, '')
     if (!token) continue
     const normalized = normalizeSeparators(token)
     const base = normalized.slice(normalized.lastIndexOf('/') + 1)
@@ -152,7 +155,12 @@ function ourScriptPaths(command: string, knownScripts: readonly string[]): strin
 export interface PruneResult {
   changed: boolean
   removed: string[]
+  /** Fail-closed gate entries kept although their file is missing: it is missing where this install expects it. */
+  keptFailClosed: string[]
 }
+
+// = GATE_FAIL_CLOSED_TAG in agent-scaffold.ts (not imported: that module pulls in the agent runtime; a test pins the two).
+export const FAIL_CLOSED_MARK = 'governance-kapu (fail-closed)'
 
 // Self-heal: remove hook entries this app previously wrote whose script file
 // no longer exists on disk. An entry is prunable only when BOTH hold:
@@ -164,12 +172,19 @@ export interface PruneResult {
 // the caller persists it (read-modify-write with an atomic write).
 export function pruneStaleHookEntries(
   settings: Record<string, unknown>,
-  opts: { fileExists: (path: string) => boolean; knownScripts?: readonly string[] },
+  opts: {
+    fileExists: (path: string) => boolean
+    knownScripts?: readonly string[]
+    /** The live root's scripts/ and scripts/hooks/: a fail-closed gate missing there stays and keeps denying. */
+    expectedScriptDirs?: readonly string[]
+  },
 ): PruneResult {
   const knownScripts = opts.knownScripts ?? KNOWN_HOOK_SCRIPTS
+  const expectedDirs = (opts.expectedScriptDirs ?? []).map(normalizeSeparators)
   const removed: string[] = []
+  const keptFailClosed: string[] = []
   const hooks = settings.hooks
-  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return { changed: false, removed }
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return { changed: false, removed, keptFailClosed }
   const hooksRecord = hooks as Record<string, unknown>
 
   for (const [event, groups] of Object.entries(hooksRecord)) {
@@ -185,9 +200,20 @@ export function pruneStaleHookEntries(
         if (!h || typeof h !== 'object' || h.type !== 'command' || typeof h.command !== 'string') return true
         const scriptPaths = ourScriptPaths(h.command, knownScripts)
         if (scriptPaths.length === 0) return true // foreign entry: never touch
-        const stale = scriptPaths.some((p) => !opts.fileExists(p))
-        if (stale) removed.push(h.command)
-        return !stale
+        const missing = scriptPaths.filter((p) => !opts.fileExists(p))
+        if (missing.length === 0) return true
+        // Upstream 42775042 (#2874 B1), ported: a shipped fail-closed gate missing where this install runs it
+        // from is a broken gate, not a stale entry. Pruned, nothing would put it back (the gate injectors
+        // refuse a missing script, isUnsafeHookCommand): a gate that denied every call would become no gate.
+        // It stays and denies. The same gate on another root (a gone worktree) is pruned as before.
+        // LOCAL: no extra-hooks (local-hooks/) mechanism here, so there is no moved-name exception.
+        const expected = (p: string) => expectedDirs.includes(dirname(normalizeSeparators(p)))
+        if (h.command.includes(FAIL_CLOSED_MARK) && missing.some(expected)) {
+          keptFailClosed.push(h.command)
+          return true
+        }
+        removed.push(h.command)
+        return false
       })
       if (keptHooks.length !== group.hooks.length) {
         eventChanged = true
@@ -203,14 +229,15 @@ export function pruneStaleHookEntries(
       else delete hooksRecord[event]
     }
   }
-  return { changed: removed.length > 0, removed }
+  return { changed: removed.length > 0, removed, keptFailClosed }
 }
 
 // File-level wrapper: parse a settings.json, prune stale entries, and write it
 // back atomically when anything changed. Unparseable or missing files are left
 // untouched (never destroy a user's settings on a parse error). Returns the
-// pruned command strings for logging.
-export function pruneStaleHooksFromSettingsFile(settingsPath: string): string[] {
+// pruned command strings for logging. `liveRoot` is the root this install runs its shipped hooks from:
+// a fail-closed gate missing under its scripts/ or scripts/hooks/ is kept, with an error log.
+export function pruneStaleHooksFromSettingsFile(settingsPath: string, liveRoot?: string): string[] {
   if (!existsSync(settingsPath)) return []
   let settings: Record<string, unknown>
   try {
@@ -219,7 +246,11 @@ export function pruneStaleHooksFromSettingsFile(settingsPath: string): string[] 
     return []
   }
   if (!settings || typeof settings !== 'object') return []
-  const { changed, removed } = pruneStaleHookEntries(settings, { fileExists: existsSync })
+  const expectedScriptDirs = liveRoot ? [join(liveRoot, 'scripts'), join(liveRoot, 'scripts', 'hooks')] : []
+  const { changed, removed, keptFailClosed } = pruneStaleHookEntries(settings, { fileExists: existsSync, expectedScriptDirs })
+  for (const command of keptFailClosed) {
+    logger.error({ settingsPath, command }, 'boot-hook-prune: a fail-closed gate is missing where this install expects it; kept, it denies until the file is back')
+  }
   if (changed) atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return removed
 }

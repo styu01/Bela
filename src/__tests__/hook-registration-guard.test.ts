@@ -269,3 +269,96 @@ describe('pruneStaleHooksFromSettingsFile', () => {
     }
   })
 })
+
+// Upstream 42775042 (ported with 0e681c83): the fail-closed gate wrapper writes the script path as
+// `"<path>"; else ...`, so a whitespace token ends in `";`. Without the strip the path was never read out
+// of the new command form; with it, a fail-closed gate missing at the LIVE root is kept (it denies, which
+// is its job) instead of being pruned into "no gate" (the injectors refuse to re-add a missing script).
+describe('pruneStaleHookEntries on the fail-closed gate wrapper', () => {
+  const MARK = 'governance-kapu (fail-closed)'
+  // Shape of agent-scaffold failClosedGateRun() around a gate path (built by hand: this suite does not
+  // load the scaffold; hook-fail-closed.test.ts pins FAIL_CLOSED_MARK to the scaffold's tag).
+  const wrapped = (p: string) =>
+    `test -x "/usr/bin/node" || { echo "x" >&2; exit 2; }; if command -v timeout >/dev/null 2>&1; then timeout -k 1 8 "/usr/bin/node" "${p}"; else "/usr/bin/node" "${p}"; fi; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "${MARK}: x: rc=$rc" >&2; exit 2; }; exit "$rc"`
+  const ptu = (command: string) => ({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 10 }] }] } })
+  const LIVE = ['/opt/app/scripts', '/opt/app/scripts/hooks']
+
+  it('reads the clean path out of the wrapper (no trailing "; on the checked path) and keeps a live gate', () => {
+    const checked: string[] = []
+    const s = ptu(wrapped('/opt/app/scripts/email-send-gate.mjs'))
+    const before = JSON.stringify(s)
+    const r = pruneStaleHookEntries(s, { fileExists: (p) => { checked.push(p); return p === '/opt/app/scripts/email-send-gate.mjs' }, expectedScriptDirs: LIVE })
+    expect(checked).toContain('/opt/app/scripts/email-send-gate.mjs')
+    expect(checked.every((p) => !p.endsWith(';') && !p.endsWith('"'))).toBe(true)
+    expect(r.changed).toBe(false)
+    expect(JSON.stringify(s)).toBe(before)
+  })
+
+  it('a worktree-pathed gate whose file EXISTS is kept (before the strip its `";` token never existed and was pruned)', () => {
+    const p = '/x/.claude/worktrees/agent-1/scripts/self-pace-gate.mjs'
+    const s = ptu(wrapped(p))
+    const r = pruneStaleHookEntries(s, { fileExists: (q) => q === p })
+    expect(r.changed).toBe(false)
+    expect(r.removed).toEqual([])
+  })
+
+  it('a fail-closed gate MISSING at the live root stays (it denies until the file is back), and is reported', () => {
+    const cmd = wrapped('/opt/app/scripts/email-send-gate.mjs')
+    const s = ptu(cmd)
+    const before = JSON.stringify(s)
+    const r = pruneStaleHookEntries(s, { fileExists: () => false, expectedScriptDirs: LIVE })
+    expect(r.changed).toBe(false)
+    expect(r.keptFailClosed).toEqual([cmd])
+    expect(JSON.stringify(s)).toBe(before)
+  })
+
+  it('the same missing gate on ANOTHER root (an old install, a gone worktree) is pruned as before', () => {
+    for (const p of ['/old/install/scripts/email-send-gate.mjs', '/x/.claude/worktrees/agent-gone/scripts/self-pace-gate.mjs']) {
+      const s = ptu(wrapped(p))
+      const r = pruneStaleHookEntries(s, { fileExists: () => false, expectedScriptDirs: LIVE })
+      expect(r.changed, p).toBe(true)
+      expect(r.keptFailClosed).toEqual([])
+      expect((s.hooks as Record<string, unknown>).PreToolUse).toBeUndefined()
+    }
+  })
+
+  it('without the live root given, a missing fail-closed gate is pruned (the old contract for callers that pass none)', () => {
+    const s = ptu(wrapped('/opt/app/scripts/email-send-gate.mjs'))
+    expect(pruneStaleHookEntries(s, { fileExists: () => false }).changed).toBe(true)
+  })
+
+  it('a missing legacy (pre-wrapper) gate entry at the live root is still pruned: only the fail-closed form is kept', () => {
+    const s = ptu('"/usr/bin/node" "/opt/app/scripts/email-send-gate.mjs"')
+    const r = pruneStaleHookEntries(s, { fileExists: () => false, expectedScriptDirs: LIVE })
+    expect(r.changed).toBe(true)
+    expect(r.keptFailClosed).toEqual([])
+  })
+
+  it('a non-gate hook (no fail-closed mark) missing at the live root is pruned as before', () => {
+    const s = { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'python3 "/opt/app/scripts/hooks/voice-reply-directive.py"; true', timeout: 10 }] }] } }
+    const r = pruneStaleHookEntries(s, { fileExists: () => false, expectedScriptDirs: LIVE })
+    expect(r.changed).toBe(true)
+  })
+
+  it('file level: with liveRoot the missing live gate is kept and the file is not rewritten', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-guard-fc-'))
+    try {
+      const settingsPath = join(dir, 'settings.json')
+      const body = JSON.stringify(ptu(wrapped(join(dir, 'scripts', 'email-send-gate.mjs'))), null, 2)
+      writeFileSync(settingsPath, body)
+      expect(pruneStaleHooksFromSettingsFile(settingsPath, dir)).toEqual([])
+      expect(readFileSync(settingsPath, 'utf-8')).toBe(body)
+      // and without liveRoot the same entry goes (the pre-existing contract)
+      expect(pruneStaleHooksFromSettingsFile(settingsPath)).toHaveLength(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('boot wiring', () => {
+  it('web.ts passes the live PROJECT_ROOT to the boot prune, so a missing live fail-closed gate is kept', () => {
+    const src = readFileSync(join(__dirname, '..', 'web.ts'), 'utf-8')
+    expect(src).toContain('pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName), PROJECT_ROOT)')
+  })
+})

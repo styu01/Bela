@@ -518,7 +518,7 @@ export function startWebServer(port = 3420): http.Server {
         // Self-heal FIRST: drop entries this app previously wrote whose script
         // file no longer exists (e.g. a deleted worktree instance's paths), so
         // the re-registration below lands on a clean, unblocked settings file.
-        pruned.push(...pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName)))
+        pruned.push(...pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName), PROJECT_ROOT))
         if (ensureAgentHooks(agentName)) patched.push(agentName)
         if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
         if (ensureEgressGate(agentName)) egressPatched.push(agentName)
