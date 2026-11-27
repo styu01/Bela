@@ -2056,7 +2056,10 @@ async function dismissModelConsentDialogLocked(
       return 'blocked'
     }
     if (!detectsModelConsentDialog(pane)) { clearBlocked(); return 'absent' }
-    let reason: 'no-row' | 'refused' | 'unseen' = 'no-row'
+    let reason: 'no-row' | 'move-missed' | 'refused' | 'unseen' = 'no-row'
+    // BELA 6313: the escalation says exactly what was sent. A planned move (Down / Up) goes out before the
+    // re-check, so a move that did not land is not "nothing pressed".
+    const planned = modelConsentKeys(pane)
     const res = await answerDialogFromPane(session, host, pane, modelConsentKeys, io)
     if (res === 'answered') {
       // (A2) judge the result: a refused Enter leaves the dialog up with the focus on the switch row.
@@ -2070,16 +2073,19 @@ async function dismissModelConsentDialogLocked(
       reason = after == null ? 'unseen' : 'refused'
       logger.warn({ session, reason }, 'Model consent dialog still up (or unreadable) after the Enter on "Continue with": no further key, escalating')
     } else {
-      logger.warn({ session }, 'Model usage-credit consent dialog without a single "Continue with" row (or the move did not land): NO key sent, escalating')
+      if (planned != null && planned.length > 1) reason = 'move-missed'
+      logger.warn({ session, reason }, 'Model usage-credit consent dialog without a single "Continue with" row (or the move did not land): no Enter sent, escalating')
     }
     if (!modelConsentBlocked.has(session)) {
       modelConsentBlocked.add(session)
       const what = reason === 'no-row'
-        ? 'nincs rajta biztonsagosan valaszthato "Continue with" sor (vasarlas / bekapcsolas / admin-kerelem vagy modellvaltas lenne), ezert NEM nyomtam semmit'
-        : reason === 'refused'
-          ? 'a "Continue with" sorra Entert kuldtem, de a dialogus fent maradt (a Claude Code elutasitotta, a fokusz a modellvalto soron lehet), ezert tobb billentyut NEM kuldtem'
-          : 'a "Continue with" sorra Entert kuldtem, de utana a kepernyot nem tudtam kiolvasni, ezert nem tudom, hogy hatott-e, es tobb billentyut NEM kuldtem'
-      const text = `A(z) ${session} session a modell-hasznalati (usage credits) dialoguson all, es ${what}. Dontes kell: tmux attach -t ${session}, a nyilakkal valassz, majd Enter. Addig a session nem kap uzenetet.`
+        ? 'nincs rajta biztonsagosan valaszthato "Continue with" sor (vasarlas / bekapcsolas / admin-kerelem vagy modellvaltas lenne), ezert egyetlen billentyut sem nyomtam'
+        : reason === 'move-missed'
+          ? 'a "Continue with" sor fele egy nyilat kuldtem, de a kurzor nem ert oda (vagy a dialogus kozben megvaltozott), ezert Entert NEM nyomtam'
+          : reason === 'refused'
+            ? 'a "Continue with" sorra Entert kuldtem, de a dialogus fent maradt (a Claude Code elutasitotta, a fokusz a modellvalto soron lehet)'
+            : 'a "Continue with" sorra Entert kuldtem, de utana a kepernyot nem tudtam kiolvasni, ezert nem tudom, hogy hatott-e'
+      const text = `A(z) ${session} session a modell-hasznalati (usage credits) dialoguson all, es ${what}. Ebben a korben tobb billentyut nem kuldok; a kovetkezo kezbesitesi probak (pl. az utemezo percenkenti ujraprobalasa) ugyanigy, csak a "Continue with" sort celozva, ellenorzott mozgassal ujra megprobalhatjak. Ha nem oldodik meg: tmux attach -t ${session}, a nyilakkal valassz, majd Enter. Addig a session nem kap uzenetet.`
       escalateToOwner({
         key: escKey,
         belaText: `[model-consent] ${text}`,
@@ -2518,18 +2524,25 @@ export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
-  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; onDialogBlocked?: 'send' | 'abort' } = {},
+  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; onDialogBlocked?: 'send' | 'abort' | 'abort-blocked' } = {},
 ): Promise<'sent' | 'aborted-busy' | 'skipped-locked' | 'aborted-dialog'> {
   const lockMode: SendLockMode = opts.lockMode ?? 'deliver'
   // BELA 6297 (B): opts.onDialogBlocked 'abort' (the scheduler's callers): when the resume or the model-consent
   // handler leaves its dialog up ('blocked' / 'alerted'; it escalated), nothing is typed and 'aborted-dialog'
   // is returned, so the caller can queue a retry. The default 'send' keeps the historical must-deliver path.
-  let dialogLeftUp = false
+  // BELA 6313 E1 / PROGI 6312: 'abort-blocked' (the message router) stops only on the HARD case, a handler
+  // that ended 'blocked' (the dialog is up and could not be answered: the Enter would land on its focused
+  // row, the model switch or a new conversation). The resume 'alerted' shape (dialog text above a visible
+  // input box, not measured live) does not stop it: a false 'alerted' would hold every message of that
+  // agent, and on the real shape the typed Enter is swallowed (a parked line, not a new conversation).
+  let dialogBlocked = false
+  let dialogAlerted = false
   const runDialogDismissals = async (): Promise<void> => {
     await dismissSurveyModalIfPresent(session, host)
     const resume = await dismissResumeSummaryModalIfPresent(session, host)
     const consent = await dismissModelConsentDialogIfPresent(session, host)
-    dialogLeftUp = resume === 'blocked' || resume === 'alerted' || consent === 'blocked'
+    dialogBlocked = resume === 'blocked' || consent === 'blocked'
+    dialogAlerted = resume === 'alerted'
   }
   // PANEWRITERS805: the three modal dismissals are probe+act keystroke writers
   // that ran BEFORE the lane lock -- so they could press Escape/Enter into a
@@ -2554,7 +2567,9 @@ export async function sendPromptToSession(
       logger.info({ session }, 'sendPromptToSession: modal dismissals skipped -- a delivery holds this pane send lane (fail-closed); emit will queue behind it')
     }
   }
-  if (dialogLeftUp && opts.onDialogBlocked === 'abort') {
+  const abortOnDialog = (opts.onDialogBlocked === 'abort' && (dialogBlocked || dialogAlerted))
+    || (opts.onDialogBlocked === 'abort-blocked' && dialogBlocked)
+  if (abortOnDialog) {
     logger.warn({ session }, 'sendPromptToSession: a resume / model-consent dialog is still up after its handler (escalated): nothing typed, per caller policy')
     return 'aborted-dialog'
   }

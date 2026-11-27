@@ -97,6 +97,9 @@ describe('dismissModelConsentDialogIfPresent (tmux layer injected)', () => {
     expect(f.sent).toEqual(['Down', 'Enter'])
     expect(esc.escalated.map((e) => e.key)).toEqual(['model-consent-blocked:agent-refused'])
     expect(esc.escalated[0].belaText).toMatch(/elutasitotta/)
+    // BELA 6313: no absolute "no more keys" claim (a later delivery attempt may retry, verified)
+    expect(esc.escalated[0].belaText).toMatch(/Ebben a korben tobb billentyut nem kuldok/)
+    expect(esc.escalated[0].belaText).not.toMatch(/tobb billentyut NEM kuldtem/)
     expect(esc.escalated[0].belaText).not.toMatch(/—| -- /)
   })
   it('(A2) a pane that cannot be read after the Enter -> blocked (the caller sends no Enter), escalated', async () => {
@@ -133,6 +136,17 @@ describe('dismissModelConsentDialogIfPresent (tmux layer injected)', () => {
     expect(esc.escalated.length).toBe(1)
     expect(await dismissModelConsentDialogIfPresent('agent-b', null, io([IDLE]).io)).toBe('absent')
     expect(esc.cleared).toEqual(['model-consent-blocked:agent-b'])
+  })
+  it('BELA 6313: the escalation text says what was sent (no row: no key at all; a missed move: the arrow, no Enter)', async () => {
+    await dismissModelConsentDialogIfPresent('agent-txt-norow', null, io([BUY, BUY]).io)
+    expect(esc.escalated[0].belaText).toMatch(/egyetlen billentyut sem nyomtam/)
+    const f = io([CREDITS_ON, CREDITS_ON, CREDITS_ON])
+    await dismissModelConsentDialogIfPresent('agent-txt-miss', null, f.io)
+    expect(f.sent).toEqual(['Down'])
+    expect(esc.escalated[1].belaText).toMatch(/egy nyilat kuldtem, de a kurzor nem ert oda/)
+    expect(esc.escalated[1].belaText).toMatch(/Entert NEM nyomtam/)
+    expect(esc.escalated[1].belaText).not.toMatch(/egyetlen billentyut sem/)
+    for (const e of esc.escalated) expect(e.belaText).not.toMatch(/—| -- /)
   })
   it('the move does not land: blocked without Enter', async () => {
     const f = io([CREDITS_ON, CREDITS_ON, CREDITS_ON])

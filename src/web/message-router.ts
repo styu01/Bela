@@ -48,6 +48,10 @@ const JANITOR_PARKED_MIN_AGE_MS = 45 * 1000
 // Log "skipping, target not ready" at most once per message id so a busy
 // receiver over many 5s ticks does not spam the log.
 const routerLoggedMisses: Set<number> = new Set()
+// BELA 6313 E1: "held behind a dialog that could not be answered" is logged once per message id too; its own
+// set so a message already logged as "not ready" still gets this (different) line. Cleared with
+// routerLoggedMisses on every outcome.
+const routerDialogHeldLogged: Set<number> = new Set()
 // Per-message consecutive tmux-inject-failure counter. A send that THROWS
 // (send-keys hit the pane at a bad instant -- e.g. the receiver was mid-turn /
 // momentarily un-ready despite passing the readiness check) used to instant-
@@ -332,7 +336,7 @@ export async function deliverFederatedBatch(federated: AgentMessage[], now: numb
       } else {
         logger.warn({ id: msg.id }, 'markPendingFederatedFailed affected 0 rows (already closed concurrently)')
       }
-      routerLoggedMisses.delete(msg.id)
+      routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
       continue
     }
     if (attempts >= MAX_FEDERATED_PER_TICK) continue
@@ -358,7 +362,7 @@ export async function deliverFederatedBatch(federated: AgentMessage[], now: numb
         // replay. Do NOT overwrite the closer's result text.
         logger.warn({ fedOut: true, id: msg.id, to: msg.to_agent }, 'Federated message concurrently closed during send; peer accepted (at-least-once)')
       }
-      routerLoggedMisses.delete(msg.id)
+      routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
       logger.info({ fedOut: true, id: msg.id, from: msg.from_agent, to: msg.to_agent, remoteId: result.remoteId }, 'Federated message delivered to peer inbox')
     } else if (result.kind === 'failed') {
       logger.warn({ fedOut: true, id: msg.id, to: msg.to_agent, error: result.error }, 'Federated message failed (terminal)')
@@ -369,7 +373,7 @@ export async function deliverFederatedBatch(federated: AgentMessage[], now: numb
       } else {
         logger.warn({ id: msg.id }, 'markPendingFederatedFailed affected 0 rows (already closed concurrently)')
       }
-      routerLoggedMisses.delete(msg.id)
+      routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
     } else {
       // retry: row stays pending; log once per message id, not per tick.
       if (!routerLoggedMisses.has(msg.id)) {
@@ -592,7 +596,7 @@ export async function runMessageRouterTick(): Promise<void> {
         }
         notifyOrchestratorOfFailedHandoff(msg, 'target session was absent for the entire retry window')
         routerInjectFailures.delete(msg.id)
-        routerLoggedMisses.delete(msg.id)
+        routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
         routerUsagePauseNotified.delete(msg.id)
         continue
       }
@@ -657,7 +661,7 @@ export async function runMessageRouterTick(): Promise<void> {
         // across a settle, so it never clobbers a session that is actually
         // processing or input a human/agent is mid-typing.
         if (ageMs > JANITOR_PARKED_MIN_AGE_MS && await clearStaleParkedInput(session, host)) {
-          routerLoggedMisses.delete(msg.id)
+          routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
           continue // input cleared; deliver on the next tick
         }
         if (!routerLoggedMisses.has(msg.id)) {
@@ -699,7 +703,7 @@ export async function runMessageRouterTick(): Promise<void> {
         if (!markMessageFailed(msg.id, 'Invalid or empty from_agent')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
-        routerLoggedMisses.delete(msg.id)
+        routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
         routerUsagePauseNotified.delete(msg.id)
         continue
       }
@@ -772,7 +776,19 @@ export async function runMessageRouterTick(): Promise<void> {
         const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
-        await sendPromptToSession(session, prefix + wrapped, host)
+        // BELA 6313 E1 / PROGI 6312: 'abort-blocked' -- if a resume / model-consent dialog is up that its
+        // handler could not answer ('blocked', escalated), nothing is typed: the best-effort send after the
+        // idle wait would put its Enter on the dialog's focused row (a model switch, a new conversation).
+        const delivery = await sendPromptToSession(session, prefix + wrapped, host, { onDialogBlocked: 'abort-blocked' })
+        if (delivery === 'aborted-dialog') {
+          // Not a failure: the row stays pending (no routerInjectFailures increment, so it can never turn
+          // 'failed' this way), no markMessageDelivered; it goes out on the first tick after the dialog is gone.
+          if (!routerDialogHeldLogged.has(msg.id)) {
+            logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, session }, 'Agent message held: the target pane shows a dialog its handler could not answer (escalated); stays pending, nothing typed')
+            routerDialogHeldLogged.add(msg.id)
+          }
+          continue
+        }
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
@@ -782,7 +798,7 @@ export async function runMessageRouterTick(): Promise<void> {
           deliveredTraceCtx.set(msg.to_agent, traceCtx)
         }
         routerInjectFailures.delete(msg.id)
-        routerLoggedMisses.delete(msg.id)
+        routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
         routerUsagePauseNotified.delete(msg.id)
         logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category, traceId: traceCtx?.trace_id }, 'Agent message delivered')
       } catch (err) {
@@ -802,7 +818,7 @@ export async function runMessageRouterTick(): Promise<void> {
         }
         notifyOrchestratorOfFailedHandoff(msg, `tmux inject failed ${failCount}x`)
         routerInjectFailures.delete(msg.id)
-        routerLoggedMisses.delete(msg.id)
+        routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
         routerUsagePauseNotified.delete(msg.id)
       }
       } catch (err) {
@@ -810,7 +826,7 @@ export async function runMessageRouterTick(): Promise<void> {
         if (!markMessageFailed(msg.id, `Delivery error: ${String(err).slice(0, 200)}`)) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
-        routerLoggedMisses.delete(msg.id)
+        routerLoggedMisses.delete(msg.id); routerDialogHeldLogged.delete(msg.id)
         routerUsagePauseNotified.delete(msg.id)
       }
     }

@@ -26,7 +26,7 @@ describe('sendPromptToSession waitForIdle gate', () => {
     // busy pane); waitForIdle stays the first, default-ON member. DELIVLOCK805
     // added lockMode (per-pane delivery mutex: deliver/recover/held).
     // BELA 6297 (B) added onDialogBlocked (the scheduler's no-typing-into-a-dialog-left-up opt-in).
-    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode;\s*onDialogBlocked\?:\s*'send'\s*\|\s*'abort'\s*\}/)
+    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode;\s*onDialogBlocked\?:\s*'send'\s*\|\s*'abort'\s*\|\s*'abort-blocked'\s*\}/)
   })
 
   it('the gate defaults ON (waitForIdle !== false) so all other callers keep it', () => {

@@ -57,6 +57,18 @@ describe("sendPromptToSession onDialogBlocked: 'abort'", () => {
     expect(keyCalls()).toEqual([])
   }, 15_000)
 
+  it("BELA 6313 E1: 'abort-blocked' (the router) stops on a consent dialog its handler left 'blocked'", async () => {
+    h.pane = BUY
+    expect(await sendPromptToSession('dlg-hard-consent', 'hello there', null, { waitForIdle: false, onDialogBlocked: 'abort-blocked' })).toBe('aborted-dialog')
+    expect(keyCalls()).toEqual([])
+  }, 15_000)
+
+  it("BELA 6313 E1: 'abort-blocked' does NOT stop on the resume 'alerted' shape (the message is typed as before)", async () => {
+    h.pane = RESUME_UNDER_FOOTER
+    expect(await sendPromptToSession('dlg-hard-resume-alerted', 'hello there', null, { waitForIdle: false, lockMode: 'held', onDialogBlocked: 'abort-blocked' })).toBe('sent')
+    expect(keyCalls().some((a) => a.includes('-l'))).toBe(true)
+  }, 30_000)
+
   it('no dialog: delivered as before', async () => {
     h.pane = IDLE
     expect(await sendPromptToSession('dlg-abort-none', 'hello there', null, { waitForIdle: false, onDialogBlocked: 'abort' })).toBe('sent')
