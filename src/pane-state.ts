@@ -1093,9 +1093,63 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
 // reply/inter-agent message that merely QUOTES the dialog text (which
 // happened the very day this shipped) can never trigger a keystroke. The
 // confirm hint must sit in the live footer region, not anywhere in the pane.
-const MODEL_CONSENT_TITLE_RX = /(?:now uses|runs on|requires) usage credits/
-const MODEL_CONSENT_CONTINUE_RX = /1\.\s*Continue with /
-const MODEL_CONSENT_CONFIRM_RX = /Enter to confirm/
+// 2.1.326 (BELA 6227 item 5, PROGI 6226 (3a), read from the binary): titles "<model> now uses usage credits",
+// "<model> now runs on usage credits", "You've reached your Fable limit"; the options carry NO numbers
+// (hideIndexes, disablePrintableKeybindings) and the focus starts on the FIRST row, "switch" (label "Switch to
+// <X> and continue" / "Not now" / "No, keep my current model"). The second row, "confirm", is "Continue with
+// <model | usage credits>" only when credits are already on; otherwise it is a money / enable row ("Turn on usage
+// credits and continue", "Yes, re-enable and continue", "Yes, buy usage credits", "Buy usage credits", an admin
+// request), and a third row can be "Upgrade to Max or Ultra". The old detector wanted "1. Continue with", so on
+// 2.1.326 it never matched (and if it had, "1" does nothing there and the Enter picks the focused switch row).
+const MODEL_CONSENT_TITLE_RX = /(?:now uses|runs on|requires) usage credits|You've reached your \S+ limit/
+const MODEL_CONSENT_LIVE_REGION_LINES = 40
+
+type ConsentRow = 'continue' | 'switch' | 'money' | null
+
+function consentRowKind(line: string): ConsentRow {
+  const label = line
+    .replace(/[\u2502|]/g, '')
+    .replace(CURSOR_GLYPH, '')
+    .trim()
+    .replace(/^\d+\.\s*/, '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .trim()
+  if (!label) return null
+  // Money first: "Turn on usage credits and continue" must never read as a continue row.
+  if (/\b(?:buy|turn on|re-enable|purchase|upgrade|request|set up usage credits|manage usage credits)\b/i.test(label)) return 'money'
+  if (/^continue with\b/i.test(label)) return 'continue'
+  if (/^switch to .+ and continue\b/i.test(label) || /^not now\b/i.test(label) || /^no, keep my current model\b/i.test(label)) return 'switch'
+  return null
+}
+
+/**
+ * The keys that pick "Continue with ..." (keep the configured model) on the usage-credit consent dialog, from
+ * wherever the cursor sits; null when there is no single "Continue with" row in the option list around the LAST
+ * cursor row: the confirm row is then a purchase / enable / admin request, which is never chosen here, and the
+ * switch row changes the model; both are the owner's decision. Pure.
+ */
+export function modelConsentKeys(pane: string): string[] | null {
+  if (!pane || !pane.trim()) return null
+  const lines = pane.split('\n')
+  let cursorIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(CURSOR_GLYPH)) { cursorIdx = i; break }
+  }
+  if (cursorIdx < 0) return null
+  const kinds = lines.map(consentRowKind)
+  if (kinds[cursorIdx] == null) return null
+  let first = cursorIdx
+  while (first > 0 && kinds[first - 1] != null) first--
+  let last = cursorIdx
+  while (last < lines.length - 1 && kinds[last + 1] != null) last++
+  const rows: number[] = []
+  for (let i = first; i <= last; i++) rows.push(i)
+  const cont = rows.filter((i) => kinds[i] === 'continue')
+  if (cont.length !== 1) return null
+  const delta = rows.indexOf(cont[0]) - rows.indexOf(cursorIdx)
+  const move = delta === 0 ? [] : Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? 'Down' : 'Up'))
+  return [...move, 'Enter']
+}
 
 // Tool-permission prompt. Claude Code asks for one even under
 // --dangerously-skip-permissions when the target is its OWN configuration
@@ -1147,9 +1201,12 @@ export function detectsModelConsentDialog(pane: string): boolean {
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
   if (hasIdleFooter(lines)) return false
-  return MODEL_CONSENT_TITLE_RX.test(pane)
-    && MODEL_CONSENT_CONTINUE_RX.test(pane)
-    && MODEL_CONSENT_CONFIRM_RX.test(footerRegion)
+  // The title in the live bottom region, a cursor, and at least one recognised option row (2.1.326 has no
+  // numbers; the older numbered layout still matches through the same row labels).
+  const live = lines.slice(-MODEL_CONSENT_LIVE_REGION_LINES)
+  if (!MODEL_CONSENT_TITLE_RX.test(live.join('\n'))) return false
+  if (!live.some((l) => l.includes(CURSOR_GLYPH))) return false
+  return live.some((l) => consentRowKind(l) != null)
 }
 
 export interface DetectPaneStateOptions {

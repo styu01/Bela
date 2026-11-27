@@ -29,6 +29,7 @@ import {
   resumeDialogNeedsArrow,
   resumeDialogNudgeKeys,
   resumeDialogUnderIdleFooter,
+  modelConsentKeys,
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { beginRestart, endRestart } from './restart-lock.js'
@@ -1981,17 +1982,45 @@ async function dismissResumeDialogLocked(
 // model>") -- number first, then confirm, mirroring answerFirstRunGates. The
 // keystrokes only ever fire when the specific dialog is visibly on screen
 // (pure detector, quoted-text-proof), so this adds no blind-injection surface.
-export async function dismissModelConsentDialogIfPresent(session: string, host: string | null = null): Promise<void> {
+// BELA 6227 item 5 / PROGI 6226 (3a): the answer is read from the pane (modelConsentKeys): only a single
+// "Continue with ..." row is ever chosen, re-checked after the move (answerDialogFromPane); never a buy /
+// turn on / re-enable / admin-request / upgrade row, and never the switch row. When no such row exists the
+// dialog is left as it is, NO key is sent, and the owner is asked (BELA first). The result tells the caller
+// whether a bare Enter that follows would land on the dialog: on 'blocked' it must not be sent (the default
+// focus is the switch row, so that Enter would switch the model).
+const modelConsentBlocked = new Set<string>()
+
+export async function dismissModelConsentDialogIfPresent(
+  session: string,
+  host: string | null = null,
+  io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
+): Promise<'absent' | 'answered' | 'blocked'> {
   try {
-    const pane = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
-    if (!detectsModelConsentDialog(pane)) return
-    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '1'], { timeout: 5000 })
-    await delay(150)
-    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
-    await delay(300)
-    logger.info({ session }, 'Answered model usage-credit consent dialog: kept the configured model (option 1, never the switch default)')
+    const pane = io.capture(session, host)
+    if (pane == null || !detectsModelConsentDialog(pane)) {
+      if (pane != null && modelConsentBlocked.delete(session)) clearOwnerEscalation(`model-consent-blocked:${session}`)
+      return 'absent'
+    }
+    const res = await answerDialogFromPane(session, host, pane, modelConsentKeys, io)
+    if (res === 'answered') {
+      await io.wait(300)
+      logger.info({ session }, 'Answered the model usage-credit consent dialog: "Continue with" (the configured model kept), never a purchase or the switch row')
+      return 'answered'
+    }
+    logger.warn({ session }, 'Model usage-credit consent dialog without a single "Continue with" row (or the move did not land): NO key sent, escalating')
+    if (!modelConsentBlocked.has(session)) {
+      modelConsentBlocked.add(session)
+      const text = `A(z) ${session} session a modell-hasznalati (usage credits) dialoguson all, es nincs rajta biztonsagosan valaszthato "Continue with" sor (vasarlas / bekapcsolas / admin-kerelem vagy modellvaltas lenne), ezert NEM nyomtam semmit. Dontes kell: tmux attach -t ${session}, a nyilakkal valassz, majd Enter. Addig a session nem kap uzenetet.`
+      escalateToOwner({
+        key: `model-consent-blocked:${session}`,
+        belaText: `[model-consent] ${text}`,
+        ownerText: `⚠️ ${text} BÉLA mar ertesitve volt errol, de nem oldodott meg.`,
+      })
+    }
+    return 'blocked'
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/answer model usage-credit consent dialog')
+    return 'blocked'
   }
 }
 

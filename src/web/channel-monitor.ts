@@ -503,7 +503,12 @@ async function performStuckInputAction(
           // DEFAULT option, which switches the model. Answer the dialog safely
           // first (no-op when absent); an Enter on the then-idle prompt is
           // harmless.
-          await dismissModelConsentDialogIfPresent(session)
+          // 'blocked' (BELA 6227 item 5): the dialog is still up with its focus on the switch row, so this
+          // Enter would switch the model: none is sent, the owner was asked.
+          if ((await dismissModelConsentDialogIfPresent(session)) === 'blocked') {
+            logger.warn({ session, attempt }, 'Stuck input -- the model consent dialog is up and could not be answered safely; no Enter')
+            break
+          }
           execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
         }
         submitted = true
@@ -531,7 +536,10 @@ async function performStuckInputAction(
         // FABLEFALL1: same guard as the reinject-plain fallback above -- a bare
         // Enter must never reach the model consent dialog (its default SWITCHES
         // the model). No-op when the dialog is absent.
-        await dismissModelConsentDialogIfPresent(session)
+        if ((await dismissModelConsentDialogIfPresent(session)) === 'blocked') {
+          logger.warn({ session, attempt }, 'Stuck input -- the model consent dialog is up and could not be answered safely; no Enter')
+          break
+        }
         execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
         submitted = true
         break
@@ -2235,8 +2243,11 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           const paneNow = capturePane(t.session)
           if (paneNow != null && detectsModelConsentDialog(paneNow)) {
             logger.warn({ session: t.session, agent: label }, 'Blocking "menu" is the model usage-credit consent dialog -- answering it safely instead of Escape')
-            await dismissModelConsentDialogIfPresent(t.session)
-            alertOwnerOrBela(t, 'model-consent-dialog', `🎛️ A(z) ${label} session a modell-hozzájárulás dialóguson parkolt; az 1-es opcióval (a beállított modell megtartása) továbbléptettem. Modellváltás NEM történt.`)
+            const consent = await dismissModelConsentDialogIfPresent(t.session)
+            if (consent === 'answered') {
+              alertOwnerOrBela(t, 'model-consent-dialog', `🎛️ A(z) ${label} session a modell-hozzájárulás dialóguson parkolt; a "Continue with" sorral (a beállított modell megtartása) továbbléptettem. Modellváltás és vásárlás NEM történt.`)
+            }
+            // 'blocked': dismissModelConsentDialogIfPresent already escalated (no key sent); 'absent': gone meanwhile.
           } else if (permissionDialogOnFirstRead || (paneNow != null && detectsPermissionDialog(paneNow))) {
             // PERMDENY905: a tool-permission prompt also says "Esc to cancel",
             // so detectsBlockingMenu matches it -- but Escape there is NO, not a
