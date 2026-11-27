@@ -1923,8 +1923,11 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
       if (!res.ok) {
         const e = await res.json().catch(() => ({}))
         if (res.status === 409 && (e.conflict === 'stale_version' || e.conflict === 'stale_fields')) {
-          // The modal STAYS OPEN: the typed text is the only copy of it.
+          // The modal STAYS OPEN: the typed text is the only copy of it. The board is reloaded right
+          // away (PROGI review 6192), so a reopen within the 30 s refresh fills from current data and
+          // is not refused again.
           showToast(t('kanban.toast.stale_version_form'), 8000)
+          loadKanban()
           return
         }
         throw new Error(e.error || res.status)
@@ -2242,11 +2245,15 @@ async function showCardDetail(card) {
       if (r.ok) {
         // No version copy (see the assignee edit above).
         card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card)
-      } else if (r.status === 409 && (await r.json().catch(() => ({}))).conflict === 'stale_version') {
-        showToast(t('kanban.toast.stale_version'), 6000)
-        loadKanban()
+      } else {
+        // PROGI review 6192: on any refusal the dropdown goes back to the parent the card still has,
+        // so the view does not show a parent that was never saved.
+        parentSelect.value = card.parent_id || ''
+        if (r.status === 409) {
+          showToast(t('kanban.toast.stale_version'), 6000)
+          loadKanban()
+        } else showToast(t('kanban.toast.save_error'))
       }
-      else showToast(t('kanban.toast.save_error'))
     }
     parentMetaItem.style.display = ''
   } else {

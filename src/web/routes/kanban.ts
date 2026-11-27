@@ -490,16 +490,18 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // malformed value is a 400, not "no check": a caller that believes it sent a guard must not get
     // an unguarded write.
     const { version, expected_version, expected_fields, ...data } = parsed as Record<string, unknown>
-    const versionError = (v: unknown) => v !== undefined && !(Number.isSafeInteger(v) && (v as number) >= 0)
+    // `null` means "no version" exactly like a missing key (PROGI review 6192): a client that clears
+    // the field gets the old last-writer-wins, not a 400. Safe: null never claims a version it read.
+    const versionError = (v: unknown) => v !== undefined && v !== null && !(Number.isSafeInteger(v) && (v as number) >= 0)
     if (versionError(version) || versionError(expected_version)) {
       json(res, { error: '"version" / "expected_version" must be a non-negative integer (the version the card was read at)' }, 400)
       return true
     }
-    if (version !== undefined && expected_version !== undefined && version !== expected_version) {
+    if (version != null && expected_version != null && version !== expected_version) {
       json(res, { error: '"version" and "expected_version" disagree -- send one' }, 400)
       return true
     }
-    const expectedVersion = (expected_version ?? version) as number | undefined
+    const expectedVersion = (expected_version ?? version ?? undefined) as number | undefined
     // PROGI review 6192 (KOCKAZAT 4): `expected_fields` -- the values the caller based its edit on, for
     // the fields it writes (the dashboard edit form). Checked field by field (writeKanbanCardIfFieldsUnchanged):
     // only a change to one of THOSE fields refuses the write. Keys must be PUT-writable columns, values

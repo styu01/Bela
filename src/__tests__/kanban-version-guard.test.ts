@@ -184,12 +184,22 @@ describe('PUT /api/kanban/:id with the version it read', () => {
 
   it('a malformed version is a 400 and nothing is written, not an unchecked write', async () => {
     createKanbanCard({ id: 'c6', title: 'Card' })
-    for (const bad of ['0', -1, 1.5, null, true]) {
+    // LOCAL (PROGI review 6192 / BELA 6193): null is NOT malformed here -- it means "no version", like a
+    // missing key (see the test below). The column is NOT NULL, so a round-tripped card never has null.
+    for (const bad of ['0', -1, 1.5, true]) {
       const r = await put('c6', { description: 'x', expected_version: bad })
       expect(r.status, String(bad)).toBe(400)
       expect((await put('c6', { description: 'x', version: bad })).status, String(bad)).toBe(400)
     }
     expect(getKanbanCard('c6')?.description).toBeNull()
+  })
+
+  it('LOCAL: version / expected_version null = missing: last writer wins, as without a version', async () => {
+    createKanbanCard({ id: 'c8', title: 'Card' })
+    updateKanbanCard('c8', { description: 'meanwhile' })
+    expect((await put('c8', { description: 'x', expected_version: null })).status).toBe(200)
+    expect((await put('c8', { description: 'y', version: null, expected_version: 0 })).status).toBe(409)  // null does not "disagree"; 0 is checked
+    expect(getKanbanCard('c8')?.description).toBe('x')
   })
 
   it('version and expected_version that disagree are a 400', async () => {
