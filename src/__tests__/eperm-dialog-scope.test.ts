@@ -32,6 +32,12 @@ describe('EPERM fallback dialog scope', () => {
     expect(body).toContain('mkdtempSync')
     expect(body).toContain('epermRestarted = true')
     expect(body).toContain('buildLaunchCmd(fallbackCwd)')
-    expect(body).toContain("join(dir, 'CLAUDE.md')")
+    // The CLAUDE.md hand-over moved into prepareFallbackClaudeMd (upstream 9301a1dd, ported; BELA 6404): it links the
+    // real CLAUDE.md for any agent and expands a package agent's shell; 'refused' stops the fallback.
+    expect(body).toContain("if (prepareFallbackClaudeMd(name, dir, fallbackCwd) === 'refused') return")
+    const install = readFileSync(join(__dirname, '..', 'web', 'agent-package', 'install.ts'), 'utf8')
+    const fn = install.slice(install.indexOf('export function prepareFallbackClaudeMd('))
+    expect(fn).toContain("const agentClaudeMd = join(dir, 'CLAUDE.md')")
+    expect(fn).toContain("symlinkSync(agentClaudeMd, join(fallbackCwd, 'CLAUDE.md'))")
   })
 })

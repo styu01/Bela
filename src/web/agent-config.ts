@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { isHiddenByInstallMarker } from './agent-package/marker.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, DEFAULT_AGENT_MODEL } from '../config.js'
@@ -531,6 +532,10 @@ export const HIDDEN_AGENT_SENTINEL = '.hidden-from-dashboard'
 export function listAllAgentNames(): string[] {
   if (!existsSync(AGENTS_BASE_DIR)) return []
   return readdirSync(AGENTS_BASE_DIR).filter((f) => {
+    // Upstream 9301a1dd (MIOAGENTINSTALL1114, plan 4.2, 7.2): a folder under a VALID package install marker is an
+    // unfinished install, not an agent. This one choke point keeps it out of the roster, delivery, export and the
+    // scheduler. A marker that does not count is logged and ignored: the agent stays listed.
+    if (isHiddenByInstallMarker(f)) return false
     try { return statSync(join(AGENTS_BASE_DIR, f)).isDirectory() } catch { return false }
   })
 }
@@ -613,6 +618,8 @@ export function writeAgentVoiceConfig(name: string, patch: Partial<AgentVoiceCon
 export function isKnownAgent(name: string): boolean {
   if (!name) return false
   if (name === MAIN_AGENT_ID) return true
+  // An unfinished package install is not an agent (see listAllAgentNames).
+  if (isHiddenByInstallMarker(name)) return false
   try {
     const dir = agentDir(name)
     return existsSync(dir) && statSync(dir).isDirectory()

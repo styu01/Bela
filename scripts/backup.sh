@@ -18,6 +18,7 @@
 #     scheduled-tasks.json     (legacy, if present)
 #     assets/meetings/**       (meeting transcripts/memos)
 #     agents/*/CLAUDE.md, SOUL.md, .mcp.json
+#     agents/*/PACKAGE.md, LOCAL.md, .package/manifest.json  (an agent package's layers and record)
 #     agents/*/.claude/channels/{telegram,slack,discord}/.env, access.json
 #
 #   home/   -> extract under $HOME
@@ -316,13 +317,18 @@ if [[ -d store ]]; then
     ! -name 'context-guard-last-pane-*.txt' \
     ! -name usage-history.jsonl \
     ! -name agent-package-credential.json ! -name 'agent-package-credential.json.*.tmp' \
+    ! -name agent-package-hidden.json \
     -print >> "${REPOLIST}"
   # Explicit directory allowlist. store/projects/, store/reference-docs/, and
   # store/references/ (client/business content, real but potentially large --
   # a separate size/scope decision, not folded in silently here) and
   # store/backups/ (a nested backup-of-something-else) are DELIBERATELY not
   # in this list.
-  STORE_STATE_DIRS=(agent-taskstate)
+  # agent-package-approved/ (BELA 6404): the owner's approvals of installed agent packages. Each binds to the package
+  # record that a backup carries too (agents/*/.package/manifest.json), so a restore brings both or a package agent
+  # that waits for a new approval. The installer's in-progress state (agent-package-installing/, -leftovers/, the
+  # derived agent-package-hidden.json) is THIS machine's and stays out: a restored marker would hide a restored agent.
+  STORE_STATE_DIRS=(agent-taskstate agent-package-approved)
   for _d in "${STORE_STATE_DIRS[@]}"; do
     add_if "${REPOLIST}" "${REPO_ROOT}" "store/${_d}"
   done
@@ -339,6 +345,11 @@ if [[ -d agents ]]; then
     \( -name 'CLAUDE.md' -o -name 'SOUL.md' -o -name '.mcp.json' \
        -o -name 'access.json' -o -name '.env' \) \
     -print >> "${REPOLIST}"
+  # Upstream 9301a1dd (MIOAGENTINSTALL1114, plan 4.2, M23): a package agent's CLAUDE.md is only the shell that imports
+  # these two layers; restored without them it would point at missing files. LOCAL.md is the owner's own data, and the
+  # record says which package and version stand there (the owner approval binds to it).
+  find agents -mindepth 2 -maxdepth 2 -type f \( -name 'PACKAGE.md' -o -name 'LOCAL.md' \) -print >> "${REPOLIST}"
+  find agents -mindepth 3 -maxdepth 3 -type f -path 'agents/*/.package/manifest.json' -print >> "${REPOLIST}"
 fi
 
 # home/ group (relative to $HOME)

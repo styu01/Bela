@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process'
 import { agentDir } from './agent-config.js'
 import { sanitizeAgentName } from './sanitize.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { PACKAGE_AGENT_EXPORT_REFUSAL, isPackageAgentDir } from './agent-package/marker.js'
 
 // Portable per-agent export/import bundle.
 //
@@ -108,6 +109,9 @@ export function stageAgentDirForExport(
   includeSecrets: boolean,
 ): string[] {
   if (!existsSync(srcRoot)) throw new Error(`Agent source not found: ${srcRoot}`)
+  // MIOAGENTINSTALL1114 (plan 4.2, N4): a package agent does not travel in a bundle (its PACKAGE.md is not a
+  // portable entry, and carrying it would skip the package's entitlement check).
+  if (isPackageAgentDir(srcRoot)) throw new PackageAgentExportError()
   mkdirSync(stageAgentDir, { recursive: true })
 
   const staged: string[] = []
@@ -137,6 +141,14 @@ export function stageAgentDirForExport(
   }
 
   return staged
+}
+
+/** Thrown by the export of a package agent; its message tells the owner what to do instead. */
+export class PackageAgentExportError extends Error {
+  constructor() {
+    super(PACKAGE_AGENT_EXPORT_REFUSAL)
+    this.name = 'PackageAgentExportError'
+  }
 }
 
 // Thin wrapper: resolve the named agent's dir under AGENTS_BASE_DIR, then stage.
@@ -272,6 +284,8 @@ export function importAgentBundle(
     if (!name) throw new Error('Invalid agent name (empty after sanitization)')
 
     sanitizeImportedConfig(stagedAgentDir)
+    // MIOAGENTINSTALL1114 (plan 4.2, M27): a package record from an archive must not make an agent a "package agent".
+    dropPackageRecord(stagedAgentDir)
 
     const dest = resolveDest(name) // agentDir: safeJoin rejects traversal
     const exists = existsSync(dest)
@@ -286,6 +300,11 @@ export function importAgentBundle(
   } finally {
     rmSync(work, { recursive: true, force: true })
   }
+}
+
+/** The import copies everything but the package record folder (`.package/`, plan 4.2). */
+function dropPackageRecord(stagedAgentDir: string): void {
+  rmSync(join(stagedAgentDir, '.package'), { recursive: true, force: true })
 }
 
 // Suggested download filename for a bundle. basename() defends against any odd
@@ -313,6 +332,8 @@ export interface FleetBundleManifest {
   kind: 'fleet'
   // The sanitized agent names actually staged into the bundle.
   agents: string[]
+  // MIOAGENTINSTALL1114 (plan 4.2): package agents left out (reinstall them from the catalog instead).
+  skippedPackageAgents?: string[]
   includesSecrets: boolean
   exportedBy?: string
   exportedAt?: string
@@ -333,9 +354,11 @@ export function exportAllAgentsBundle(
     mkdirSync(agentsRoot, { recursive: true })
 
     const staged: string[] = []
+    const skippedPackageAgents: string[] = []
     for (const name of names) {
       const safe = sanitizeAgentName(name)
       if (!safe || !existsSync(agentDir(name))) continue
+      if (isPackageAgentDir(agentDir(name))) { skippedPackageAgents.push(safe); continue }
       stageAgentForExport(name, join(agentsRoot, safe), includeSecrets)
       staged.push(safe)
     }
@@ -345,6 +368,7 @@ export function exportAllAgentsBundle(
       schemaVersion: BUNDLE_SCHEMA_VERSION,
       kind: 'fleet',
       agents: staged,
+      ...(skippedPackageAgents.length > 0 ? { skippedPackageAgents } : {}),
       includesSecrets: includeSecrets,
       ...(opts.exportedBy ? { exportedBy: opts.exportedBy } : {}),
       ...(opts.exportedAt ? { exportedAt: opts.exportedAt } : {}),
@@ -463,6 +487,7 @@ export function importAllAgentsBundle(
       if (!name) { skipped.push({ name: entry, reason: 'invalid name' }); continue }
 
       sanitizeImportedConfig(stagedAgentDir)
+      dropPackageRecord(stagedAgentDir)
       const dest = resolveDest(name) // agentDir: safeJoin rejects traversal
       const exists = existsSync(dest)
       if (exists && !opts.overwrite) { skipped.push({ name, reason: 'already exists' }); continue }

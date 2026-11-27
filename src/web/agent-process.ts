@@ -61,7 +61,10 @@ import { getEffectiveSettingValue } from '../settings-store.js'
 import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
 import { loadProfileTemplate } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
-import { writeAgentSettingsFromProfile, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection } from './agent-scaffold.js'
+import { writeAgentSettingsFromProfile, ensureFleetBaseRulesSection, ensureFleetRosterSection, ensureAutonomySection, ensureSkillsPathTrapSection } from './agent-scaffold.js'
+import { packageStartRefusal, prepareFallbackClaudeMd } from './agent-package/install.js'
+import { packageApprovalRefusal } from './agent-package/approval.js'
+import { OWNER_DRIVE_FOLDER } from '../config.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { getSecret } from './vault.js'
 import { resolveOpenRouterModel } from './openrouter-models.js'
@@ -1487,6 +1490,14 @@ function startRemoteAgentProcess(
 export async function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
+  // Agent packages (upstream 9301a1dd, plan 7.4): an unfinished install, missing package files, or a broken shell.
+  // Then this fork's owner approval (approval.ts): a package agent starts only when an approval names exactly the
+  // package that stands in its folder. Both before anything else, the remote path included.
+  const packageRefusal = packageStartRefusal(name, dir) ?? packageApprovalRefusal(name)
+  if (packageRefusal !== null) {
+    logger.warn({ name, refusal: packageRefusal }, 'agent start refused by the package guard')
+    return { ok: false, error: packageRefusal }
+  }
 
   // Remote agents are handled entirely by the ssh path above (with its own
   // start guard), before any local already-running check / scaffolding.
@@ -1669,6 +1680,9 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // without hardcoding agent names.
     const profile = loadProfileTemplate(resolveAgentSecurityProfile(name))
     writeAgentSettingsFromProfile(name, profile)
+    // A package agent's fleet base rules block (upstream 9301a1dd, plan 4.3): only where its markers stand or on an
+    // agent with a package manifest; a hand-made agent's CLAUDE.md is not touched.
+    ensureFleetBaseRulesSection(name, OWNER_DRIVE_FOLDER)
     ensureFleetRosterSection(name)
     ensureAutonomySection(name)
     ensureSkillsPathTrapSection(name)
@@ -1993,10 +2007,10 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
           try { runTmux(null, ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 5000 }) } catch { /* already gone */ }
           try {
             const fallbackCwd = mkdtempSync(join(tmpdir(), `marveen-agent-${name}-`))
-            const agentClaudeMd = join(dir, 'CLAUDE.md')
-            if (existsSync(agentClaudeMd)) {
-              try { symlinkSync(agentClaudeMd, join(fallbackCwd, 'CLAUDE.md')) } catch { /* context degrades safely */ }
-            }
+            // Upstream 9301a1dd (plan 4.4): a package agent's shell is EXPANDED into a real file (its imports would not
+            // load from /tmp); any other agent gets the link as before. 'refused': the package files are missing or the
+            // shell is broken; no context-less start, the owner gets a notice.
+            if (prepareFallbackClaudeMd(name, dir, fallbackCwd) === 'refused') return
             runTmux(null, ['new-session', '-d', '-s', session, buildLaunchCmd(fallbackCwd)], { timeout: 10000 })
             logger.warn({ name, session, fallbackCwd }, 'Agent --channels EPERM in trusted dir; relaunched from /tmp fallback')
           } catch (err) {

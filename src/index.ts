@@ -23,6 +23,8 @@ import { startAgentProcess } from './web/agent-process.js'
 import { renameSharedCredentialsIfSafe, fleetTokenBootPass } from './web/claude-credentials-guard.js'
 import { startWebServer } from './web.js'
 import { removeCredentialTmpLeftovers } from './web/agent-package/remote.js'
+import { flushPendingPackageNotices, reapInterruptedPackageInstalls } from './web/agent-package/install.js'
+import { escalatePackageNotice } from './web/agent-package/notices.js'
 import { logger } from './logger.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
@@ -483,6 +485,17 @@ async function main(): Promise<void> {
     logger.warn({ err }, 'agent package credential leftover cleanup did not run')
   }
 
+  // Upstream 9301a1dd (MIOAGENTINSTALL1114, plan 7.3, M17): an agent package install interrupted by a crash or a
+  // kill. Before ANY agent is walked or started: the unfinished folder is set aside, an orphan or bad marker is
+  // removed or moved aside, and the hidden list the watchdog reads is written (also when it is empty). acquireLock
+  // above made this the only dashboard on this store, so no running install can be in between.
+  try {
+    const reaped = reapInterruptedPackageInstalls()
+    if (reaped.setAside + reaped.removedMarkers + reaped.badMarkers + reaped.blocked > 0) logger.warn({ reaped }, 'agent package installs: interrupted-install cleanup')
+  } catch (err) {
+    logger.error({ err }, 'agent package interrupted-install cleanup did not run')
+  }
+
   // Backfill embeddings for memories saved before Ollama was available.
   // Fire-and-forget: a missing or slow Ollama instance must not block startup.
   backfillEmbeddings().then(count => {
@@ -606,6 +619,10 @@ async function main(): Promise<void> {
 
   // Web dashboard
   webServer = startWebServer(WEB_PORT)
+  // Upstream 9301a1dd (plan 7.3, N16): the owner notices the cleanup above stored, now that the alert path is up.
+  // This fork sends them the way every internal alert goes (owner-escalation.ts): BELA first, the owner only if it
+  // stays unresolved (agent-package/notices.ts). A notice file is removed once the escalation is queued.
+  void flushPendingPackageNotices(escalatePackageNotice).catch((err) => logger.warn({ err }, 'agent package owner notices were not sent'))
 
   logger.info(`Marveen fut! Dashboard: http://localhost:${WEB_PORT}`)
   logger.info('Telegram kommunikacio: Claude Code Channels kezeli')

@@ -62,6 +62,118 @@ if [ "${1:-}" = "--resolve-provider" ]; then
   exit 0
 fi
 
+# MIOAGENTINSTALL1114 (upstream 9301a1dd, plan 7.4, 7.5; ported, BELA 6404): the package start guard. This loop starts
+# agents WITHOUT startAgentProcess, so it carries the server guard's three
+# conditions itself, with the same texts:
+#   1. the name is on the hidden list the server writes (store/agent-package-hidden.json:
+#      the names under a VALID install marker); a missing or unreadable list is an
+#      empty list (logged): the watchdog then starts as it always did;
+#   2. CLAUDE.md starts with the shell prefix, but PACKAGE.md is missing, a link,
+#      not a regular file, unreadable or empty;
+#   3. .package/manifest.json exists and is not empty, but CLAUDE.md is not a
+#      regular file starting with the shell prefix.
+# The prefix bytes live in scripts/lib/package-shell-prefix (a test binds them to the
+# server's constant). They are compared through a pipe (head -c N | cmp), never read
+# into a variable: bash drops NUL bytes and trailing newlines there, and two inputs
+# the server refuses would look like the shell (plan 7.5, Dani B3).
+PACKAGE_SHELL_PREFIX_FILE="$INSTALL_DIR/scripts/lib/package-shell-prefix"
+PACKAGE_HIDDEN_LIST="$INSTALL_DIR/store/agent-package-hidden.json"
+# The owner approvals (approval.ts); overridable only so the self-test can point at a stand-in folder.
+PACKAGE_APPROVALS_DIR="${WATCHDOG_PACKAGE_APPROVALS_DIR:-$INSTALL_DIR/store/agent-package-approved}"
+
+# 0 when $1 is a regular file (not a link) whose first bytes are the prefix. Any
+# failure of the compare (an unreadable file) is "not the shell".
+starts_with_package_shell() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -f "$PACKAGE_SHELL_PREFIX_FILE" ] || return 1
+  local n
+  n=$(LC_ALL=C wc -c < "$PACKAGE_SHELL_PREFIX_FILE" | tr -d ' ')
+  LC_ALL=C head -c "$n" "$1" 2>/dev/null | LC_ALL=C cmp -s - "$PACKAGE_SHELL_PREFIX_FILE"
+}
+
+# 0 when the readable regular file $1 holds no byte other than space, tab, LF, VT,
+# FF and CR (plan 7.5: the six bytes, LC_ALL=C; a BOM or a no-break space is content).
+file_is_blank() {
+  [ "$(LC_ALL=C tr -d ' \011\012\013\014\015' < "$1" 2>/dev/null | LC_ALL=C head -c 1 | LC_ALL=C wc -c | tr -d ' ')" = 0 ]
+}
+
+# 0 when PACKAGE.md is present: a regular, readable, non-empty file, not a link.
+# The link test comes first: [ -f ] and [ -s ] follow a link (Dani C3).
+package_layer_present() {
+  [ ! -L "$1" ] && [ -f "$1" ] && [ -r "$1" ] && ! file_is_blank "$1"
+}
+
+# 0 when the manifest file exists and is not empty. Fail closed: a link, a folder
+# or an unreadable file in its place counts as a non-empty manifest.
+package_manifest_present() {
+  [ -L "$1" ] || [ -e "$1" ] || return 1
+  [ ! -L "$1" ] && [ -f "$1" ] && [ -r "$1" ] || return 0
+  ! file_is_blank "$1"
+}
+
+# 0 when the agent name $1 stands on the hidden list $2. A missing or unreadable list
+# answers 1 (not hidden); the caller logs that once per tick.
+package_install_hidden() {
+  [ -f "$2" ] || return 1
+  python3 -c 'import json,sys
+try:
+    names = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(names, list) and sys.argv[2] in names else 1)' "$2" "$1" 2>/dev/null
+}
+
+# This fork (BELA 6438/6444): a package agent starts only when its owner approval names exactly the package that stands
+# in its folder: store/agent-package-approved/<name>.json against agents/<name>/.package/manifest.json, the slug, the
+# version and the sha256 of the signed payload (src/web/agent-package/approval.ts makes the same comparison). Read by
+# python3 straight from the two files, no derived list: nothing can go stale. Fail closed: a missing, linked,
+# unreadable or mismatched file, or python3 failing, is "not approved".
+package_approved() {
+  python3 - "$PACKAGE_APPROVALS_DIR/$2.json" "${1%/}/.package/manifest.json" "$2" <<'PY' 2>/dev/null
+import json, os, sys
+appr, man, name = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    if os.path.islink(appr) or os.path.islink(man) or not os.path.isfile(appr) or not os.path.isfile(man):
+        sys.exit(1)
+    a = json.load(open(appr, encoding="utf-8"))
+    m = json.load(open(man, encoding="utf-8"))
+    p = m.get("payload") or {}
+    ok = (a.get("schema") == 1 and a.get("name") == name and m.get("schema") == 1
+          and isinstance(m.get("payloadSha256"), str) and a.get("payloadSha256") == m.get("payloadSha256")
+          and isinstance(p.get("slug"), str) and a.get("slug") == p.get("slug")
+          and isinstance(p.get("version"), str) and a.get("version") == p.get("version"))
+    sys.exit(0 if ok else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# Prints the refusal text, or nothing when the agent may start. $1 agent dir, $2 name,
+# $3 the hidden list file. Upstream's three package conditions, then the owner approval.
+package_start_refusal() {
+  local d="${1%/}"
+  if package_install_hidden "$2" "$3"; then echo "Package install incomplete"; return; fi
+  local is_pkg=0
+  if starts_with_package_shell "$d/CLAUDE.md"; then
+    package_layer_present "$d/PACKAGE.md" || { echo "Package files missing: run a package repair"; return; }
+    is_pkg=1
+  elif package_manifest_present "$d/.package/manifest.json"; then
+    echo "Package shell broken: CLAUDE.md must start with the PACKAGE.md and LOCAL.md import lines"
+    return
+  fi
+  if [ "$is_pkg" = 1 ] && ! package_approved "$d" "$2"; then
+    echo "Package awaiting owner approval"
+  fi
+}
+
+# Self-test hook: watchdog.sh --check-package <agent-dir> [hidden-list-file]
+if [ "${1:-}" = "--check-package" ]; then
+  [ -n "${2:-}" ] || { echo "usage: watchdog.sh --check-package <agent-dir> [hidden-list-file]" >&2; exit 2; }
+  REFUSAL="$(package_start_refusal "$2" "$(basename "${2%/}")" "${3:-$PACKAGE_HIDDEN_LIST}")"
+  if [ -z "$REFUSAL" ]; then echo "package=ok"; else echo "package=refused:$REFUSAL"; fi
+  exit 0
+fi
+
+
 
 # Overlap guard: a cycle's per-agent restart sleeps + message replay can exceed
 # the 5-min cron interval; without this a second watchdog would start mid-restart
@@ -265,6 +377,12 @@ fi
 
 CLAUDE_BIN="$(command -v claude)"
 
+# The server writes the hidden list on every start (an empty one too), so a missing
+# list is abnormal: say so once per tick, then go on (upstream 9301a1dd, plan 7.2, J1/f).
+if [ ! -f "$PACKAGE_HIDDEN_LIST" ]; then
+  echo "$(timestamp) [watchdog] agent package hidden list missing ($PACKAGE_HIDDEN_LIST); treated as empty" >> "$LOG"
+fi
+
 for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   AGENT_ID=$(basename "$AGENT_DIR")
   SESSION_NAME="agent-${AGENT_ID}"
@@ -288,6 +406,12 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
       echo "$(timestamp) [watchdog] $AGENT_ID (re)spawned $(( _rnow - _rlast ))s ago by another actor (< 60s grace), deferring" >> "$LOG"
       continue
     fi
+  fi
+
+  PKG_REFUSAL="$(package_start_refusal "$AGENT_DIR" "$AGENT_ID" "$PACKAGE_HIDDEN_LIST")"
+  if [ -n "$PKG_REFUSAL" ]; then
+    echo "$(timestamp) [watchdog] $AGENT_ID: not started: $PKG_REFUSAL" >> "$LOG"
+    continue
   fi
 
   echo "$(timestamp) [watchdog] $AGENT_ID missing, restarting..." >> "$LOG"

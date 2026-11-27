@@ -98,6 +98,7 @@ import {
   scaffoldAgentDir,
   generateClaudeMd,
   generateSoulMd,
+  ensureFleetRosterSection,
 } from '../agent-scaffold.js'
 import {
   isAgentRunning,
@@ -149,7 +150,11 @@ import {
   peekBundleKind,
   bundleFilename,
   fleetBundleFilename,
+  PackageAgentExportError,
 } from '../agent-bundle.js'
+import { hasLaunchTrace, hasPackageManifestFile, startsWithPackageShell } from '../agent-package/marker.js'
+import { packageDescription, packageSummaryField } from '../agent-package/install.js'
+import { packageApprovalState } from '../agent-package/approval.js'
 import type { RouteContext } from './types.js'
 import { suggestForAgent, type AgentSignals } from '../model-suggest.js'
 import { getTokenSummary } from '../token-usage.js'
@@ -444,6 +449,11 @@ interface AgentSummary {
   /** The custom provider id the agent is set to when that provider no longer exists (the agent will not start),
    *  else null -- drives the warning on the agent card. */
   missingCustomProvider: string | null
+  /** Upstream 9301a1dd (plan 4.2): the installed agent package, from its readable record; null for any other agent. */
+  package: { slug: string; version: string } | null
+  /** This fork (BELA 6438): where a package agent stands with its owner approval; null for any other agent.
+   *  'pending' covers an unreadable record too: either way the agent does not start. */
+  packageApproval: 'approved' | 'pending' | null
   /** A model saved as the picker value ("custom:<id>") with no customProvider beside it: no model a provider knows,
    *  and the provider is on no record (the new-agent wizard saved it so before it sent the two apart), else null. */
   brokenCustomModel: string | null
@@ -506,7 +516,11 @@ function getAgentSummary(name: string): AgentSummary {
   return {
     name,
     displayName: readAgentDisplayName(name),
-    description: extractDescriptionFromClaudeMd(claudeMd),
+    // Upstream 9301a1dd (plan 4.2, M13): a package agent's CLAUDE.md starts with the import lines, so its
+    // description comes from the package record (an unreadable record keeps the old path).
+    description: packageDescription(dir) ?? extractDescriptionFromClaudeMd(claudeMd),
+    package: packageSummaryField(dir),
+    packageApproval: (() => { const st = packageApprovalState(name).state; return st === 'not_package' ? null : st === 'approved' ? 'approved' : 'pending' })(),
     model: modelResolution.model,
     modelProfile: typeof agentModelConfig.modelProfile === 'string' ? agentModelConfig.modelProfile : null,
     modelSource: modelResolution.source,
@@ -2021,15 +2035,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const work = mkdtempSync(join(tmpdir(), 'marveen-fleet-dl-'))
     const outPath = join(work, fleetBundleFilename())
     try {
-      exportAllAgentsBundle(outPath, names, {
+      const m = exportAllAgentsBundle(outPath, names, {
         includeSecrets,
         exportedBy: MAIN_AGENT_ID,
         exportedAt: new Date().toISOString(),
       })
       const data = readFileSync(outPath)
+      const skipped = m?.skippedPackageAgents ?? []
       res.writeHead(200, {
         'Content-Type': 'application/gzip',
         'Content-Disposition': `attachment; filename="${fleetBundleFilename()}"`,
+        // Upstream 9301a1dd (plan 4.2): package agents are left out; the bundle manifest and this header name them.
+        ...(skipped.length > 0 ? { 'X-Skipped-Package-Agents': skipped.join(',') } : {}),
         'Content-Length': String(data.length),
         'Cache-Control': 'private, no-store',
       })
@@ -2069,6 +2086,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       })
       res.end(data)
     } catch (err) {
+      // Upstream 9301a1dd (plan 4.2): a package agent is not exported; the answer says what to do instead.
+      if (err instanceof PackageAgentExportError) { json(res, { error: 'package_agent_not_exportable', message: err.message }, 409); return true }
       logger.error({ err, name }, 'Agent export failed')
       json(res, { error: 'Export failed', detail: err instanceof Error ? err.message : String(err) }, 500)
     } finally {
@@ -2202,6 +2221,19 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       }
     }
 
+    // Upstream 9301a1dd (plan 4.2, 7.5): a package agent's CLAUDE.md must keep starting with the shell prefix, or its
+    // next start is refused (the guard's third condition, same test: the manifest file exists and is not empty). The
+    // check runs on the very bytes the save writes, and before the first write of this request.
+    const claudeMdBytes = typeof data.claudeMd === 'string' ? Buffer.from(data.claudeMd, 'utf8') : null
+    const packageAgent = name !== MAIN_AGENT_ID && hasPackageManifestFile(agentDir(name))
+    if (claudeMdBytes !== null && packageAgent && !startsWithPackageShell(claudeMdBytes)) {
+      json(res, {
+        error: 'package_shell_required',
+        message: 'This agent comes from a package: its CLAUDE.md must start with the two import lines (PACKAGE.md, an empty line, LOCAL.md), with nothing before them. Put them back at the very top, then save again.',
+      }, 409)
+      return true
+    }
+
     if (data.memoryIsolation !== undefined) {
       // The main agent's cwd IS the install repo root, which is already a git
       // root: a memory boundary there is meaningless, and exposing the knob
@@ -2213,7 +2245,16 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       writeAgentMemoryIsolation(name, data.memoryIsolation === true)
     }
     if (data.claudeMd !== undefined) {
-      atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), data.claudeMd)
+      atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), claudeMdBytes ?? data.claudeMd)
+      // Upstream 9301a1dd (plan 7.2): a saved shell without the fleet-roster block would look like an unfinished
+      // install; the roster writer puts the block back at once. The text is the owner's, so the save is not refused
+      // when that fails: it is logged loudly instead.
+      if (packageAgent) {
+        ensureFleetRosterSection(name)
+        if (!hasLaunchTrace(readFileOr(join(configRoot, 'CLAUDE.md'), ''))) {
+          logger.error({ name }, 'package agent CLAUDE.md saved, but the fleet-roster block could not be written back')
+        }
+      }
       // A stale dashboard-editor buffer can carry a pre-federation snapshot
       // (or a block from a since-disabled state): reconcile the managed
       // federation section right after the write, not just at boot -- the

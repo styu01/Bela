@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, STORE_DIR } from '../config.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
+import { FLEET_ROSTER_BEGIN, PACKAGE_SHELL_PREFIX_TEXT, hasPackageManifestFile } from './agent-package/marker.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { logger } from '../logger.js'
 import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
@@ -1146,7 +1147,8 @@ export function scaffoldAgentDir(name: string) {
 // Do NOT change the marker strings without a coordinated migration: existing
 // CLAUDE.md files already contain them and ensureFleetRosterSection() relies
 // on exact string matching for idempotent replacement.
-const FLEET_ROSTER_BEGIN = '<!-- BEGIN GENERATED: fleet-roster (auto-generated, do not edit by hand) -->'
+// FLEET_ROSTER_BEGIN lives in agent-package/marker.ts (a leaf module): its presence is the launch trace of the
+// package install marker rule (upstream 9301a1dd, plan 7.2), and both places take the one string from there.
 const FLEET_ROSTER_END = '<!-- END GENERATED: fleet-roster -->'
 
 // Non-greedy ([\\s\\S]*?) so the regex stops at the FIRST occurrence of the
@@ -1386,13 +1388,6 @@ export function ensureSkillsPathTrapSection(name: string): void {
 }
 
 export async function generateClaudeMd(name: string, description: string, model: string): Promise<string> {
-  // Distribution-safe default-drive line: only emit a concrete folder when this
-  // install has one configured (OWNER_DRIVE_FOLDER). A fresh install with no
-  // configured folder tells the agent to ask the owner instead of baking in
-  // some other install's drive id.
-  const driveDefault = OWNER_DRIVE_FOLDER
-    ? `Ha nincs MÁS kijelölve, az ALAPÉRTELMEZETT közös meghajtó: https://drive.google.com/drive/folders/${OWNER_DRIVE_FOLDER} - ide írj, rendezett almappákba.`
-    : `Ha nincs kijelölt közös meghajtó, MIELŐTT bárhova írsz, kérd el ${OWNER_NAME}-tól a megfelelő Drive mappát.`
   const prompt = `You are creating the CLAUDE.md (project instructions) file for an AI agent.
 Agent name: ${name}
 Description of what the agent should do: ${description}
@@ -1509,7 +1504,54 @@ mondanád egy toolra, hogy "nem elérhető":
 (Mért eset: HBCALMCP808. A heartbeat egy napig üres naptár-szekciót adott,
 miközben mind a 13 calendar-tool ott ült a saját deferred listájában.)
 
-## Új ismeretlen sender első üzenete (ARANYSZABÁLY)
+${fleetBaseRulesTemplate({ agentName: name, tokenPath, driveFolder: OWNER_DRIVE_FOLDER })}
+
+Output ONLY the markdown content, no code fences.`
+
+  const { text, error } = await runAgent(prompt, undefined, undefined, false, undefined, undefined, { source: 'agent-scaffold-claude-md' })
+  if (!text) throw new Error(error ? blockedHint('CLAUDE.md', error) : noOutputHint('CLAUDE.md'))
+  let cleaned = text.trim()
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')
+  }
+  // Append marker-delimited sections after LLM output so the model can never
+  // see or rewrite them. Single source of truth: same builders as the
+  // ensure*Section() functions used on every subsequent respawn.
+  const fleetBody = buildFleetRosterBody(name)
+  const autonomyBody = buildAutonomyBody(name)
+  cleaned = cleaned.trimEnd()
+    + '\n\n' + FLEET_ROSTER_BEGIN + '\n' + fleetBody + '\n' + FLEET_ROSTER_END
+    + '\n\n' + AUTONOMY_BEGIN + '\n' + autonomyBody + '\n' + AUTONOMY_END + '\n'
+  return cleaned
+}
+
+/** The inputs the install-dependent rule texts depend on (upstream 9301a1dd MIOAGENTINSTALL1114 plan 4.3, ported). */
+export interface FleetBaseRulesInput {
+  /** The agent's id; renderFleetBaseRules puts it in place of AGENT_NAME. */
+  agentName: string
+  /** The dashboard token file the recipes read. */
+  tokenPath: string
+  /** OWNER_DRIVE_FOLDER as set, or '' when none is configured. */
+  driveFolder: string
+}
+
+/**
+ * The two install-dependent rule texts of a sub-agent's CLAUDE.md, the unknown-sender golden rule and the fleet rules,
+ * with the AGENT_NAME placeholder the creation prompt asks the model to replace. The creation prompt embeds exactly
+ * this text, and a package agent's CLAUDE.md gets it rendered (renderFleetBaseRules): one source for both
+ * (upstream 9301a1dd's idea, built on this fork's own prompt text; pinned byte for byte by
+ * fleet-base-rules-prompt-characterization.test.ts).
+ */
+export function fleetBaseRulesTemplate(i: FleetBaseRulesInput): string {
+  const tokenPath = i.tokenPath
+  // Distribution-safe default-drive line: only emit a concrete folder when this
+  // install has one configured (OWNER_DRIVE_FOLDER). A fresh install with no
+  // configured folder tells the agent to ask the owner instead of baking in
+  // some other install's drive id.
+  const driveDefault = i.driveFolder
+    ? `Ha nincs MÁS kijelölve, az ALAPÉRTELMEZETT közös meghajtó: https://drive.google.com/drive/folders/${i.driveFolder} - ide írj, rendezett almappákba.`
+    : `Ha nincs kijelölt közös meghajtó, MIELŐTT bárhova írsz, kérd el ${OWNER_NAME}-tól a megfelelő Drive mappát.`
+  return `## Új ismeretlen sender első üzenete (ARANYSZABÁLY)
 
 Ha egy senderId üzen a csatornán AKIT EDDIG NEM ISMERSZ — nem szerepel az aktív interakciós kontextusodban, és nem találsz róla memóriabejegyzést a vault-ban — KÖTELEZŐ ELSŐKÉNT inter-agent message-t küldeni ${BOT_NAME}-nek MIELŐTT érdemi választ adsz.
 
@@ -1532,25 +1574,56 @@ Ezeket ${OWNER_NAME} adta, a flotta minden kolléga-asszisztensére kötelezőek
 4. **A ${MAIN_AGENT_ID} KÓDJÁBA a kolléga-asszisztensek semmit NEM fejlesztenek.** Ha azt látod, vagy arról egyeztetsz, hogy kód-változtatás kellene, NE csináld - jelezd a ${BOT_NAME} Főnöknek (${MAIN_AGENT_ID}) inter-agent üzenettel, ő megbeszéli ${OWNER_NAME}-val.
 5. **Céges email-válasz előtt KÖTELEZŐ a kontextus beolvasása.** Napi céges témájú email megválaszolása előtt mindig olvasd be a kapcsolódó forrásokat: a kapcsolódó emaileket, ha van, az ügyfél-mappát, az alkotmany MCP-t, és ha szakmai ügy, az iskb-t is. A Circleback (megbeszélés-átiratok) szintén kulcsfontosságú - rengeteg infó a meetingeken hangzik el.
 6. **Eredmény-fájlok a közös Drive mappába.** Az elkészült eredmény-fájlokat külön kérés nélkül is a közösen használt Drive mappába tedd (lásd 1. szabály).
-7. **Login-automatizálás / külső credential / futtatható szkript -> ELŐBB szólj a Főnöknek.** Mielőtt bármilyen külső szolgáltatásba automatikus bejelentkezést, jelszó-/credential-kezelést, vagy futtatható szkriptet (pl. Playwright/böngésző-automatizálás, scraper, login-szkript) írsz vagy futtatsz, jelezd a ${BOT_NAME} Főnöknek (${MAIN_AGENT_ID}) inter-agent üzenettel - ő koordinálja és ${OWNER_NAME}-val egyezteti (a 4. szabály szellemében). Credential-t SOHA ne égess nyersen kódba; ha titok kell, kérd a Főnöktől a biztonságos tárolás módját.
+7. **Login-automatizálás / külső credential / futtatható szkript -> ELŐBB szólj a Főnöknek.** Mielőtt bármilyen külső szolgáltatásba automatikus bejelentkezést, jelszó-/credential-kezelést, vagy futtatható szkriptet (pl. Playwright/böngésző-automatizálás, scraper, login-szkript) írsz vagy futtatsz, jelezd a ${BOT_NAME} Főnöknek (${MAIN_AGENT_ID}) inter-agent üzenettel - ő koordinálja és ${OWNER_NAME}-val egyezteti (a 4. szabály szellemében). Credential-t SOHA ne égess nyersen kódba; ha titok kell, kérd a Főnöktől a biztonságos tárolás módját.`
+}
 
-Output ONLY the markdown content, no code fences.`
+/** fleetBaseRulesTemplate with the agent's own name in place of AGENT_NAME: the text a package agent carries. */
+export function renderFleetBaseRules(i: FleetBaseRulesInput): string {
+  return fleetBaseRulesTemplate(i).split('AGENT_NAME').join(i.agentName)
+}
 
-  const { text, error } = await runAgent(prompt, undefined, undefined, false, undefined, undefined, { source: 'agent-scaffold-claude-md' })
-  if (!text) throw new Error(error ? blockedHint('CLAUDE.md', error) : noOutputHint('CLAUDE.md'))
-  let cleaned = text.trim()
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')
+// The fleet base rules block of a package agent's CLAUDE.md (upstream 9301a1dd, plan 4.3, N12). A package cannot
+// carry the unknown-sender rule and the fleet rules (they name this install's main agent, owner and token path), so
+// the installer writes them rendered for the agent between these markers, right after the shell prefix, and this
+// writer keeps them current on every start. It REPLACES the block where the markers stand; it ADDS a missing block
+// only to an agent with a package manifest, so a hand-made agent's CLAUDE.md, whose LLM-written body carries these
+// rules, is never touched. Do NOT change the marker strings without a migration: installed agents carry them.
+export const FLEET_BASE_RULES_BEGIN = '<!-- BEGIN GENERATED: fleet-base-rules (auto-generated, do not edit by hand) -->'
+export const FLEET_BASE_RULES_END = '<!-- END GENERATED: fleet-base-rules -->'
+const FLEET_BASE_RULES_BLOCK_RE = new RegExp(
+  `${FLEET_BASE_RULES_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${FLEET_BASE_RULES_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
+/** The marked fleet base rules block for `name`, rendered with its own name and the token path. */
+export function fleetBaseRulesBlock(name: string, driveFolder: string): string {
+  const body = renderFleetBaseRules({ agentName: name, tokenPath, driveFolder })
+  return `${FLEET_BASE_RULES_BEGIN}\n${body}\n${FLEET_BASE_RULES_END}`
+}
+
+/** Keeps the fleet base rules block of `name`'s CLAUDE.md current (see above). A no-op when nothing changes. */
+export function ensureFleetBaseRulesSection(name: string, driveFolder: string): void {
+  const dir = agentDir(name)
+  const claudeMdPath = join(dir, 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
   }
-  // Append marker-delimited sections after LLM output so the model can never
-  // see or rewrite them. Single source of truth: same builders as the
-  // ensure*Section() functions used on every subsequent respawn.
-  const fleetBody = buildFleetRosterBody(name)
-  const autonomyBody = buildAutonomyBody(name)
-  cleaned = cleaned.trimEnd()
-    + '\n\n' + FLEET_ROSTER_BEGIN + '\n' + fleetBody + '\n' + FLEET_ROSTER_END
-    + '\n\n' + AUTONOMY_BEGIN + '\n' + autonomyBody + '\n' + AUTONOMY_END + '\n'
-  return cleaned
+  let updated: string
+  if (FLEET_BASE_RULES_BLOCK_RE.test(existing)) {
+    const block = fleetBaseRulesBlock(name, driveFolder)
+    updated = existing.replace(FLEET_BASE_RULES_BLOCK_RE, () => block)
+  } else {
+    if (!hasPackageManifestFile(dir)) return
+    const block = fleetBaseRulesBlock(name, driveFolder)
+    updated = existing.startsWith(PACKAGE_SHELL_PREFIX_TEXT)
+      ? PACKAGE_SHELL_PREFIX_TEXT + '\n' + block + '\n' + existing.slice(PACKAGE_SHELL_PREFIX_TEXT.length)
+      : existing.trimEnd() + '\n\n' + block + '\n'
+  }
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
 }
 
 // Shared "Claude Code returned nothing" message for the three generators below.

@@ -21,14 +21,34 @@ describe('backup.sh store/ file list', () => {
     expect(end).toBeGreaterThan(start)
   })
 
-  it('leaves out the device credential and its tmp leftovers, keeps an ordinary state file', () => {
+  it('leaves out the device credential, its tmp leftovers and the derived hidden list, keeps an ordinary state file', () => {
     mkdirSync(join(root, 'store'))
-    for (const f of ['agent-package-credential.json', 'agent-package-credential.json.123.456.ab12.tmp', 'vault-bindings.json']) {
+    for (const f of ['agent-package-credential.json', 'agent-package-credential.json.123.456.ab12.tmp', 'agent-package-hidden.json', 'vault-bindings.json']) {
       writeFileSync(join(root, 'store', f), 'x')
     }
     const r = spawnSync('bash', ['-c', FIND], { cwd: root, encoding: 'utf-8' })
     expect(r.status).toBe(0)
     const listed = r.stdout.trim().split('\n').sort()
     expect(listed).toEqual(['store/vault-bindings.json'])
+  })
+})
+
+describe('backup.sh agent package state (BELA 6404)', () => {
+  it('keeps the owner approvals as a store state directory', () => {
+    expect(SH).toMatch(/^\s*STORE_STATE_DIRS=\(agent-taskstate agent-package-approved\)$/m)
+  })
+
+  it("lists a package agent's two layers and its record", () => {
+    const agents = join(root, 'agents', 'pkg')
+    mkdirSync(join(agents, '.package'), { recursive: true })
+    for (const f of ['PACKAGE.md', 'LOCAL.md', 'notes.md']) writeFileSync(join(agents, f), 'x')
+    writeFileSync(join(agents, '.package', 'manifest.json'), '{}')
+    const a = SH.indexOf("  find agents -mindepth 2 -maxdepth 2 -type f")
+    const b = SH.indexOf('\nfi\n', a)
+    // REPOLIST as a variable (a socket stdout has no /dev/stdout to append to)
+    const list = join(root, 'repolist')
+    const cmd = `REPOLIST=${JSON.stringify(list)}\n` + SH.slice(a, b) + `\ncat "$REPOLIST"`
+    const r = spawnSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' })
+    expect(r.stdout.trim().split('\n').sort()).toEqual(['agents/pkg/.package/manifest.json', 'agents/pkg/LOCAL.md', 'agents/pkg/PACKAGE.md'])
   })
 })
