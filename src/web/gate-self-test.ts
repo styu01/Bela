@@ -262,6 +262,24 @@ export const GATE_SELF_TEST_RETRY_DELAY_MS = 60_000
 let lastStates = new Map<string, boolean>()
 // Open gate escalations: gate script -> the failing entries (by resultKey) it was raised for, and their results.
 let openGates = new Map<string, { keys: Set<string>; results: GateRunResult[]; raisedAt: number }>()
+// PROGI 6288: settings files unreadable in consecutive passes (path -> streak), and those escalated.
+let unreadableStreak = new Map<string, number>()
+const unreadableEscalated = new Set<string>()
+export const UNREADABLE_SETTINGS_PASSES = 2
+
+/** A settings file that exists but cannot be read / parsed for UNREADABLE_SETTINGS_PASSES passes in a row is
+ *  itself escalated (BELA first, the owner if it stays): Claude Code then either does not start or runs that
+ *  agent WITHOUT its hooks, every gate fail-open. One pass is tolerated (a write caught mid-way). Pure over
+ *  its inputs: returns the paths to raise and to clear, and the next streak map. */
+export function decideUnreadableSettings(
+  prevStreak: ReadonlyMap<string, number>, escalated: ReadonlySet<string>, unreadableNow: ReadonlySet<string>,
+): { raise: string[]; clear: string[]; next: Map<string, number> } {
+  const next = new Map<string, number>()
+  for (const p of unreadableNow) next.set(p, (prevStreak.get(p) ?? 0) + 1)
+  const raise = [...next].filter(([p, n]) => n >= UNREADABLE_SETTINGS_PASSES && !escalated.has(p)).map(([p]) => p)
+  const clear = [...escalated].filter((p) => !unreadableNow.has(p))
+  return { raise, clear, next }
+}
 
 /** PROGI 6268 (a)(b): reconcile the open gate escalations with THIS pass's results. Pure over its inputs:
  *  - a gate with no failing entry now -> recover (also when its failing entry simply disappeared: an agent
@@ -335,6 +353,22 @@ export async function runGateSelfTest(opts: {
     }
     const alerter = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
     if (unreadable.size) logger.warn({ unreadable: [...unreadable] }, 'gate self-test: settings file(s) unreadable this pass; their open escalations are kept')
+    {
+      const alerterU = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
+      const agentOf = new Map((opts.targets ?? gateTargets()).map((t) => [t.settingsPath, t.agent]))
+      const u = decideUnreadableSettings(unreadableStreak, unreadableEscalated, unreadable)
+      unreadableStreak = u.next
+      for (const path of u.raise) {
+        unreadableEscalated.add(path)
+        const text = `[kapu-onteszt] OLVASHATATLAN SETTINGS: agens ${agentOf.get(path) ?? '?'}, fajl ${path}: ${UNREADABLE_SETTINGS_PASSES} egymast koveto korben nem olvashato vagy nem ervenyes JSON. A Claude Code ilyenkor vagy nem indul, vagy a hookjai NELKUL fut: annal az agensnel minden kapu fail-open. Teendo: a fajl javitasa (a sub-agens settings-et a kovetkezo spawn ujrageneralja; a fo agense kezzel / git-bol).`
+        logger.error({ path }, 'gate self-test: settings file unreadable in consecutive passes -- escalating')
+        try { alerterU.fail(`gate-settings-unreadable:${path}`, text) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
+      }
+      for (const path of u.clear) {
+        unreadableEscalated.delete(path)
+        try { alerterU.recover(`gate-settings-unreadable:${path}`, `[kapu-onteszt] HELYREALLT: ${path} ujra olvashato (vagy mar nincs meg).`) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+      }
+    }
     const rec = reconcileGateEscalations(openGates, results, unreadable)
     for (const r of rec.recover) {
       openGates.delete(r.gate)
@@ -385,6 +419,8 @@ export function reportPruneKept(agent: string, settingsPath: string, commands: r
 export function resetGateSelfTestState(): void {
   lastStates = new Map()
   openGates = new Map()
+  unreadableStreak = new Map()
+  unreadableEscalated.clear()
   running = false
   prunedKeptAlerted.clear()
 }

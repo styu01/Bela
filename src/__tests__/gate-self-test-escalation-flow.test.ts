@@ -156,3 +156,43 @@ describe('PROGI 6278', () => {
     expect(ok[0]).not.toContain('ujra atengedik')
   }, 60_000)
 })
+
+// PROGI 6288: a settings file that stays unreadable is itself escalated (Claude Code then runs that agent
+// without its hooks, every gate fail-open).
+describe('unreadable settings file in consecutive passes', () => {
+  it('one unreadable pass is tolerated; the second consecutive one escalates once; readable again -> all-clear', async () => {
+    const t = mk('ur-a', 'process.exit(0)').t
+    const bad = { targets: [t], read: () => '{ broken json' }
+    await runGateSelfTest(bad)
+    await flush(10)
+    expect(count(seen.bela, /OLVASHATATLAN SETTINGS/)).toBe(0)
+    await runGateSelfTest(bad)
+    await flush(10)
+    expect(count(seen.bela, /OLVASHATATLAN SETTINGS/)).toBe(1)
+    expect(seen.bela.find((x) => /OLVASHATATLAN/.test(x))).toContain('agens ur-a')
+    await runGateSelfTest(bad)
+    await flush(10)
+    expect(count(seen.bela, /OLVASHATATLAN SETTINGS/)).toBe(1) // no repeat
+    await runGateSelfTest({ targets: [t] })
+    await flush(10)
+    expect(seen.bela.some((x) => /HELYREALLT/.test(x) && x.includes('ujra olvashato'))).toBe(true)
+  }, 60_000)
+
+  it('a readable pass between two unreadable ones resets the streak (no escalation)', async () => {
+    const t = mk('ur-b', 'process.exit(0)').t
+    await runGateSelfTest({ targets: [t], read: () => '{ broken' })
+    await runGateSelfTest({ targets: [t] })
+    await runGateSelfTest({ targets: [t], read: () => '{ broken' })
+    await flush(10)
+    expect(count(seen.bela, /OLVASHATATLAN SETTINGS/)).toBe(0)
+  }, 60_000)
+
+  it('stays unreadable past the 20 min: the owner is paged too', async () => {
+    const t = mk('ur-c', 'process.exit(0)').t
+    await runGateSelfTest({ targets: [t], read: () => '{ broken' })
+    await runGateSelfTest({ targets: [t], read: () => '{ broken' })
+    await flush(10)
+    await flush(GATE_STAGE2_EXTRA_MS + 60_000)
+    expect(count(seen.owner, /OLVASHATATLAN SETTINGS/)).toBe(1)
+  }, 60_000)
+})
