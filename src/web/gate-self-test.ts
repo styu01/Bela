@@ -348,9 +348,7 @@ const isWrapped = (e: GateEntry) => e.command.includes(GATE_FAIL_CLOSED_TAG)
  *  them through UNCHECKED (PROGI 6248 iii). The load average is given for a timeout-like failure (ii). */
 export function gateFailureText(failed: readonly GateRunResult[], load: readonly number[] = loadavg()): string {
   const lines = failed.map((r) => {
-    const effect = r.unverifiable
-      ? 'ismeretlen: a kapu tartalma nem ellenorizheto, egy lecserelt kapu sem latszana'
-      : r.integrity
+    const effect = r.integrity
       ? 'ismeretlen: a kapu nem a verziokezelt kodot futtatja, akar mindent atengedhet'
       : isWrapped(r.entry)
         ? 'az illeszkedo hivasok TILTVA'
@@ -358,17 +356,64 @@ export function gateFailureText(failed: readonly GateRunResult[], load: readonly
     return `- agens: ${r.entry.agent}, kapu: ${r.entry.gate} (matcher: ${r.entry.matcher || '(mind)'}), beallitas: ${r.entry.settingsPath}, ${r.detail}. Hatas: ${effect}.`
   })
   const timed = failed.some((r) => r.timeoutLike)
-  const tampered = failed.some((r) => r.integrity && !r.unverifiable)
-  const unverifiable = failed.some((r) => r.unverifiable)
+  const tampered = failed.some((r) => r.integrity)
   return [
     `[kapu-onteszt] KAPU HIBA: ${failed.length} bekotott kapu-bejegyzes egy artalmatlan hivason elbukott, vagy nem fut.${timed ? ` Idotullepes jellegu hiba (60 mp mulva ujrafuttatva is), load: ${load.map((x) => x.toFixed(2)).join(' ')}.` : ''}`,
     ...lines,
     tampered
       ? 'Teendo: a verziokezelttol eltero kapu-fajlt ellenorizni (ki es miert modositotta), es ha nem szandekos, visszaallitani a git HEAD tartalmara; ha szandekos, commitolni. 60 mp mulva ujraellenorizve is elter. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.'
-      : unverifiable
-      ? 'Teendo: a telepites git checkoutjat rendbe tenni (a git status hibauzenete mutatja az okot: serult HEAD, jogosultsag, tulajdonos / safe.directory, beagyazott .git), utana a kapuk ujra ellenorizhetok. 60 mp mulva ujraellenorizve is fennall. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.'
       : 'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkoze nincs kapuzva. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
   ].join('\n')
+}
+
+// BELA 6327 (2): a broken checkout makes EVERY wired gate script under it unverifiable at once. Keyed per gate
+// script that was 4-5 alerts to BELA and as many owner pages 20 min later, all for one cause. The
+// unverifiable entries are kept out of the per-gate escalations and get ONE escalation per checkout
+// (gate-integrity-unverifiable:<repo>), listing the gate scripts; its all-clear is one message too.
+export const unverifiableKey = (repo: string) => `gate-integrity-unverifiable:${repo}`
+
+/** The one alert text for a checkout whose gates cannot be verified, grouped by gate script. Pure. */
+export function gateUnverifiableText(repo: string, unverifiable: readonly GateRunResult[]): string {
+  const byGate = new Map<string, GateRunResult[]>()
+  for (const r of unverifiable) byGate.set(r.entry.gate, [...(byGate.get(r.entry.gate) ?? []), r])
+  const lines = [...byGate].map(([gate, rs]) => {
+    const agents = [...new Set(rs.map((r) => r.entry.agent))].join(', ')
+    return `- kapu: ${gate} (${rs.length} bekotott bejegyzes, agensek: ${agents}): ${rs[0].detail}.`
+  })
+  return [
+    `[kapu-onteszt] KAPU-INTEGRITAS NEM ELLENORIZHETO: a telepites git checkoutjaban (${repo}) ${byGate.size} kapu-szkript tartalma nem ellenorizheto (60 mp mulva ujraellenorizve is). Hatas: ismeretlen, egy lecserelt kapu sem latszana.`,
+    ...lines,
+    `Teendo: a checkout rendbetetele (git -C ${repo} status hibauzenete mutatja az okot: serult HEAD, jogosultsag, tulajdonos / safe.directory, beagyazott .git), utana a kapuk ujra ellenorizhetok. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.`,
+  ].join('\n')
+}
+
+export function gateUnverifiableRecoveryText(repo: string): string {
+  return `[kapu-onteszt] HELYREALLT: a telepites git checkoutja (${repo}) ujra ellenorizheto, a kapuk integritasa ujra merheto.`
+}
+
+export interface UnverifiableOpen { repo: string; gates: Set<string>; results: GateRunResult[]; raisedAt: number }
+
+/** Reconcile the one per-checkout escalation with THIS pass. Pure over its inputs:
+ *  - unverifiable entries now and none open -> fail;
+ *  - open, and a gate script now unverifiable that was not in it -> fail again (keeping the original
+ *    owner deadline, the caller does that), with the full list;
+ *  - open, and no unverifiable entry now -> recover, unless an entry of it is unknown this pass (its
+ *    settings file unreadable and the entry not seen: PROGI 6278 b). */
+export function reconcileUnverifiable(
+  open: UnverifiableOpen | null,
+  unverifiable: readonly GateRunResult[],
+  results: readonly GateRunResult[],
+  unreadable: ReadonlySet<string> = new Set(),
+): { fail: { reraise: boolean } | null; recover: boolean } {
+  if (unverifiable.length) {
+    if (!open) return { fail: { reraise: false }, recover: false }
+    if (unverifiable.some((r) => !open.gates.has(r.entry.gate))) return { fail: { reraise: true }, recover: false }
+    return { fail: null, recover: false }
+  }
+  if (!open) return { fail: null, recover: false }
+  const seen = new Set(results.map((r) => resultKey(r.entry)))
+  if (open.results.some((r) => unreadable.has(r.entry.settingsPath) && !seen.has(resultKey(r.entry)))) return { fail: null, recover: false }
+  return { fail: null, recover: true }
 }
 
 export function gateRecoveryText(recovered: readonly GateRunResult[], vanished: readonly GateRunResult[] = []): string {
@@ -417,6 +462,8 @@ export const GATE_SELF_TEST_RETRY_DELAY_MS = 60_000
 let lastStates = new Map<string, boolean>()
 // Open gate escalations: gate script -> the failing entries (by resultKey) it was raised for, and their results.
 let openGates = new Map<string, { keys: Set<string>; results: GateRunResult[]; raisedAt: number }>()
+// BELA 6327: the one open per-checkout "unverifiable" escalation.
+let openUnverifiable: UnverifiableOpen | null = null
 // PROGI 6288: settings files unreadable in consecutive passes (path -> streak), and those escalated.
 let unreadableStreak = new Map<string, number>()
 const unreadableEscalated = new Set<string>()
@@ -451,6 +498,10 @@ export function reconcileGateEscalations(
   fail: { gate: string; results: GateRunResult[]; reraise: boolean }[]
   recover: { gate: string; results: GateRunResult[]; recovered: GateRunResult[]; vanished: GateRunResult[] }[]
 } {
+  // BELA 6327: an unverifiable entry is escalated per checkout (reconcileUnverifiable), not per gate; for the
+  // per-gate keys it is unknown: it neither fails a gate nor lets an open gate escalation "recover".
+  const unknown = new Set(results.filter((r) => r.unverifiable).map((r) => resultKey(r.entry)))
+  results = results.filter((r) => !r.unverifiable)
   const failingByGate = new Map<string, GateRunResult[]>()
   for (const r of results) if (!r.ok) failingByGate.set(r.entry.gate, [...(failingByGate.get(r.entry.gate) ?? []), r])
   const nowByKey = new Map(results.map((r) => [resultKey(r.entry), r]))
@@ -458,6 +509,7 @@ export function reconcileGateEscalations(
   const recover: { gate: string; results: GateRunResult[]; recovered: GateRunResult[]; vanished: GateRunResult[] }[] = []
   for (const [gate, o] of open) {
     if (failingByGate.has(gate)) continue
+    if (o.results.some((r) => unknown.has(resultKey(r.entry)))) continue
     // PROGI 6278 (b): an entry whose settings file could not be read this pass is unknown, not gone.
     if (o.results.some((r) => unreadable.has(r.entry.settingsPath) && !nowByKey.has(resultKey(r.entry)))) continue
     const recovered = o.results.filter((r) => nowByKey.has(resultKey(r.entry)))
@@ -547,6 +599,27 @@ export async function runGateSelfTest(opts: {
       logger.info({ gate: r.gate, vanished: r.vanished.length }, 'gate self-test: gate recovered (no failing entry left)')
       try { alerter.recover(`gate-self-test:${r.gate}`, gateRecoveryText(r.recovered, r.vanished)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
     }
+    {
+      const unv = results.filter((r) => r.unverifiable)
+      const ru = reconcileUnverifiable(openUnverifiable, unv, results, unreadable)
+      if (ru.recover && openUnverifiable) {
+        const repo = openUnverifiable.repo
+        openUnverifiable = null
+        logger.info({ repo }, 'gate self-test: install checkout verifiable again')
+        try { alerter.recover(unverifiableKey(repo), gateUnverifiableRecoveryText(repo)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+      }
+      if (ru.fail) {
+        const repo = openUnverifiable?.repo ?? anchor ?? '?'
+        const key = unverifiableKey(repo)
+        const nowMs = opts.now ? opts.now() : Date.now()
+        const raisedAt = (ru.fail.reraise ? openUnverifiable?.raisedAt : undefined) ?? nowMs
+        const stage2 = Math.max(0, GATE_STAGE2_EXTRA_MS - (nowMs - raisedAt))
+        if (ru.fail.reraise) { try { clearOwnerEscalation(key) } catch { /* not open */ } }
+        openUnverifiable = { repo, gates: new Set(unv.map((r) => r.entry.gate)), results: unv, raisedAt }
+        logger.error({ repo, gates: [...openUnverifiable.gates] }, 'gate self-test: gate integrity not verifiable in the install checkout')
+        try { alerter.fail(key, gateUnverifiableText(repo, unv), stage2) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
+      }
+    }
     if (rec.fail.length) {
       const load = opts.load ? opts.load() : loadavg()
       const nowMs = opts.now ? opts.now() : Date.now()
@@ -593,6 +666,7 @@ export function resetGateSelfTestState(): void {
   openGates = new Map()
   unreadableStreak = new Map()
   unreadableEscalated.clear()
+  openUnverifiable = null
   running = false
   prunedKeptAlerted.clear()
   bootGitAnchor = undefined

@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import {
   checkGateIntegrity, detectGitAnchor, runGateSelfTest, resetGateSelfTestState, startGateSelfTest, REAL_GIT,
-  gateFailureText, type GateRunResult, type GitIo,
+  unverifiableKey, gateUnverifiableText, gateUnverifiableRecoveryText, reconcileUnverifiable, GATE_STAGE2_EXTRA_MS,
+  type GateRunResult, type GitIo, type GateAlerter,
 } from '../web/gate-self-test.js'
 import { hookCommand } from '../web/agent-scaffold.js'
 import { PROJECT_ROOT } from '../config.js'
@@ -21,7 +22,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user
 function repo(name: string, files: Record<string, string>): string {
   const dir = join(tmp, name)
   mkdirSync(join(dir, 'scripts'), { recursive: true })
-  for (const [f, body] of Object.entries(files)) writeFileSync(join(dir, f), body)
+  for (const [f, body] of Object.entries(files)) { mkdirSync(dirname(join(dir, f)), { recursive: true }); writeFileSync(join(dir, f), body) }
   git(dir, 'init', '-q')
   git(dir, 'add', '-A')
   git(dir, 'commit', '-q', '-m', 'init')
@@ -129,15 +130,15 @@ describe('runGateSelfTest with the install anchor', () => {
     expect(res[0].integrity).toBe(true)
     expect(res[0].unverifiable).toBe(true)
     expect(sent.length).toBe(1)
-    expect(sent[0]).toContain('[kapu-onteszt] KAPU HIBA')
-    expect(sent[0]).toContain('Hatas: ismeretlen: a kapu tartalma nem ellenorizheto')
-    expect(sent[0]).toContain('a telepites git checkoutjat rendbe tenni')
+    expect(sent[0]).toContain(`[kapu-onteszt] KAPU-INTEGRITAS NEM ELLENORIZHETO: a telepites git checkoutjaban (${r})`)
+    expect(sent[0]).toContain('Hatas: ismeretlen')
+    expect(sent[0]).toContain(`Teendo: a checkout rendbetetele (git -C ${r} status`)
     expect(sent[0]).not.toContain('visszaallitani a git HEAD tartalmara')
     expect(sent[0]).not.toMatch(/—| -- /)
     writeFileSync(join(r, '.git', 'HEAD'), 'ref: refs/heads/master\n')
     await runGateSelfTest({ targets, send, retryDelayMs: 0, gitAnchor: r })
     expect(sent.length).toBe(2)
-    expect(sent[1]).toContain('[kapu-onteszt] HELYREALLT')
+    expect(sent[1]).toContain(`[kapu-onteszt] HELYREALLT: a telepites git checkoutja (${r}) ujra ellenorizheto`)
   })
 
   it('a git hiccup gone by the re-check 60 s later is not alerted', async () => {
@@ -181,17 +182,118 @@ describe('startGateSelfTest takes the anchor at start', () => {
   })
 })
 
-describe('gateFailureText for an unverifiable gate', () => {
-  it('its own effect and fix; a mixed list keeps the swapped-gate fix', () => {
-    const entry = { agent: 'a', settingsPath: '/s', projectDir: '/p', matcher: 'Bash', command: 'x', timeoutSec: 10, gate: 'egress-gate.mjs' }
-    const u: GateRunResult = { entry, ok: false, detail: 'a kapu integritasa nem ellenorizheto: ...', integrity: true, unverifiable: true }
-    const t = gateFailureText([u], [0, 0, 0])
-    expect(t).toContain('Hatas: ismeretlen: a kapu tartalma nem ellenorizheto')
-    expect(t).toContain('a telepites git checkoutjat rendbe tenni')
+
+// BELA 6327 (2): one escalation per broken checkout, not one per gate script.
+describe('one escalation for a checkout whose gates cannot be verified', () => {
+  beforeEach(() => resetGateSelfTestState())
+  type Ev = { kind: 'fail' | 'recover'; key: string; text: string; stage2?: number }
+  const recorder = () => {
+    const ev: Ev[] = []
+    const alerter: GateAlerter = {
+      fail: (key, text, stage2) => { ev.push({ kind: 'fail', key, text, stage2 }) },
+      recover: (key, text) => { ev.push({ kind: 'recover', key, text }) },
+    }
+    return { ev, alerter }
+  }
+  const wireMany = (r: string, gates: string[], agents: string[]) => agents.map((agent) => {
+    const sp = join(r, `settings-${agent}.json`)
+    writeFileSync(sp, JSON.stringify({ hooks: { PreToolUse: gates.map((g) => ({ matcher: 'Bash', hooks: [{ type: 'command', command: hookCommand(join(r, 'scripts', g)), timeout: 10 }] })) } }))
+    return { agent, settingsPath: sp, projectDir: r }
+  })
+
+  it('two gate scripts on three agents, checkout broken: ONE alert on the checkout key listing both gates; ONE all-clear', async () => {
+    const r = repo('agg', { 'scripts/egress-gate.mjs': 'process.exit(0)\n', 'scripts/self-pace-gate.mjs': 'process.exit(0)\n' })
+    const targets = wireMany(r, ['egress-gate.mjs', 'self-pace-gate.mjs'], ['progi', 'okoska', 'iris'])
+    const { ev, alerter } = recorder()
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    expect(ev).toEqual([])
+    writeFileSync(join(r, '.git', 'HEAD'), 'garbage\n')
+    const res = await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    expect(res.filter((x) => x.unverifiable).length).toBe(6)
+    expect(ev.length).toBe(1)
+    expect(ev[0].kind).toBe('fail')
+    expect(ev[0].key).toBe(unverifiableKey(r))
+    expect(ev[0].key).toBe(`gate-integrity-unverifiable:${r}`)
+    expect(ev[0].text).toContain('2 kapu-szkript')
+    expect(ev[0].text).toContain('- kapu: egress-gate.mjs (3 bekotott bejegyzes, agensek: progi, okoska, iris)')
+    expect(ev[0].text).toContain('- kapu: self-pace-gate.mjs (3 bekotott bejegyzes, agensek: progi, okoska, iris)')
+    expect(ev[0].text).not.toMatch(/—| -- /)
+    // still broken next pass: nothing new
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    expect(ev.length).toBe(1)
+    writeFileSync(join(r, '.git', 'HEAD'), 'ref: refs/heads/master\n')
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    expect(ev.length).toBe(2)
+    expect(ev[1]).toEqual({ kind: 'recover', key: unverifiableKey(r), text: gateUnverifiableRecoveryText(r) })
+  })
+
+  it('a further gate script becoming unverifiable re-raises with the full list and the ORIGINAL owner deadline', async () => {
+    const r = repo('agg-reraise', { 'scripts/a/egress-gate.mjs': 'process.exit(0)\n', 'scripts/b/self-pace-gate.mjs': 'process.exit(0)\n' })
+    const sp = join(r, 'settings.json')
+    writeFileSync(sp, JSON.stringify({ hooks: { PreToolUse: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: hookCommand(join(r, 'scripts', 'a', 'egress-gate.mjs')), timeout: 10 }] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: hookCommand(join(r, 'scripts', 'b', 'self-pace-gate.mjs')), timeout: 10 }] },
+    ] } }))
+    const targets = [{ agent: 'progi', settingsPath: sp, projectDir: r }]
+    const { ev, alerter } = recorder()
+    let now = 1_000_000
+    git(join(r, 'scripts', 'a'), 'init', '-q') // nested repo: only gate a unverifiable
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r, now: () => now })
+    expect(ev.map((e) => e.kind)).toEqual(['fail'])
+    expect(ev[0].stage2).toBe(GATE_STAGE2_EXTRA_MS)
+    expect(ev[0].text).toContain('1 kapu-szkript')
+    now += 5 * 60_000
+    git(join(r, 'scripts', 'b'), 'init', '-q')
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r, now: () => now })
+    expect(ev.length).toBe(2)
+    expect(ev[1].kind).toBe('fail')
+    expect(ev[1].key).toBe(unverifiableKey(r))
+    expect(ev[1].stage2).toBe(GATE_STAGE2_EXTRA_MS - 5 * 60_000)
+    expect(ev[1].text).toContain('2 kapu-szkript')
+  })
+
+  it('an open per-gate "differs" escalation is neither recovered nor re-alerted while the checkout is unverifiable', async () => {
+    const r = repo('agg-mixed', { 'scripts/egress-gate.mjs': 'process.exit(0)\n' })
+    const targets = wireMany(r, ['egress-gate.mjs'], ['progi'])
+    const { ev, alerter } = recorder()
+    writeFileSync(join(r, 'scripts', 'egress-gate.mjs'), 'process.exit(0) // swapped\n')
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    expect(ev.map((e) => [e.kind, e.key])).toEqual([['fail', 'gate-self-test:egress-gate.mjs']])
+    writeFileSync(join(r, '.git', 'HEAD'), 'garbage\n')
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    // no false "HELYREALLT" for the swapped gate, one checkout alert
+    expect(ev.map((e) => [e.kind, e.key])).toEqual([['fail', 'gate-self-test:egress-gate.mjs'], ['fail', unverifiableKey(r)]])
+    writeFileSync(join(r, '.git', 'HEAD'), 'ref: refs/heads/master\n')
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    // checkout fixed, gate still swapped: the checkout all-clear only; the gate escalation stays open, not re-sent
+    expect(ev.slice(2).map((e) => [e.kind, e.key])).toEqual([['recover', unverifiableKey(r)]])
+    git(r, 'checkout', '-q', 'HEAD', '--', 'scripts/egress-gate.mjs')
+    await runGateSelfTest({ targets, alerter, retryDelayMs: 0, gitAnchor: r })
+    expect(ev.slice(3).map((e) => [e.kind, e.key])).toEqual([['recover', 'gate-self-test:egress-gate.mjs']])
+  })
+})
+
+describe('reconcileUnverifiable (pure)', () => {
+  const entry = (agent: string, gate: string, sp = `/s/${agent}`) => ({ agent, settingsPath: sp, projectDir: '/p', matcher: 'Bash', command: 'x', timeoutSec: 10, gate })
+  const u = (agent: string, gate: string, sp?: string): GateRunResult => ({ entry: entry(agent, gate, sp), ok: false, detail: 'd', integrity: true, unverifiable: true })
+  const ok = (agent: string, gate: string): GateRunResult => ({ entry: entry(agent, gate), ok: true, detail: '' })
+  it('fail / re-raise only on a new gate script / quiet / recover / an unreadable settings file keeps it open', () => {
+    expect(reconcileUnverifiable(null, [u('a', 'g1')], [u('a', 'g1')])).toEqual({ fail: { reraise: false }, recover: false })
+    const open = { repo: '/r', gates: new Set(['g1']), results: [u('a', 'g1', '/s/a')], raisedAt: 0 }
+    expect(reconcileUnverifiable(open, [u('a', 'g1'), u('b', 'g1')], [])).toEqual({ fail: null, recover: false })
+    expect(reconcileUnverifiable(open, [u('a', 'g1'), u('a', 'g2')], [])).toEqual({ fail: { reraise: true }, recover: false })
+    expect(reconcileUnverifiable(open, [], [ok('a', 'g1')])).toEqual({ fail: null, recover: true })
+    expect(reconcileUnverifiable(open, [], [], new Set(['/s/a']))).toEqual({ fail: null, recover: false })
+    expect(reconcileUnverifiable(open, [], [], new Set())).toEqual({ fail: null, recover: true })
+    expect(reconcileUnverifiable(null, [], [ok('a', 'g1')])).toEqual({ fail: null, recover: false })
+  })
+  it('the alert text groups by gate script and names the checkout', () => {
+    const t = gateUnverifiableText('/r', [u('a', 'g1'), u('b', 'g1'), u('a', 'g2')])
+    expect(t).toContain('a telepites git checkoutjaban (/r) 2 kapu-szkript')
+    expect(t).toContain('- kapu: g1 (2 bekotott bejegyzes, agensek: a, b): d.')
+    expect(t).toContain('- kapu: g2 (1 bekotott bejegyzes, agensek: a): d.')
+    // the main agent has several settings files wiring the same gate: named once
+    expect(gateUnverifiableText('/r', [u('bela', 'g1', '/s1'), u('bela', 'g1', '/s2'), u('bela', 'g1', '/s3')])).toContain('- kapu: g1 (3 bekotott bejegyzes, agensek: bela): d.')
     expect(t).not.toMatch(/—| -- /)
-    const d: GateRunResult = { entry: { ...entry, gate: 'self-pace-gate.mjs' }, ok: false, detail: 'elter', integrity: true }
-    const m = gateFailureText([d, u], [0, 0, 0])
-    expect(m).toContain('visszaallitani a git HEAD tartalmara')
-    expect(m).toContain('Hatas: ismeretlen: a kapu nem a verziokezelt kodot futtatja')
   })
 })
