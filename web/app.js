@@ -1847,6 +1847,12 @@ function getDragAfterElement(col, y) {
 }
 
 // === New card modal ===
+// The card version the edit form was FILLED from (upstream 5b404c44): PUT /api/kanban/:id refuses a
+// stale one with 409. The form rebuilds the body from its fields instead of round-tripping the card
+// object, so without this it would be the one UI write that can still replace someone else's text.
+// null = a new card, or a card from a server without versions: the PUT then goes unchecked.
+let cardEditBaseVersion = null
+
 function openNewCardModal(status) {
   document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_new')
   document.getElementById('cardTitle').value = ''
@@ -1856,6 +1862,7 @@ function openNewCardModal(status) {
   document.getElementById('cardDue').value = ''
   document.getElementById('cardRecurringTemplate').checked = false
   document.getElementById('cardEditId').value = ''
+  cardEditBaseVersion = null
   document.getElementById('cardEditStatus').value = status || 'planned'
   populateAssigneeSelect('cardAssignee')
   populateProjectSuggestions()
@@ -1896,12 +1903,21 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
 
   try {
     if (editId) {
+      if (cardEditBaseVersion !== null) data.expected_version = cardEditBaseVersion
       const res = await fetch(`/api/kanban/${encodeURIComponent(editId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
-      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.status) }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        if (res.status === 409 && e.conflict === 'stale_version') {
+          // The modal STAYS OPEN: the typed text is the only copy of it.
+          showToast(t('kanban.toast.stale_version_form'), 8000)
+          return
+        }
+        throw new Error(e.error || res.status)
+      }
       showToast(t('kanban.toast.card_updated'))
     } else {
       data.status = document.getElementById('cardEditStatus').value
@@ -2144,7 +2160,21 @@ async function showCardDetail(card) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...card, assignee: newVal }),
         })
+        // `{...card}` carries the version this object was loaded at, so a card that changed
+        // meanwhile is refused instead of having its description reverted (upstream 5b404c44).
+        if (r.status === 409) {
+          const e = await r.json().catch(() => ({}))
+          if (e.conflict === 'stale_version') {
+            assigneeValueEl.textContent = current ? current : '-- nincs --'
+            showToast(t('kanban.toast.stale_version'), 6000)
+            loadKanban && loadKanban()
+            return
+          }
+        }
         if (!r.ok) throw new Error('PUT failed')
+        // The next whole-card write from this same view must carry the NEW version.
+        const saved = await r.json().catch(() => ({}))
+        if (Number.isInteger(saved.version)) card.version = saved.version
         card.assignee = newVal
         assigneeValueEl.textContent = newVal ? newVal : '-- nincs --'
         showToast(t('kanban.toast.assignee_updated'))
@@ -2193,7 +2223,14 @@ async function showCardDetail(card) {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...card, parent_id: newParentId }),
       })
-      if (r.ok) { card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card) }
+      if (r.ok) {
+        const saved = await r.json().catch(() => ({}))
+        if (Number.isInteger(saved.version)) card.version = saved.version
+        card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card)
+      } else if (r.status === 409 && (await r.json().catch(() => ({}))).conflict === 'stale_version') {
+        showToast(t('kanban.toast.stale_version'), 6000)
+        loadKanban()
+      }
       else showToast(t('kanban.toast.save_error'))
     }
     parentMetaItem.style.display = ''
@@ -2270,6 +2307,8 @@ async function showCardDetail(card) {
       : ''
     document.getElementById('cardRecurringTemplate').checked = !!card.is_recurring_template
     document.getElementById('cardEditId').value = card.id
+    // Taken at FILL time, not at save time: it must describe the text the user edits on top of.
+    cardEditBaseVersion = Number.isInteger(card.version) ? card.version : null
     document.getElementById('cardEditStatus').value = card.status
     populateAssigneeSelect('cardAssignee', card.assignee)
     populateProjectSuggestions()

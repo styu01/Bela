@@ -237,6 +237,38 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     logger.warn({ err }, 'kanban_cards testing-status migration failed -- continuing')
   }
+  // Migration (upstream 5b404c44): row version for the PUT's lost-update check (see
+  // writeKanbanCard). AFTER the rebuild above on purpose: that rebuild copies an explicit
+  // column list, so a column added before it would be lost. Not updated_at (seconds-granular:
+  // two writers inside one second read the same value). NOT NULL DEFAULT 0: every existing row
+  // has a defined version.
+  try {
+    db.exec('ALTER TABLE kanban_cards ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    // column already exists
+  }
+  // The version moves whenever a column the whole-card PUT writes back changes, whoever the
+  // writer is: the PUT, /move, the archive sweep, or a script writing the table directly (a bump
+  // only in the TypeScript paths would miss those). LOCAL: the column list is what OUR
+  // updateKanbanCard writes back (no test_steps/start_date here; is_recurring_template yes).
+  // Comments, dispatch stamps and updated_at do not move it -- a PUT body cannot overwrite them.
+  // Dropped and recreated in ONE immediate transaction on every start, so a column added to the
+  // list later reaches existing databases and no other process ever writes without the trigger.
+  // No recursion: the inner UPDATE sets only `version`, which is not in the OF list.
+  {
+    const versionedCols = [...KANBAN_VERSIONED_FIELDS]
+    db.transaction(() => {
+      db.exec('DROP TRIGGER IF EXISTS kanban_cards_version_bump')
+      db.exec(`
+        CREATE TRIGGER kanban_cards_version_bump
+        AFTER UPDATE OF ${versionedCols.join(', ')} ON kanban_cards
+        FOR EACH ROW WHEN ${versionedCols.map((c) => `NEW.${c} IS NOT OLD.${c}`).join(' OR ')}
+        BEGIN
+          UPDATE kanban_cards SET version = version + 1 WHERE id = NEW.id;
+        END
+      `)
+    }).immediate()
+  }
   // Kanban project summaries: a small, separate table for the one thing that
   // cannot be derived from kanban_cards -- the human-written project
   // description. Everything else the project-overview page needs (card
@@ -1958,6 +1990,9 @@ export interface KanbanCard {
   // is woken (kanban -> agent dispatch). NULL = never dispatched; the once-only
   // guard so re-dragging a card does not re-prompt the agent.
   dispatched_at: number | null
+  // Row version (upstream 5b404c44), moved by a trigger on every change to a PUT-writable column.
+  // A PUT that sends back the version it read is refused (409) if the card changed since.
+  version: number
   /** Durable recurring-work container, not a live run. */
   is_recurring_template: 0 | 1
 }
@@ -2084,9 +2119,41 @@ export function createKanbanCard(card: {
   }
 }
 
-export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>, recurringTemplateActor?: string): boolean {
+// The columns a whole-card PUT writes back (updateKanbanCard's UPDATE, minus updated_at): the
+// version trigger watches exactly these (upstream 5b404c44, local column set).
+export const KANBAN_VERSIONED_FIELDS = [
+  'title', 'description', 'status', 'assignee', 'priority', 'project', 'parent_id', 'due_date',
+  'sort_order', 'archived_at', 'is_recurring_template',
+] as const
+
+export type KanbanCardWriteResult =
+  | { ok: true; version: number }
+  | { ok: false; reason: 'not_found' }
+  | { ok: false; reason: 'stale'; current_version: number }
+
+// The boolean form for callers that make no claim about what they read.
+export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at' | 'version'>>, recurringTemplateActor?: string): boolean {
+  return writeKanbanCard(id, fields, recurringTemplateActor).ok
+}
+
+// upstream 5b404c44: `expectedVersion` is the version the caller based its body on. A client that
+// GETs a card and PUTs the whole object back (the dashboard, web/app.js `{...card, assignee}` /
+// `{...card, parent_id}`) would otherwise overwrite whatever changed meanwhile -- e.g. a description
+// written since the board was loaded -- with a 200. With the version it gets 'stale' (409 at the
+// route) and nothing is written; without one it is last-writer-wins, as before. The check is also
+// in the UPDATE itself (`version = ?`), so a write by another process between the read and this
+// write is refused too.
+export function writeKanbanCard(
+  id: string,
+  fields: Partial<Omit<KanbanCard, 'id' | 'created_at' | 'version'>>,
+  recurringTemplateActor?: string,
+  expectedVersion?: number | null,
+): KanbanCardWriteResult {
   const card = getKanbanCard(id)
-  if (!card) return false
+  if (!card) return { ok: false, reason: 'not_found' }
+  if (expectedVersion != null && expectedVersion !== card.version) {
+    return { ok: false, reason: 'stale', current_version: card.version }
+  }
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
   // LOCAL (beyond upstream 7a47b24a, which re-arms only in moveKanbanCard): PUT /api/kanban/<id> can
@@ -2095,13 +2162,20 @@ export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'i
   const changed = db.prepare(
     `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?, is_recurring_template=?,
        dispatched_at = CASE WHEN ? = 'in_progress' THEN dispatched_at ELSE NULL END
-     WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, f.is_recurring_template ? 1 : 0, f.status, id).changes > 0
-  if (changed && card.is_recurring_template !== (f.is_recurring_template ? 1 : 0)) {
+     WHERE id=? AND (? IS NULL OR version=?)`
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, f.is_recurring_template ? 1 : 0, f.status, id, expectedVersion ?? null, expectedVersion ?? null).changes > 0
+  if (!changed) {
+    // Gone, or (only with a version) moved on between the read above and this write.
+    const current = getKanbanCard(id)
+    return current ? { ok: false, reason: 'stale', current_version: current.version } : { ok: false, reason: 'not_found' }
+  }
+  if (card.is_recurring_template !== (f.is_recurring_template ? 1 : 0)) {
     db.prepare('INSERT INTO kanban_recurring_template_events (card_id, from_value, to_value, actor, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(id, card.is_recurring_template, f.is_recurring_template ? 1 : 0, recurringTemplateActor ?? 'system', now)
   }
-  return changed
+  // Read back, not card.version + 1: the trigger may move it more than once in one write (the title
+  // gate's own UPDATE re-fires it), and the caller chains its next write on the stored value.
+  return { ok: true, version: getKanbanCard(id)?.version ?? card.version + 1 }
 }
 
 export function getKanbanRecurringTemplateEvents(cardId: string): KanbanRecurringTemplateEvent[] {

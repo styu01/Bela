@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
-  listKanbanCards, kanbanAssigneeExists, createKanbanCard, updateKanbanCard, parentWouldCycle,
+  listKanbanCards, kanbanAssigneeExists, createKanbanCard, updateKanbanCard, writeKanbanCard, parentWouldCycle,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard, unarchiveKanbanCard,
   getKanbanComments, addKanbanComment, getKanbanCardEvents, listKanbanProjects,
   getKanbanCard, getChildCards, getDb,
@@ -480,10 +480,26 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (kanbanCardMatch && method === 'PUT') {
     const id = decodeURIComponent(kanbanCardMatch[1])
     const body = await readBody(req)
-    const data = JSON.parse(body.toString())
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    const parsed = JSON.parse(body.toString())
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       json(res, { error: 'A kártya adatai objektumként szükségesek' }, 400); return true
     }
+    // upstream 5b404c44: the version the body was based on, under two names -- `version` (what a
+    // GET returns, so the dashboard's whole-card round trip is checked without a client change)
+    // and `expected_version` (a hand-built partial body). Neither is ever written as a column. A
+    // malformed value is a 400, not "no check": a caller that believes it sent a guard must not get
+    // an unguarded write.
+    const { version, expected_version, ...data } = parsed as Record<string, unknown>
+    const versionError = (v: unknown) => v !== undefined && !(Number.isSafeInteger(v) && (v as number) >= 0)
+    if (versionError(version) || versionError(expected_version)) {
+      json(res, { error: '"version" / "expected_version" must be a non-negative integer (the version the card was read at)' }, 400)
+      return true
+    }
+    if (version !== undefined && expected_version !== undefined && version !== expected_version) {
+      json(res, { error: '"version" and "expected_version" disagree -- send one' }, 400)
+      return true
+    }
+    const expectedVersion = (expected_version ?? version) as number | undefined
     let recurringTemplateChanging = false
     if (Object.hasOwn(data, 'is_recurring_template')) {
       if (!recurringTemplateFieldIsValid(data.is_recurring_template)) {
@@ -505,7 +521,18 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
         json(res, { error: data.parent_id === id ? 'Egy kártya nem lehet a saját szülője' : 'Ez a szülő-kapcsolat kört zárna be' }, 409); return true
       }
     }
-    if (updateKanbanCard(id, data, recurringTemplateChanging ? describeAuthActor(auth) : undefined)) { json(res, { ok: true }); return true }
+    const written = writeKanbanCard(id, data, recurringTemplateChanging ? describeAuthActor(auth) : undefined, expectedVersion)
+    if (written.ok) { json(res, { ok: true, version: written.version }); return true }
+    if (written.reason === 'stale') {
+      // An instruction, not a diagnosis: the next act has to be a re-read; reposting the same body
+      // is exactly the overwrite this refused.
+      json(res, {
+        error: 'A kártya megváltozott, mióta beolvastad: semmi nem mentődött. Olvasd be újra, és a jelenlegi változatra tedd rá a módosításodat.',
+        conflict: 'stale_version',
+        current_version: written.current_version,
+      }, 409)
+      return true
+    }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
