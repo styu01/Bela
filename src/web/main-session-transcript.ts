@@ -175,6 +175,22 @@ export function mainSessionTranscriptMtime(
   return { mtime: deps.dir(), source: 'dir', fallbackReason: own.reason }
 }
 
+// The main session's PROVEN own session, for a respawn that should `--resume <sid>` it (BELA msg
+// 6173: the down-cascade stage 3 too, not only the stuck-watcher). null + the reason when it cannot
+// be proven; the caller then respawns with --continue and logs that reason.
+export function provenMainSession(
+  session: string,
+  projectRoot: string,
+  deps: { panePid(session: string): number | null; own(pid: number, projectRoot: string): OwnTranscript } =
+    { panePid: tmuxPanePid, own: readOwnSessionTranscript },
+): { resume: { sessionId: string; transcriptPath: string } | null; reason: string | null } {
+  const pid = deps.panePid(session)
+  if (pid === null) return { resume: null, reason: 'no-pane-pid' }
+  const own = deps.own(pid, projectRoot)
+  if (!own.ok) return { resume: null, reason: own.reason }
+  return { resume: { sessionId: own.sessionId, transcriptPath: own.path }, reason: null }
+}
+
 export function readOwnSessionTranscript(pid: number, projectRoot: string): OwnTranscript {
   try {
     return resolveOwnSessionTranscript(pid, projectRoot, liveOwnTranscriptDeps, [join(projectRoot, '.channels-config')])

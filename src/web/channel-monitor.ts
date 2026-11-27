@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
+import { provenMainSession } from './main-session-transcript.js'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
@@ -705,8 +706,9 @@ export function readExtraChannelPluginIds(projectRoot: string = PROJECT_ROOT): s
 export function chooseMainRespawnResume(
   resume: { sessionId: string; transcriptPath: string } | null,
   exists: (path: string) => boolean,
+  unprovenReason?: string | null,
 ): { resumeSessionId: string | undefined; respawnMode: 'resume' | 'continue'; continueReason: string | null } {
-  if (!resume) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'no-proven-session' }
+  if (!resume) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: unprovenReason || 'no-proven-session' }
   if (!SESSION_UUID_RX.test(resume.sessionId)) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'bad-session-id' }
   if (!exists(resume.transcriptPath)) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'transcript-missing-at-respawn' }
   return { resumeSessionId: resume.sessionId, respawnMode: 'resume', continueReason: null }
@@ -881,7 +883,7 @@ export function respawnMainSessionFresh(): void {
 // difference: a sid with no transcript makes claude exit 1 ("No conversation found"), hence the
 // existsSync re-check right before the respawn. The other callers pass nothing: --continue.
 export async function resumeMarveenSession(
-  opts: { resume?: { sessionId: string; transcriptPath: string } | null } = {},
+  opts: { resume?: { sessionId: string; transcriptPath: string } | null; unprovenReason?: string | null } = {},
 ): Promise<boolean> {
   const provider = getProvider(getMainAgentProvider())
   try {
@@ -915,7 +917,7 @@ export async function resumeMarveenSession(
     // bootcamp mass-"/login"); idempotent re-seed before every respawn.
     ensureSharedClaudeOnboarded()
 
-    const { resumeSessionId, respawnMode, continueReason } = chooseMainRespawnResume(opts.resume ?? null, existsSync)
+    const { resumeSessionId, respawnMode, continueReason } = chooseMainRespawnResume(opts.resume ?? null, existsSync, opts.unprovenReason)
 
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: CLAUDE,
@@ -1760,7 +1762,11 @@ async function handleMarveenDown(): Promise<void> {
     marveenDownState.stageStartedAt = now
     marveenDownState.lastAlertAt = now
     logger.warn({ provider: providerLabel }, 'Marveen channel plugin still down -- stage 3 (session resume)')
-    await resumeMarveenSession()
+    // BELA msg 6173: same rule as the stuck-watcher -- resume the PROVEN own session by id. A plain
+    // --continue opens the dir's newest interactive session, measured to include a live foreign one
+    // (73a4bb70). Not provable -> --continue, with the reason in the respawn log line.
+    const proven = provenMainSession(MAIN_CHANNELS_SESSION, PROJECT_ROOT)
+    await resumeMarveenSession({ resume: proven.resume, unprovenReason: proven.reason })
     return
   }
   if (marveenDownState.stage === 'resume') {

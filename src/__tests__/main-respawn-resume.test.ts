@@ -75,7 +75,7 @@ describe('wiring: resumeMarveenSession decides the mode with the chooser and han
     expect(start).toBeGreaterThan(0)
     const body = src.slice(start, src.indexOf('\n}\n', start))
     const code = body.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
-    const chooseIdx = code.indexOf('chooseMainRespawnResume(opts.resume ?? null, existsSync)')
+    const chooseIdx = code.indexOf('chooseMainRespawnResume(opts.resume ?? null, existsSync, opts.unprovenReason)')
     const buildIdx = code.indexOf('buildMainSessionRespawnCmd({')
     const passIdx = code.indexOf('resumeSessionId,', buildIdx)
     const respawnIdx = code.indexOf("'respawn-pane'")
@@ -83,5 +83,43 @@ describe('wiring: resumeMarveenSession decides the mode with the chooser and han
     expect(buildIdx).toBeGreaterThan(chooseIdx)
     expect(passIdx).toBeGreaterThan(buildIdx)
     expect(respawnIdx).toBeGreaterThan(passIdx)
+  })
+})
+
+// BELA msg 6173: the down-cascade stage 3 resumes the proven own session too.
+describe('provenMainSession', () => {
+  it('a proven record -> { sessionId, transcriptPath }, no reason', async () => {
+    const { provenMainSession } = await import('../web/main-session-transcript.js')
+    const r = provenMainSession('main-test', '/r', {
+      panePid: () => 77,
+      own: () => ({ ok: true, sessionId: SID, path: PATH_OK, mtimeMs: 1 }),
+    })
+    expect(r).toEqual({ resume: { sessionId: SID, transcriptPath: PATH_OK }, reason: null })
+  })
+  it('no pane pid / not provable -> null with the reason', async () => {
+    const { provenMainSession } = await import('../web/main-session-transcript.js')
+    expect(provenMainSession('s', '/r', { panePid: () => null, own: () => { throw new Error('must not be called') } }))
+      .toEqual({ resume: null, reason: 'no-pane-pid' })
+    expect(provenMainSession('s', '/r', { panePid: () => 77, own: () => ({ ok: false, reason: 'record-procstart-mismatch' }) }))
+      .toEqual({ resume: null, reason: 'record-procstart-mismatch' })
+  })
+  it('the chooser carries the unproven reason into the --continue log', () => {
+    expect(chooseMainRespawnResume(null, () => true, 'no-pane-pid'))
+      .toEqual({ resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'no-pane-pid' })
+  })
+})
+
+describe('wiring: the down-cascade stage 3 resumes the proven own session', () => {
+  it('the stage-3 branch resolves provenMainSession and passes resume + reason to resumeMarveenSession', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(__dirname, '..', 'web', 'channel-monitor.ts'), 'utf-8')
+    const at = src.indexOf("'Marveen channel plugin still down -- stage 3 (session resume)'")
+    expect(at).toBeGreaterThan(0)
+    const block = src.slice(at, src.indexOf('return', at))
+    const code = block.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+    expect(code).toContain('const proven = provenMainSession(MAIN_CHANNELS_SESSION, PROJECT_ROOT)')
+    expect(code).toContain('await resumeMarveenSession({ resume: proven.resume, unprovenReason: proven.reason })')
+    expect(code).not.toMatch(/resumeMarveenSession\(\)/)
   })
 })
