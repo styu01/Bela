@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { join, dirname, relative, isAbsolute, resolve } from 'node:path'
+import { join, dirname, relative, isAbsolute, resolve, sep } from 'node:path'
 import { loadavg } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, WEB_PORT } from '../config.js'
 import { logger } from '../logger.js'
@@ -41,6 +41,8 @@ export interface GateRunResult {
   timeoutLike?: boolean
   /** The gate file (or a local module it loads) differs from git HEAD (BELA 6270): also re-checked once. */
   integrity?: boolean
+  /** BELA 6319 (B): an integrity failure because the check could not be made in the install's checkout. */
+  unverifiable?: boolean
 }
 
 /** Every settings file a gate can be wired in, with the project dir its session runs in. */
@@ -193,17 +195,60 @@ export function gateScriptClosure(
   return seen
 }
 
-/** null: not verifiable (not in a git checkout). Otherwise ok, or the files that are not HEAD's content. */
+export interface IntegrityVerdict { ok: boolean; detail: string; unverifiable?: boolean }
+
+const canonical = (p: string): string => { try { return realpathSync(p) } catch { return resolve(p) } }
+const isInside = (root: string, p: string): boolean => {
+  const rel = relative(root, p)
+  return rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)
+}
+
+// BELA 6319 (B) / PROGI 6318 (3b): a gate in an install that IS a git clone must not drop out of the check
+// silently. When git gives no answer there (a broken .git/HEAD, an unreadable .git, a safe.directory refusal
+// after an owner change, a hung / missing git), the verdict used to be null = "not a checkout, skipped", so
+// the watcher could be switched off by breaking .git. The checkout the install was in at dashboard start is
+// the anchor: a gate under it that cannot be verified there is a failing entry ("unverifiable"), re-checked
+// once 60 s later like any integrity failure. Without an anchor (an install that is not a clone) the old skip
+// stays. Same for a gate under the anchor that git places in ANOTHER repository (a nested .git created inside
+// the checkout, whose own HEAD could be made to match any swapped gate).
+/** The git checkout PROJECT_ROOT is in, taken once at dashboard start; null: not a clone. A .git entry at the
+ *  root counts even when git does not answer at boot (a broken checkout is then reported, not skipped). */
+export function detectGitAnchor(root: string = PROJECT_ROOT, git: GitIo = REAL_GIT, exists: (path: string) => boolean = existsSync): string | null {
+  const top = git.run(root, ['rev-parse', '--show-toplevel'])
+  if (top) return canonical(top)
+  if (exists(join(root, '.git'))) return canonical(root)
+  return null
+}
+
+/** null: not verifiable and not expected to be (not in a git checkout, and not under `anchor`). Otherwise ok,
+ *  or the files that are not HEAD's content, or (under `anchor`) why it could not be verified there. */
 export function checkGateIntegrity(
   script: string,
   git: GitIo = REAL_GIT,
   read: (path: string) => string | null = (p) => { try { return readFileSync(p, 'utf-8') } catch { return null } },
   exists: (path: string) => boolean = existsSync,
-): { ok: boolean; detail: string } | null {
+  anchor: string | null = null,
+): IntegrityVerdict | null {
   let real = script
   try { real = realpathSync(script) } catch { /* checked by the caller: it exists */ }
-  const top = git.run(dirname(real), ['rev-parse', '--show-toplevel'])
-  if (!top) return null
+  const underAnchor = anchor != null && isInside(anchor, real)
+  const topRaw = git.run(dirname(real), ['rev-parse', '--show-toplevel'])
+  if (!topRaw) {
+    if (!underAnchor) return null
+    return {
+      ok: false,
+      unverifiable: true,
+      detail: `a kapu integritasa nem ellenorizheto: a git nem ad valaszt a telepites checkoutjaban (${anchor}), pedig az inditaskor git-klon volt. Lehetseges ok: serult .git/HEAD, olvashatatlan .git, tulajdonos-valtas miatti safe.directory-tiltas, vagy a git nem fut / tullepte az idot. Nezd meg: git -C ${anchor} status`,
+    }
+  }
+  const top = canonical(topRaw)
+  if (underAnchor && top !== anchor) {
+    return {
+      ok: false,
+      unverifiable: true,
+      detail: `a kapu integritasa nem ellenorizheto: a fajl a telepites checkoutjaban (${anchor}) van, de a git egy masik, beagyazott repoba sorolja (${top}), amelynek a HEAD-je barmihez igazithato. Nezd meg: ls -la ${top}/.git`,
+    }
+  }
   const bad: string[] = []
   for (const f of gateScriptClosure(real, read, exists)) {
     let fr = f
@@ -231,7 +276,7 @@ export function checkGateIntegrity(
 export function runGateCommand(
   entry: GateEntry,
   port: number | string = WEB_PORT,
-  integrity?: (script: string) => { ok: boolean; detail: string } | null,
+  integrity?: (script: string) => IntegrityVerdict | null,
 ): Promise<GateRunResult> {
   const cwd = existsSync(entry.projectDir) ? entry.projectDir : PROJECT_ROOT
   const call = benignToolCall(entry.matcher, cwd, port)
@@ -246,9 +291,9 @@ export function runGateCommand(
     return Promise.resolve({ entry, ok: false, detail: `a kapu fajlja hianyzik: ${script}`, timeoutLike: false })
   }
   if (integrity && script != null && script.startsWith('/')) {
-    let v: { ok: boolean; detail: string } | null = null
+    let v: IntegrityVerdict | null = null
     try { v = integrity(script) } catch { v = null }
-    if (v != null && !v.ok) return Promise.resolve({ entry, ok: false, detail: v.detail, timeoutLike: false, integrity: true })
+    if (v != null && !v.ok) return Promise.resolve({ entry, ok: false, detail: v.detail, timeoutLike: false, integrity: true, ...(v.unverifiable ? { unverifiable: true } : {}) })
   }
   return new Promise((resolve) => {
     let stdout = ''
@@ -303,7 +348,9 @@ const isWrapped = (e: GateEntry) => e.command.includes(GATE_FAIL_CLOSED_TAG)
  *  them through UNCHECKED (PROGI 6248 iii). The load average is given for a timeout-like failure (ii). */
 export function gateFailureText(failed: readonly GateRunResult[], load: readonly number[] = loadavg()): string {
   const lines = failed.map((r) => {
-    const effect = r.integrity
+    const effect = r.unverifiable
+      ? 'ismeretlen: a kapu tartalma nem ellenorizheto, egy lecserelt kapu sem latszana'
+      : r.integrity
       ? 'ismeretlen: a kapu nem a verziokezelt kodot futtatja, akar mindent atengedhet'
       : isWrapped(r.entry)
         ? 'az illeszkedo hivasok TILTVA'
@@ -311,12 +358,15 @@ export function gateFailureText(failed: readonly GateRunResult[], load: readonly
     return `- agens: ${r.entry.agent}, kapu: ${r.entry.gate} (matcher: ${r.entry.matcher || '(mind)'}), beallitas: ${r.entry.settingsPath}, ${r.detail}. Hatas: ${effect}.`
   })
   const timed = failed.some((r) => r.timeoutLike)
-  const tampered = failed.some((r) => r.integrity)
+  const tampered = failed.some((r) => r.integrity && !r.unverifiable)
+  const unverifiable = failed.some((r) => r.unverifiable)
   return [
     `[kapu-onteszt] KAPU HIBA: ${failed.length} bekotott kapu-bejegyzes egy artalmatlan hivason elbukott, vagy nem fut.${timed ? ` Idotullepes jellegu hiba (60 mp mulva ujrafuttatva is), load: ${load.map((x) => x.toFixed(2)).join(' ')}.` : ''}`,
     ...lines,
     tampered
       ? 'Teendo: a verziokezelttol eltero kapu-fajlt ellenorizni (ki es miert modositotta), es ha nem szandekos, visszaallitani a git HEAD tartalmara; ha szandekos, commitolni. 60 mp mulva ujraellenorizve is elter. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.'
+      : unverifiable
+      ? 'Teendo: a telepites git checkoutjat rendbe tenni (a git status hibauzenete mutatja az okot: serult HEAD, jogosultsag, tulajdonos / safe.directory, beagyazott .git), utana a kapuk ujra ellenorizhetok. 60 mp mulva ujraellenorizve is fennall. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.'
       : 'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkoze nincs kapuzva. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
   ].join('\n')
 }
@@ -422,6 +472,8 @@ export function reconcileGateEscalations(
   return { fail, recover }
 }
 let running = false
+// BELA 6319 (B): set once by startGateSelfTest (dashboard start); undefined: not started (tests).
+let bootGitAnchor: string | null | undefined
 
 /** One self-test pass. Exported for tests (targets, reader, alerter / sender and the re-run wait injectable). */
 export async function runGateSelfTest(opts: {
@@ -436,6 +488,9 @@ export async function runGateSelfTest(opts: {
   now?: () => number
   /** BELA 6270: the git layer of the integrity check (injectable); null switches the check off. */
   git?: GitIo | null
+  /** BELA 6319 (B): the install's git checkout taken at dashboard start (default: the one startGateSelfTest
+   *  detected; none when it was not started); null: not a clone, an unverifiable gate is skipped. */
+  gitAnchor?: string | null
 } = {}): Promise<GateRunResult[]> {
   if (running) return []
   running = true
@@ -445,9 +500,10 @@ export async function runGateSelfTest(opts: {
     const results: GateRunResult[] = []
     // BELA 6270: one integrity verdict per gate script per pass (the same file is wired in many settings).
     const git = opts.git === undefined ? REAL_GIT : opts.git
-    const verdicts = new Map<string, { ok: boolean; detail: string } | null>()
+    const anchor = opts.gitAnchor !== undefined ? opts.gitAnchor : (bootGitAnchor ?? null)
+    const verdicts = new Map<string, IntegrityVerdict | null>()
     const integrity = git == null ? undefined : (script: string) => {
-      if (!verdicts.has(script)) verdicts.set(script, checkGateIntegrity(script, git, undefined, opts.exists))
+      if (!verdicts.has(script)) verdicts.set(script, checkGateIntegrity(script, git, undefined, opts.exists, anchor))
       return verdicts.get(script) ?? null
     }
     // Sequential on purpose: ~30 short processes every 15 minutes, never a burst on a loaded host.
@@ -539,9 +595,12 @@ export function resetGateSelfTestState(): void {
   unreadableEscalated.clear()
   running = false
   prunedKeptAlerted.clear()
+  bootGitAnchor = undefined
 }
 
 export function startGateSelfTest(): NodeJS.Timeout {
+  bootGitAnchor = detectGitAnchor()
+  logger.info({ anchor: bootGitAnchor }, 'gate self-test: install checkout for the integrity check (null: not a git clone, skipped)')
   setTimeout(() => { void runGateSelfTest().catch((err) => logger.warn({ err }, 'gate self-test failed')) }, GATE_SELF_TEST_INITIAL_DELAY_MS).unref()
   return setInterval(() => { void runGateSelfTest().catch((err) => logger.warn({ err }, 'gate self-test failed')) }, GATE_SELF_TEST_INTERVAL_MS)
 }
