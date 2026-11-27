@@ -127,3 +127,34 @@ describe('silent dispatch no-op on a down agent', () => {
     expect(getKanbanComments('card-6')).toHaveLength(0)
   })
 })
+
+// PROGI review 6196 / BELA 6197: the dashboard's drag WITHIN the in_progress column also posts
+// /move status=in_progress. On a down agent's card each reorder wrote a new card comment and a new
+// main-agent inbox row (a paid turn via the nudge). The notice belongs to a real transition only.
+describe('reordering inside in_progress does not repeat the session-down notice', () => {
+  it('one transition -> one notice; two reorders afterwards -> no more', async () => {
+    createKanbanCard({ id: 'card-r', title: 'Reorder me', assignee: 'dex' }) // dex is down
+    await move('card-r', 'in_progress', 'orin')
+    await move('card-r', 'in_progress', 'orin')
+    await move('card-r', 'in_progress', 'orin')
+    expect(mockCreateAgentMessage).toHaveBeenCalledTimes(1)
+    expect(getKanbanComments('card-r')).toHaveLength(1)
+  })
+  it('a reorder after the agent was started still wakes it (the dispatch is tried, only the notice is gated)', async () => {
+    createKanbanCard({ id: 'card-s', title: 'Started later', assignee: 'dex' })
+    await move('card-s', 'in_progress', 'orin')          // down: one notice
+    runningAgents.add('dex')
+    await move('card-s', 'in_progress', 'orin')          // reorder: now the wake-up goes out
+    const calls = mockCreateAgentMessage.mock.calls as string[][]
+    expect(calls).toHaveLength(2)
+    expect(calls[1][1]).toBe('dex')
+    expect(calls[1][2]).toContain('card-s')
+  })
+  it('a real re-entry (in_progress -> planned -> in_progress) on a still-down agent notices again', async () => {
+    createKanbanCard({ id: 'card-t', title: 'Bounce', assignee: 'dex' })
+    await move('card-t', 'in_progress', 'orin')
+    await move('card-t', 'planned', 'orin')
+    await move('card-t', 'in_progress', 'orin')
+    expect(mockCreateAgentMessage).toHaveBeenCalledTimes(2)
+  })
+})

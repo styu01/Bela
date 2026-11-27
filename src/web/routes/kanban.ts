@@ -117,7 +117,12 @@ export function kanbanMoveInstructions(id: string, target: string): string {
 // dispatched_at is the once-only guard; errors never block the card move.
 // `actor` is the mover reported by the caller: an agent that moves its own card
 // to in_progress must not be woken with an assignment for work it just started.
-function fireKanbanDispatch(id: string, actor?: string | null): void {
+// reportUndelivered: write the session-down notice (card comment + main-agent inbox row). Only on a
+// REAL transition into in_progress (PROGI review 6196): the dashboard's drag within the in_progress
+// column also posts /move status=in_progress, and on a down agent's card every such reorder wrote a new
+// comment and a new inbox row (a paid main-agent turn via the nudge). A reorder still TRIES the
+// dispatch -- if the agent has been started since, the card's first wake-up goes out then.
+function fireKanbanDispatch(id: string, actor?: string | null, reportUndelivered = true): void {
   try {
     const card = getKanbanCard(id)
     if (!card || card.dispatched_at) return
@@ -134,7 +139,7 @@ function fireKanbanDispatch(id: string, actor?: string | null): void {
       // 'not-dispatchable' (no/unknown assignee, human owner) and 'self-move' are DELIBERATE
       // no-dispatch cases -- staying quiet is correct, and alerting on them would bury the one case
       // that matters (upstream 7a47b24a).
-      if (decision.reason === 'session-down') reportUndeliveredDispatch(id, decision.unreachable ?? String(card.assignee))
+      if (decision.reason === 'session-down' && reportUndelivered) reportUndeliveredDispatch(id, decision.unreachable ?? String(card.assignee))
       return
     }
     const desc = (card.description ?? '').trim()
@@ -144,7 +149,7 @@ function fireKanbanDispatch(id: string, actor?: string | null): void {
     logger.info({ id, target, assignee: card.assignee }, 'Kanban in_progress dispatch fired')
   } catch (err) {
     logger.warn({ err, id }, 'Kanban dispatch failed (card move still succeeded)')
-    reportUndeliveredDispatch(id, 'a kiosztás hibára futott')
+    if (reportUndelivered) reportUndeliveredDispatch(id, 'a kiosztás hibára futott')
   }
 }
 
@@ -513,10 +518,12 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(kanbanMoveMatch[1])
     const body = await readBody(req)
     const { status, sort_order, actor } = JSON.parse(body.toString())
+    const prevStatus = getKanbanCard(id)?.status
     if (moveKanbanCard(id, status, sort_order ?? 0, actor)) {
       // Wake the assigned agent once when the card enters in_progress -- unless
-      // that agent is the one who moved it (self-pickup needs no wake-up).
-      if (status === 'in_progress') fireKanbanDispatch(id, actor)
+      // that agent is the one who moved it (self-pickup needs no wake-up). The
+      // session-down notice only on a real transition (see fireKanbanDispatch).
+      if (status === 'in_progress') fireKanbanDispatch(id, actor, prevStatus !== 'in_progress')
       json(res, { ok: true })
       return true
     }
