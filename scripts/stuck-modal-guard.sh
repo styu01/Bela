@@ -155,8 +155,47 @@ classify_pane() {
   if [ -n "$(printf '%s\n' "$pane" | live_footer_line)" ]; then
     echo idle; return
   fi
+  # 3b. GUARD-ONLY (PROGI 6026 55288137 b, BELA 6054): the live mode footer WITHOUT its hint. Claude Code 2.1.326
+  #     draws "(shift+tab to cycle)" only while the row has room for it (read in the binary: the hint is dropped
+  #     next to the PR status, a footer indicator such as "wrong model?", or a background count on a narrow
+  #     pane; the fleet's panes are 80 columns). The bare "⏵⏵ bypass permissions on", "… on · install gh for PR
+  #     status" and "… · 1 shell" shapes then miss step 3, and this guard would respawn an IDLE session. Same
+  #     anchor as live_footer_line (the first line under the last column-0 rule, or the last line with no rule),
+  #     the same live start (mode glyph), words, then " on" at the end or before " · ". Kept OUT of
+  #     live_footer_line on purpose: the TypeScript reader answers unknown for these (no delivery, its safe
+  #     side), and for this guard idle is the safe side (no respawn). Busy markers were ruled out in step 2.
+  if [ -n "$(printf '%s\n' "$pane" | bare_mode_footer_line)" ]; then
+    echo idle; return
+  fi
   # 4. neither -> the idle footer is hidden by a modal overlay and no live turn
   echo stuck
+}
+
+# Guard-only companion of live_footer_line (step 3b above): prints the hint-less live mode footer, or nothing.
+bare_mode_footer_line() {
+  LC_ALL=C awk '
+    function strip(s) {
+      gsub(/\033\[[^@-~]*[@-~]/, "", s)
+      sub(/\033\[[^@-~]*$/, "", s)
+      gsub(/\033/, "", s)
+      return s
+    }
+    function bare(l,   t) {
+      t = strip(l); sub(/[ \t\r\f\v]+$/, "", t)
+      return t ~ /^[ \t\f\v]*(⏵⏵|⏵⏸|⏸⏵|⏸⏸|⏵|⏸) [A-Za-z][A-Za-z0-9_\047-]*( [A-Za-z][A-Za-z0-9_\047-]*)* on( · .*)?$/
+    }
+    { L[NR] = $0 }
+    END {
+      last = NR
+      while (last >= 1 && L[last] ~ /^[ \t\r\f\v]*$/) last--
+      if (last < 1) exit
+      sep = last
+      while (sep >= 1 && L[sep] !~ /^──────────/) sep--
+      if (sep >= 1) {
+        for (i = sep + 1; i <= last; i++) if (bare(L[i])) { print L[i]; exit }
+      } else if (bare(L[last])) print L[last]
+    }
+  '
 }
 
 # --- pure decision (testable without tmux) -------------------------------------
@@ -353,6 +392,7 @@ case "${1:-}" in
   fleet)          shift; exec python3 "$INSTALL_DIR/scripts/stuck-modal-guard-fleet.py" "$@" ;;
   classify)       classify_pane ;;
   footer-line)    live_footer_line ;;
+  bare-footer-line) bare_mode_footer_line ;;
   decide)         decide_action "${2:-}" "${3:-0}" "${4:-0}" ;;
   sanitize-model) sanitize_model "${2:-}" ;;
   *)              run_guard ;;

@@ -183,6 +183,40 @@ assert_eq "footer-line: a clipped BUSY footer is not the idle footer (local)" ""
 HOUR_TURN="$(printf '✻ Baking… (1h 2m 5s · ↓ 1.2k tokens)\n\n%s\n❯ \n%s\n  ⏵⏵ bypass permissions on (shift+tab to cycle)' "$RULE" "$RULE")"
 assert_eq "busy: a turn past one hour (local)" "busy" "$(classify "$HOUR_TURN")"
 
+# PROGI 6026 (55288137 b) / BELA 6054: the live mode footer WITHOUT its hint. Claude Code drops "(shift+tab to
+# cycle)" when the row is short of room (PR status, a footer indicator, a background count, a narrow pane);
+# these idle panes used to classify STUCK, and the guard would respawn an idle session. Guard-only (step 3b).
+for FOOT in '  ⏵⏵ bypass permissions on' \
+            '  ⏵⏵ bypass permissions on · install gh for PR status' \
+            '  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell' \
+            '  ⏵⏵ bypass permissions on · install gh for PR status · ⚠ wrong model?' \
+            "  ⏵⏵ don't ask on" \
+            '  ⏸ plan mode on · 2 shells, 1 monitor'; do
+  assert_eq "idle: hint-less live footer '$FOOT' (guard-only)" "idle" "$(classify "$(mode_pane "$FOOT")")"
+  assert_eq "bare-footer-line: '$FOOT'" "$FOOT" "$(mode_pane "$FOOT" | bash "$GUARD" bare-footer-line)"
+done
+# ... with no rule on screen only the last line can be it
+assert_eq "idle: hint-less footer as the last line, no rule" "idle" "$(classify "$(printf '⏺ Done.\n  ⏵⏵ bypass permissions on')")"
+# It does not open what step 3 keeps closed: a quote, prose, a dialog, a busy footer.
+QUOTE_BARE_OVER_DIALOG='⏺ Done.
+  ⎿  ⏵⏵ bypass permissions on
+╭────────────────────────────────────────
+ Bash command
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No'
+assert_eq "stuck: a quoted hint-less footer above an open dialog" "stuck" "$(classify "$QUOTE_BARE_OVER_DIALOG")"
+BARE_ABOVE_RULE="$(printf '  ⏵⏵ bypass permissions on\n%s\n❯ hi\n%s\n Do you want to proceed?' "$RULE" "$RULE")"
+assert_eq "stuck: a hint-less footer ABOVE the last rule only" "stuck" "$(classify "$BARE_ABOVE_RULE")"
+QUOTE_UNDER_RULE="$(printf '%s\n❯ \n%s\n  ⎿  ⏵⏵ bypass permissions on' "$RULE" "$RULE")"
+assert_eq "stuck: a quoted hint-less footer under the rule (the glyph must START the line)" "stuck" "$(classify "$QUOTE_UNDER_RULE")"
+NO_GLYPH="$(printf '%s\n❯ \n%s\nbypass permissions on' "$RULE" "$RULE")"
+assert_eq "stuck: the hint-less words without the live start (no glyph)" "stuck" "$(classify "$NO_GLYPH")"
+PROSE_ON="$(printf '%s\n❯ \n%s\n  ⏵⏵ turned the light on and left' "$RULE" "$RULE")"
+assert_eq "stuck: glyph + words with 'on' not at the end and not before ' · '" "stuck" "$(classify "$PROSE_ON")"
+assert_eq "busy: the clipped busy footer is still busy, never the bare idle one" "busy" "$(classify "$CLIPPED_ONLY")"
+assert_eq "busy: a working hint-less footer with 'esc to interrupt'" "busy" "$(classify "$(mode_pane '  ⏵⏵ bypass permissions on · install gh for PR status · esc to interrupt')")"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "======================="
