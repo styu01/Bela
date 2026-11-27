@@ -60,12 +60,26 @@ export function gateTargets(): GateTarget[] {
 
 /** The gate hooks wired in the PreToolUse section of each target's settings. Pure (reader injected). */
 export function collectGateEntries(targets: readonly GateTarget[], read: (path: string) => string | null): GateEntry[] {
+  return collectGateEntriesWithStatus(targets, read).entries
+}
+
+/** Same, plus the settings files that EXIST but could not be read or parsed this pass (PROGI 6278 b): their
+ *  entries are unknown, not gone. `exists` is injectable for tests. */
+export function collectGateEntriesWithStatus(
+  targets: readonly GateTarget[],
+  read: (path: string) => string | null,
+  exists: (path: string) => boolean = existsSync,
+): { entries: GateEntry[]; unreadable: Set<string> } {
   const out: GateEntry[] = []
+  const unreadable = new Set<string>()
   for (const t of targets) {
     const raw = read(t.settingsPath)
-    if (raw == null) continue
+    if (raw == null) {
+      if (exists(t.settingsPath)) unreadable.add(t.settingsPath)
+      continue
+    }
     let settings: unknown
-    try { settings = JSON.parse(raw) } catch { continue }
+    try { settings = JSON.parse(raw) } catch { unreadable.add(t.settingsPath); continue }
     const ptu = (settings as { hooks?: { PreToolUse?: unknown } })?.hooks?.PreToolUse
     if (!Array.isArray(ptu)) continue
     for (const group of ptu as { matcher?: unknown; hooks?: unknown }[]) {
@@ -80,7 +94,7 @@ export function collectGateEntries(targets: readonly GateTarget[], read: (path: 
       }
     }
   }
-  return out
+  return { entries: out, unreadable }
 }
 
 /** A benign tool call the matcher selects: the first candidate it matches, else a Bash `true` (which still
@@ -202,9 +216,13 @@ export function gateFailureText(failed: readonly GateRunResult[], load: readonly
   ].join('\n')
 }
 
-export function gateRecoveryText(recovered: readonly GateRunResult[]): string {
-  const list = recovered.map((r) => `${r.entry.agent} / ${r.entry.gate} (${r.entry.matcher || '(mind)'})`).join('; ')
-  return `[kapu-onteszt] HELYREALLT: ${list}. Az artalmatlan hivast ujra atengedik.`
+export function gateRecoveryText(recovered: readonly GateRunResult[], vanished: readonly GateRunResult[] = []): string {
+  const fmt = (rs: readonly GateRunResult[]) => rs.map((r) => `${r.entry.agent} / ${r.entry.gate} (${r.entry.matcher || '(mind)'})`).join('; ')
+  const parts: string[] = []
+  if (recovered.length) parts.push(`${fmt(recovered)}: az artalmatlan hivast ujra atengedik.`)
+  // PROGI 6278 (c): an entry that simply disappeared did not "pass again".
+  if (vanished.length) parts.push(`${fmt(vanished)}: a hibas bejegyzes mar nincs bekotve.`)
+  return `[kapu-onteszt] HELYREALLT: ${parts.join(' ')}`
 }
 
 // PROGI 6248 (iv): BELA first, the owner if it stays (escalateToOwner), keyed per gate SCRIPT, so one broken
@@ -219,15 +237,16 @@ export function gateRecoveryText(recovered: readonly GateRunResult[]): string {
 export const GATE_STAGE2_EXTRA_MS = 20 * 60_000
 
 export interface GateAlerter {
-  fail: (key: string, text: string) => void
+  /** stage2ExtraMs: how long until the owner is paged (a re-raise keeps the original deadline, 6278 a). */
+  fail: (key: string, text: string, stage2ExtraMs?: number) => void
   recover: (key: string, text: string) => void
 }
 const escalatingAlerter: GateAlerter = {
-  fail: (key, text) => escalateToOwner({
+  fail: (key, text, stage2ExtraMs = GATE_STAGE2_EXTRA_MS) => escalateToOwner({
     key,
     belaText: text,
     ownerText: `⚠️ ${text}\nBÉLA mar ertesitve volt errol, de nem oldodott meg.`,
-    stage2ExtraMs: GATE_STAGE2_EXTRA_MS,
+    stage2ExtraMs,
   }),
   recover: (key, text) => {
     const ownerWasTold = ownerEscalationStage2Sent(key)
@@ -242,7 +261,7 @@ export const GATE_SELF_TEST_RETRY_DELAY_MS = 60_000
 
 let lastStates = new Map<string, boolean>()
 // Open gate escalations: gate script -> the failing entries (by resultKey) it was raised for, and their results.
-let openGates = new Map<string, { keys: Set<string>; results: GateRunResult[] }>()
+let openGates = new Map<string, { keys: Set<string>; results: GateRunResult[]; raisedAt: number }>()
 
 /** PROGI 6268 (a)(b): reconcile the open gate escalations with THIS pass's results. Pure over its inputs:
  *  - a gate with no failing entry now -> recover (also when its failing entry simply disappeared: an agent
@@ -254,13 +273,23 @@ let openGates = new Map<string, { keys: Set<string>; results: GateRunResult[] }>
 export function reconcileGateEscalations(
   open: ReadonlyMap<string, { keys: ReadonlySet<string>; results: readonly GateRunResult[] }>,
   results: readonly GateRunResult[],
-): { fail: { gate: string; results: GateRunResult[]; reraise: boolean }[]; recover: { gate: string; results: GateRunResult[] }[] } {
+  unreadable: ReadonlySet<string> = new Set(),
+): {
+  fail: { gate: string; results: GateRunResult[]; reraise: boolean }[]
+  recover: { gate: string; results: GateRunResult[]; recovered: GateRunResult[]; vanished: GateRunResult[] }[]
+} {
   const failingByGate = new Map<string, GateRunResult[]>()
   for (const r of results) if (!r.ok) failingByGate.set(r.entry.gate, [...(failingByGate.get(r.entry.gate) ?? []), r])
+  const nowByKey = new Map(results.map((r) => [resultKey(r.entry), r]))
   const fail: { gate: string; results: GateRunResult[]; reraise: boolean }[] = []
-  const recover: { gate: string; results: GateRunResult[] }[] = []
+  const recover: { gate: string; results: GateRunResult[]; recovered: GateRunResult[]; vanished: GateRunResult[] }[] = []
   for (const [gate, o] of open) {
-    if (!failingByGate.has(gate)) recover.push({ gate, results: [...o.results] })
+    if (failingByGate.has(gate)) continue
+    // PROGI 6278 (b): an entry whose settings file could not be read this pass is unknown, not gone.
+    if (o.results.some((r) => unreadable.has(r.entry.settingsPath) && !nowByKey.has(resultKey(r.entry)))) continue
+    const recovered = o.results.filter((r) => nowByKey.has(resultKey(r.entry)))
+    const vanished = o.results.filter((r) => !nowByKey.has(resultKey(r.entry)))
+    recover.push({ gate, results: [...o.results], recovered, vanished })
   }
   for (const [gate, failing] of failingByGate) {
     const o = open.get(gate)
@@ -280,12 +309,14 @@ export async function runGateSelfTest(opts: {
   port?: number | string
   retryDelayMs?: number
   load?: () => number[]
+  exists?: (path: string) => boolean
+  now?: () => number
 } = {}): Promise<GateRunResult[]> {
   if (running) return []
   running = true
   try {
     const read = opts.read ?? ((p: string) => { try { return readFileSync(p, 'utf-8') } catch { return null } })
-    const entries = collectGateEntries(opts.targets ?? gateTargets(), read)
+    const { entries, unreadable } = collectGateEntriesWithStatus(opts.targets ?? gateTargets(), read, opts.exists)
     const results: GateRunResult[] = []
     // Sequential on purpose: ~30 short processes every 15 minutes, never a burst on a loaded host.
     for (const e of entries) results.push(await runGateCommand(e, opts.port))
@@ -303,20 +334,27 @@ export async function runGateSelfTest(opts: {
       logger.error({ failed: d.newlyFailed.map((r) => ({ agent: r.entry.agent, gate: r.entry.gate, matcher: r.entry.matcher, detail: r.detail })) }, 'gate self-test: a wired gate no longer passes a benign call')
     }
     const alerter = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
-    const rec = reconcileGateEscalations(openGates, results)
+    if (unreadable.size) logger.warn({ unreadable: [...unreadable] }, 'gate self-test: settings file(s) unreadable this pass; their open escalations are kept')
+    const rec = reconcileGateEscalations(openGates, results, unreadable)
     for (const r of rec.recover) {
       openGates.delete(r.gate)
-      logger.info({ gate: r.gate }, 'gate self-test: gate recovered (no failing entry left)')
-      try { alerter.recover(`gate-self-test:${r.gate}`, gateRecoveryText(r.results)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+      logger.info({ gate: r.gate, vanished: r.vanished.length }, 'gate self-test: gate recovered (no failing entry left)')
+      try { alerter.recover(`gate-self-test:${r.gate}`, gateRecoveryText(r.recovered, r.vanished)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
     }
     if (rec.fail.length) {
       const load = opts.load ? opts.load() : loadavg()
+      const nowMs = opts.now ? opts.now() : Date.now()
       for (const f of rec.fail) {
         const key = `gate-self-test:${f.gate}`
         // An open escalation only refreshes its text in escalateToOwner: clear it first so the new entry is told.
+        // PROGI 6278 (a): the re-raise keeps the ORIGINAL owner deadline (20 min from the first raise), or a
+        // new failing entry every pass would push the owner page out forever.
+        const prevRaisedAt = f.reraise ? openGates.get(f.gate)?.raisedAt : undefined
+        const raisedAt = prevRaisedAt ?? nowMs
+        const stage2 = Math.max(0, GATE_STAGE2_EXTRA_MS - (nowMs - raisedAt))
         if (f.reraise) { try { clearOwnerEscalation(key) } catch { /* not open */ } }
-        openGates.set(f.gate, { keys: new Set(f.results.map((r) => resultKey(r.entry))), results: f.results })
-        try { alerter.fail(key, gateFailureText(f.results, load)) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
+        openGates.set(f.gate, { keys: new Set(f.results.map((r) => resultKey(r.entry))), results: f.results, raisedAt })
+        try { alerter.fail(key, gateFailureText(f.results, load), stage2) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
       }
     }
     return results

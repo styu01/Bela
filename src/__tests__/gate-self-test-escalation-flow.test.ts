@@ -112,3 +112,47 @@ describe('HIBA 1: the gate key never stays open for an entry that is gone', () =
     expect(count(seen.bela, /KAPU HIBA/)).toBe(1)
   }, 60_000)
 })
+
+// PROGI 6278 follow-ups (PoC zz-progi-poc-gate-esc2 turned around). The test clock (now) advances with the
+// fake timers, as Date.now would in production.
+describe('PROGI 6278', () => {
+  it('(a) a new failing entry every pass keeps the ORIGINAL owner deadline: the owner is paged ~20 min after the first raise', async () => {
+    let clock = 1_000_000
+    const now = () => clock
+    const broken = mk('t-g', 'const = ;')
+    const ts: { agent: string; settingsPath: string; projectDir: string }[] = []
+    for (let p = 0; p < 5; p++) {
+      const sp = join(tmp, `t-agent${p}.json`)
+      writeFileSync(sp, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: hookCommand(broken.g), timeout: 10 }] }] } }))
+      ts.push({ agent: `t-agent${p}`, settingsPath: sp, projectDir: tmp })
+      await runGateSelfTest({ targets: [...ts], now })
+      await flush(15 * 60_000)
+      clock += 15 * 60_000
+    }
+    expect(count(seen.owner, /KAPU HIBA/)).toBeGreaterThanOrEqual(1)
+  }, 120_000)
+
+  it('(b) a settings file unreadable for one pass is unknown, not gone: no false all-clear, the owner deadline runs on', async () => {
+    const t = mk('u-x', 'const = ;').t
+    await runGateSelfTest({ targets: [t] })
+    await flush(10)
+    await runGateSelfTest({ targets: [t], read: () => '{ broken json' })
+    expect(count(seen.bela, /HELYREALLT/)).toBe(0)
+    await flush(GATE_STAGE2_EXTRA_MS + 60_000)
+    expect(count(seen.owner, /KAPU HIBA/)).toBe(1)
+    await runGateSelfTest({ targets: [t] })
+    await flush(10)
+    expect(count(seen.bela, /KAPU HIBA/)).toBe(1) // still the same escalation, no fresh one
+  }, 60_000)
+
+  it('(c) an entry that disappeared is told as "no longer wired", not as passing again', async () => {
+    const a = mk('w-a', 'const = ;')
+    await runGateSelfTest({ targets: [a.t] })
+    await flush(10)
+    await runGateSelfTest({ targets: [] })
+    const ok = seen.bela.filter((x) => /HELYREALLT/.test(x))
+    expect(ok.length).toBe(1)
+    expect(ok[0]).toContain('a hibas bejegyzes mar nincs bekotve')
+    expect(ok[0]).not.toContain('ujra atengedik')
+  }, 60_000)
+})
