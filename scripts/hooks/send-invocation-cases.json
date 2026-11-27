@@ -2745,6 +2745,31 @@
       "name": "ENVFORMS2: control: an alias-shaped value with no --config-env",
       "cmd": "V='!sendmail a@b.hu' git log -1 --format=%s",
       "expected": false
+    },
+    {
+      "name": "PROCSUB1126: source <(cat <<'EOF' ... EOF): a heredoc-fed cat in a process substitution read as a script (closed by INTERPSTDIN2's procsub-heredoc path)",
+      "cmd": "source <(cat <<'EOF'\nsendmail a@b.hu\nEOF\n)",
+      "expected": true
+    },
+    {
+      "name": "PROCSUB1126: bash < <(cat <<'EOF' ... EOF): the same through stdin",
+      "cmd": "bash < <(cat <<'EOF'\nsendmail a@b.hu\nEOF\n)",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: PINNED fail-closed: f-string expressions nested past 100 levels are refused (both twins, any stack size)",
+      "cmd": "python3 - <<'EOF'\nx = f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{1}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: PINNED fail-closed: template ${} expressions nested past 100 levels are refused",
+      "cmd": "node - <<'EOF'\nx = `${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${`${1}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`}`\nEOF",
+      "expected": true
+    },
+    {
+      "name": "INTERPSTDIN2: control: f-strings nested 50 deep, no process starter",
+      "cmd": "python3 - <<'EOF'\nx = f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{1}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'\nprint(x)\nEOF",
+      "expected": false
     }
   ]
 }

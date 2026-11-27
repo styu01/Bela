@@ -1240,6 +1240,11 @@ _INTERP_EXECISH = re.compile(
     r"|\beval\s*\(|__import__|\bexecSync\b|\bexecFile\b|\bspawnSync\b", re.I)
 
 
+# f-string / template expressions nest by recursion; past this depth the scanners raise and _interp_code_sends counts
+# the program as a send (fail-closed; same verdict as the JS twin regardless of stack sizes).
+_SCAN_NEST_MAX = 100
+
+
 def _is_ident_char(c) -> bool:
     return bool(c) and (c.isascii() and (c.isalnum() or c in "_$"))
 
@@ -1247,6 +1252,7 @@ def _is_ident_char(c) -> bool:
 def _blank_python(code: str) -> str:
     out = list(code)
     n = len(code)
+    nest = [0]
 
     def blank(a, b):
         for k in range(a, min(b, n)):
@@ -1300,7 +1306,11 @@ def _blank_python(code: str) -> str:
                     k += 2
                     continue
                 blank(seg, k + 1)
+                nest[0] += 1
+                if nest[0] > _SCAN_NEST_MAX:
+                    raise ValueError("nesting")
                 k = scan(k + 1, "}")
+                nest[0] -= 1
                 seg = k
                 k += 1
                 continue
@@ -1315,6 +1325,7 @@ def _blank_python(code: str) -> str:
 def _blank_js(code: str) -> str:
     out = list(code)
     n = len(code)
+    nest = [0]
 
     def blank(a, b):
         for k in range(a, min(b, n)):
@@ -1376,7 +1387,11 @@ def _blank_js(code: str) -> str:
                         continue
                     if code[k] == "$" and k + 1 < n and code[k + 1] == "{":
                         blank(seg, k + 2)
+                        nest[0] += 1
+                        if nest[0] > _SCAN_NEST_MAX:
+                            raise ValueError("nesting")
                         k = scan(k + 2, "}")
+                        nest[0] -= 1
                         seg = k
                         k += 1
                         continue
@@ -1399,7 +1414,10 @@ def _blank_js(code: str) -> str:
 
 
 def _interp_code_sends(code: str, lang: str = "py") -> bool:
-    bare = _blank_js(code) if lang == "js" else _blank_python(code)
+    try:
+        bare = _blank_js(code) if lang == "js" else _blank_python(code)
+    except (ValueError, RecursionError):
+        return True
     if _CODE_SEND.search(bare):
         return True
     return bool(_INTERP_EXECISH.search(bare) and (_CODE_SENDER_LIT.search(code) or _CODE_SEND.search(code)))

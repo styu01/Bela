@@ -882,11 +882,15 @@ function isStdinShellHead(h) {
 // Mirrors _interp_code_sends / _blank_python / _blank_js / _stdin_interpreter_lang in outgoing-copy-gate.py.
 const INTERP_EXECISH = /subprocess|\.system\s*\(|\bpopen\b|child_process|\bexec[A-Za-z]*\s*\(|_exec[A-Za-z]*\s*\(|\bspawn[A-Za-z]*\s*\(|\beval\s*\(|__import__|\bexecSync\b|\bexecFile\b|\bspawnSync\b/i
 const isIdentChar = (c) => c !== undefined && /[A-Za-z0-9_$]/.test(c)
+// f-string / template expressions nest by recursion; past this depth the scanners throw and interpCodeSends counts
+// the program as a send (fail-closed, and the same verdict in both twins regardless of their stack sizes).
+const SCAN_NEST_MAX = 100
 // Python: returns the code with string-literal text and comments turned into spaces (newlines kept, same length).
 function blankPython(code) {
   const out = code.split('')
   const n = code.length
   const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' ' }
+  let nest = 0
   // scan code from i; with a stop char, return at that char on bracket depth 0 (an f-string's closing '}')
   function scan(i, stop) {
     let depth = 0
@@ -918,7 +922,9 @@ function blankPython(code) {
       if (isF && ch === '{') {
         if (code[k + 1] === '{') { k += 2; continue }
         blank(segStart, k + 1)
+        if (++nest > SCAN_NEST_MAX) throw new Error('nesting')
         k = scan(k + 1, '}')
+        nest--
         segStart = k
         k++
         continue
@@ -936,6 +942,7 @@ function blankJs(code) {
   const out = code.split('')
   const n = code.length
   const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' ' }
+  let nest = 0
   const prevSig = (i) => { let p = i - 1; while (p >= 0 && (code[p] === ' ' || code[p] === '\t')) p--; return p < 0 ? '' : code[p] }
   function scan(i, stop) {
     let depth = 0
@@ -969,7 +976,15 @@ function blankJs(code) {
         let segStart = i
         while (k < n && code[k] !== '`') {
           if (code[k] === '\\') { k += 2; continue }
-          if (code[k] === '$' && code[k + 1] === '{') { blank(segStart, k + 2); k = scan(k + 2, '}'); segStart = k; k++; continue }
+          if (code[k] === '$' && code[k + 1] === '{') {
+            blank(segStart, k + 2)
+            if (++nest > SCAN_NEST_MAX) throw new Error('nesting')
+            k = scan(k + 2, '}')
+            nest--
+            segStart = k
+            k++
+            continue
+          }
           k++
         }
         blank(segStart, k + 1)
@@ -988,7 +1003,8 @@ function blankJs(code) {
   return out.join('')
 }
 function interpCodeSends(code, lang) {
-  const bare = lang === 'js' ? blankJs(code) : blankPython(code)
+  let bare
+  try { bare = lang === 'js' ? blankJs(code) : blankPython(code) } catch { return true }
   if (CODE_SEND.test(bare)) return true
   return INTERP_EXECISH.test(bare) && (CODE_SENDER_LIT.test(code) || CODE_SEND.test(code))
 }
