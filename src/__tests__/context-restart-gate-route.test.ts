@@ -105,6 +105,7 @@ describe('GET/PUT /api/agents/:name/context-restart-gate', () => {
       contextRestartGate: {
         enabled: true, thresholdTokens: 300_000, staleCutoffMs: 60_000,
         retryIntervalMs: 30_000, persistentBlockAlertMs: 90_000,
+        wakeAfterClear: true, // omitted in the body -> the default (on)
       },
     })
 

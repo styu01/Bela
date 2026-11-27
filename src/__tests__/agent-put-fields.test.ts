@@ -227,7 +227,7 @@ describe('checkConfigPutFields -- context-restart-gate', () => {
     // it while this check refused it -- pinned so that mismatch fails here.
     expect(gateFields).toEqual([
       'enabled', 'thresholdTokens', 'staleCutoffMs',
-      'retryIntervalMs', 'persistentBlockAlertMs',
+      'retryIntervalMs', 'persistentBlockAlertMs', 'wakeAfterClear',
     ])
   })
 })

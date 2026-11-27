@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  gateWakePrompt,
   isInfrastructureChild,
   findClaudePidInTree,
   extractMcpPackageNames,
@@ -9,7 +10,10 @@ import {
 } from '../web/context-restart-gate-runner.js'
 import {
   decideGate,
+  decideWake,
   nextBlockClock,
+  WAKE_DELAY_MS,
+  WAKE_MAX_AGE_MS,
   DEFAULT_THRESHOLD_TOKENS,
   DEFAULT_STALE_CUTOFF_MS,
   DEFAULT_PERSISTENT_BLOCK_ALERT_MS,
@@ -96,6 +100,7 @@ describe('normalizeGateConfig', () => {
     expect(cfg).toEqual({
       enabled: false,
       thresholdTokens: 250_000, staleCutoffMs: 60_000, retryIntervalMs: 30_000, persistentBlockAlertMs: 90_000,
+      wakeAfterClear: true, // upstream 8953cacf wake nudge, LOCAL per-agent switch, default on
     })
   })
 
@@ -637,5 +642,61 @@ describe('openQuestionBlocks', () => {
     // as "the agent has not seen it".
     expect(openQuestionBlocks('', '8246')).toBe(true)
     expect(openQuestionBlocks('', null)).toBe(true)
+  })
+})
+
+// ---- Wake nudge after /clear -------------------------------------------------
+//
+// The gate restarts an agent by sending /clear. A fresh Claude Code session
+// only speaks when prompted, so without this nudge the restarted agent stays
+// mute with its handover record unread (2026-08-14).
+describe('decideWake', () => {
+  const T = 1_800_000_000_000
+
+  it('does nothing when no wake is owed', () => {
+    expect(decideWake(null, T)).toBe('none')
+  })
+
+  it('waits while the fresh session is still booting', () => {
+    expect(decideWake(T, T)).toBe('wait')
+    expect(decideWake(T, T + WAKE_DELAY_MS - 1)).toBe('wait')
+  })
+
+  it('sends once the boot grace has passed', () => {
+    expect(decideWake(T, T + WAKE_DELAY_MS)).toBe('send')
+    expect(decideWake(T, T + WAKE_MAX_AGE_MS)).toBe('send')
+  })
+
+  it('drops a nudge that outlived its restart', () => {
+    expect(decideWake(T, T + WAKE_MAX_AGE_MS + 1)).toBe('drop')
+  })
+
+  // A backwards clock step must not look like an ancient debt and get dropped:
+  // keeping the debt costs one re-check, dropping it costs the wake entirely.
+  it('treats a negative age (clock skew) as wait, never drop', () => {
+    expect(decideWake(T, T - 60_000)).toBe('wait')
+  })
+
+  it('honours explicit overrides', () => {
+    expect(decideWake(T, T + 100, 50, 1000)).toBe('send')
+    expect(decideWake(T, T + 2000, 50, 1000)).toBe('drop')
+  })
+})
+
+describe('gateWakePrompt', () => {
+  // The nudge exists to produce a turn AND a visible sign of life; a nudge that
+  // only said "you restarted" would leave the owner staring at silence again.
+  // LOCAL ADAPTATION: upstream also asked for a short notice on the agent's channel; we leave it out (on the main
+  // agent it would message the owner after every gate /clear), and pin that it stays out.
+  it('asks the agent to continue, and never to report on its channel', () => {
+    const p = gateWakePrompt()
+    expect(p).toContain('[CONTEXT-RESTART-GATE]')
+    expect(p.toLowerCase()).toContain('folytasd')
+    expect(p.toLowerCase()).not.toContain('csatorna')
+  })
+
+  // Guard against the nudge itself becoming a source of invented work.
+  it('tells the agent that "nothing in flight" is a complete state', () => {
+    expect(gateWakePrompt()).toContain('ne talalj ki magadnak feladatot')
   })
 })

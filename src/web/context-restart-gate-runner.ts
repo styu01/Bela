@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { listAllAgentNames, readAgentClaudeConfigDir } from './agent-config.js'
-import { agentSessionName, capturePane } from './agent-process.js'
+import { agentSessionName, capturePane, sendPromptToSession } from './agent-process.js'
 import { detectPaneState } from '../pane-state.js'
 import { detectsUsageLimit } from '../model-fallback.js'
 import { readContextTokensFromProjectDir } from './active-model.js'
@@ -22,8 +22,10 @@ import {
 import { archiveTranscriptBeforeContextRestart } from './context-restart-transcript-archive.js'
 import {
   decideGate,
+  decideWake,
   nextBlockClock,
   PRE_CLEAR_NOTICE_MS,
+  WAKE_DELAY_MS,
   type GateInputs,
 } from '../context-restart-gate.js'
 
@@ -44,6 +46,68 @@ import {
 // agent's configured retryIntervalMs.
 
 const INITIAL_DELAY_MS = 3 * 60_000   // 3 min
+
+// The wake-nudge timing lives in context-restart-gate.ts (WAKE_DELAY_MS, WAKE_MAX_AGE_MS, decideWake) so the "is it
+// due yet" rule stays pure and unit-tested; this module only performs the delivery (upstream 8953cacf, #976).
+
+/**
+ * The nudge text. Deliberately short: the substance is already in the session as SessionStart context (taskstate
+ * replay, warm memory), and re-stating it here would only compete with it.
+ *
+ * LOCAL ADAPTATION: upstream's last sentence ("Rovid jelzest kuldj a sajat csatornadon...") is left out on purpose.
+ * On the main agent it would put a Telegram message to the owner after every gate /clear (several a day), against
+ * the owner's "no notice for routine things" rule; our context-guard resume prompt drops the same line (795798d9).
+ */
+export function gateWakePrompt(): string {
+  return (
+    '[CONTEXT-RESTART-GATE] Friss kontextussal indultal, mert a kapu ujrainditott (/clear). ' +
+    'A visszatoltott blokkokban ott a beszelgetes vege, a napi naplo kivonata es -- ha volt futo munkad -- ' +
+    'a TASK-FOLYTATAS a mar kesz lepesekkel es a kovetkezo akcioval. ' +
+    'Olvasd be oket, ellenorizd a kanban tabladat es a hot memoriaidat, es FOLYTASD onnan ahol abbamaradt. ' +
+    'Ne kezdd elolrol ami mar kesz, es ne delegald ujra amit mar atadtal. ' +
+    'Ha nem volt futo munkad, az is teljes erteku allapot -- olyankor ne talalj ki magadnak feladatot, es ne kuldj errol uzenetet.'
+  )
+}
+
+// One delivery attempt per agent at a time: the fast-path timer and a sweep must not both read the same debt and
+// both type the nudge.
+const wakeInFlight = new Set<string>()
+
+/**
+ * Deliver the wake nudge owed for an earlier /clear, if one is due. Retries across sweeps while the pane stays busy
+ * (the debt survives in the state file), and gives up once the nudge is older than WAKE_MAX_AGE_MS -- by then the
+ * session has either been woken by someone else or moved on. Exported for the regression test.
+ */
+export async function deliverPendingWake(name: string, session: string, nowMs: number): Promise<void> {
+  if (wakeInFlight.has(name)) return
+  wakeInFlight.add(name)
+  try { await deliverPendingWakeOnce(name, session, nowMs) } finally { wakeInFlight.delete(name) }
+}
+async function deliverPendingWakeOnce(name: string, session: string, nowMs: number): Promise<void> {
+  const due = readGateRunState(name).pendingWakeAt
+  const action = decideWake(due, nowMs)
+  if (action === 'none' || action === 'wait') return
+  const clearDebt = (): void => {
+    writeGateRunState(name, { ...readGateRunState(name), pendingWakeAt: null })
+  }
+  if (action === 'drop') {
+    logger.info({ agent: name, ageMs: due === null ? null : nowMs - due }, 'context-restart-gate: wake nudge dropped (stale)')
+    clearDebt()
+    return
+  }
+  try {
+    const outcome = await sendPromptToSession(session, gateWakePrompt(), null, { waitForIdle: true, onBusyTimeout: 'abort' })
+    if (outcome === 'sent') {
+      logger.info({ agent: name }, 'context-restart-gate: wake nudge delivered')
+      clearDebt()
+    } else {
+      // Busy or lane-locked: keep the debt, retry on the next sweep.
+      logger.info({ agent: name, outcome }, 'context-restart-gate: wake nudge deferred')
+    }
+  } catch (err) {
+    logger.warn({ err, agent: name }, 'context-restart-gate: wake nudge failed (will retry)')
+  }
+}
 
 // tmux path (matches other runners).
 const TMUX = process.env.TMUX_BIN ?? '/usr/bin/tmux'
@@ -435,6 +499,11 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   const session = sessionFor(name)
   const workingDir = workingDirFor(name)
 
+  // Settle any wake owed from an earlier /clear before measuring anything (upstream 8953cacf): the inline nudge
+  // after the /clear can be lost to a dashboard restart, and this is what makes the debt durable. Runs before the
+  // run-state read below, so the writes further down never resurrect a debt that was just paid.
+  await deliverPendingWake(name, session, nowMs)
+
   // Gather inputs (all deterministic, no AI inference).
   const paneRaw = capturePaneOrNull(session)
   const paneState = paneRaw !== null ? detectPaneState(paneRaw) : null
@@ -577,7 +646,18 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
           firstBlockedAt: null,
           lastClearAt: nowMs,
           preClearNoticeAt: null,
+          // Owe the fresh session a wake nudge (see WAKE_DELAY_MS), unless switched off for this agent.
+          pendingWakeAt: cfg.wakeAfterClear ? nowMs : null,
         })
+        // Fast path: nudge in ~25 s rather than at the next sweep. The persisted debt above is the fallback.
+        // LOCAL ADAPTATION: upstream awaited a 25 s sleep inside the sweep; a timer (unref'd, so it never holds the
+        // process) keeps the sweep moving.
+        if (cfg.wakeAfterClear) {
+          const wakeTimer = setTimeout(() => {
+            deliverPendingWake(name, session, Date.now()).catch((err) => logger.warn({ err, agent: name }, 'context-restart-gate: wake fast path failed'))
+          }, WAKE_DELAY_MS)
+          wakeTimer.unref?.()
+        }
       } catch (err) {
         // The old warning may now be arbitrarily stale. Require a new bounded
         // notice before any retry, whether the archive or send-keys failed.

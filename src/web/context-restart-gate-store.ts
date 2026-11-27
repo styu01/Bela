@@ -44,6 +44,13 @@ export interface GateRunState {
   lastClearAt: number | null
   /** Epoch ms when the current proactive pre-clear notice was delivered. */
   preClearNoticeAt: number | null
+  /**
+   * Epoch ms of a /clear whose wake-nudge has NOT been delivered yet; null when
+   * nothing is owed (upstream 8953cacf). Persisted (not just an in-memory timer)
+   * so a dashboard restart between the /clear and the nudge still leaves the
+   * fresh session woken on the next sweep instead of silently mute.
+   */
+  pendingWakeAt: number | null
 }
 
 const EMPTY_STATE: GateRunState = {
@@ -51,6 +58,7 @@ const EMPTY_STATE: GateRunState = {
   lastAlertAt: null,
   lastClearAt: null,
   preClearNoticeAt: null,
+  pendingWakeAt: null,
 }
 
 function readStateRaw(): Record<string, unknown> {
@@ -69,6 +77,7 @@ function normalizeState(raw: unknown): GateRunState {
     lastAlertAt:    msOrNull(o.lastAlertAt),
     lastClearAt:    msOrNull(o.lastClearAt),
     preClearNoticeAt: msOrNull(o.preClearNoticeAt),
+    pendingWakeAt:  msOrNull(o.pendingWakeAt),
   }
 }
 

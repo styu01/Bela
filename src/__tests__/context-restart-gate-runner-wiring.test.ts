@@ -44,6 +44,7 @@ vi.mock('../web/usage-fleet-pause.js', () => ({
 vi.mock('../web/agent-process.js', () => ({
   agentSessionName: (n: string) => `agent-${n}`,
   capturePane: vi.fn(() => 'fake pane content\n$ '),
+  sendPromptToSession: vi.fn(async () => 'sent'),
 }))
 vi.mock('../pane-state.js', () => ({
   detectPaneState: vi.fn(() => 'idle'),
@@ -78,10 +79,11 @@ const execFileSyncMock = vi.fn((_cmd: string, args?: string[]) => {
 })
 vi.mock('node:child_process', () => ({ execFileSync: execFileSyncMock }))
 
-const { checkAgent } = await import('../web/context-restart-gate-runner.js')
-const { writeGateConfig, readGateRunState } = await import('../web/context-restart-gate-store.js')
+const { checkAgent, deliverPendingWake, gateWakePrompt } = await import('../web/context-restart-gate-runner.js')
+const { sendPromptToSession } = await import('../web/agent-process.js')
+const { writeGateConfig, readGateRunState, writeGateRunState } = await import('../web/context-restart-gate-store.js')
 const { readContextTokensFromProjectDir } = await import('../web/active-model.js')
-const { PRE_CLEAR_NOTICE_MS } = await import('../context-restart-gate.js')
+const { PRE_CLEAR_NOTICE_MS, WAKE_DELAY_MS, WAKE_MAX_AGE_MS } = await import('../context-restart-gate.js')
 const { hasBlockingKanbanCardForAssignee, createAgentMessage, openInboundQuestionMessageId } = await import('../db.js')
 const { archiveTranscriptBeforeContextRestart } = await import('../web/context-restart-transcript-archive.js')
 const { readFleetPauseState } = await import('../web/usage-fleet-pause.js')
@@ -156,6 +158,8 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
     expect(runState.lastClearAt).toBe(nowMs + PRE_CLEAR_NOTICE_MS)
     expect(runState.firstBlockedAt).toBeNull()
     expect(runState.preClearNoticeAt).toBeNull()
+    // upstream 8953cacf: the /clear leaves a persisted wake debt for the fresh session.
+    expect(runState.pendingWakeAt).toBe(nowMs + PRE_CLEAR_NOTICE_MS)
   })
 
   it('disabled config for a second agent still never touches tmux, even after the enabled one fired', async () => {
@@ -245,5 +249,79 @@ describe('context-restart-gate wiring: config store -> live sweep', () => {
 
     await checkAgent(name, nowMs + 6 * 60_000)
     expect(readGateRunState(name).preClearNoticeAt).toBe(nowMs + 6 * 60_000)
+  })
+})
+
+// upstream 8953cacf (#976), runner side: the wake nudge owed after a gate /clear. The pure due/drop rule is pinned in
+// context-restart-gate.test.ts (decideWake); these cases drive the delivery through the real (sandboxed) store.
+describe('context-restart-gate wake nudge delivery', () => {
+  const owe = (name: string, at: number) => writeGateRunState(name, { ...readGateRunState(name), pendingWakeAt: at })
+  beforeEach(() => {
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(sendPromptToSession).mockResolvedValue('sent')
+  })
+
+  it('waits while the fresh session boots, then delivers once and clears the debt', async () => {
+    const t0 = Date.now()
+    owe('wake-a', t0)
+    await deliverPendingWake('wake-a', 'agent-wake-a', t0 + WAKE_DELAY_MS - 1)
+    expect(sendPromptToSession).not.toHaveBeenCalled()
+    await deliverPendingWake('wake-a', 'agent-wake-a', t0 + WAKE_DELAY_MS + 1)
+    expect(sendPromptToSession).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(sendPromptToSession).mock.calls[0][0]).toBe('agent-wake-a')
+    expect(vi.mocked(sendPromptToSession).mock.calls[0][1]).toBe(gateWakePrompt())
+    expect(vi.mocked(sendPromptToSession).mock.calls[0][3]).toMatchObject({ waitForIdle: true, onBusyTimeout: 'abort' })
+    expect(readGateRunState('wake-a').pendingWakeAt).toBeNull()
+  })
+
+  it('a busy pane keeps the debt for the next sweep', async () => {
+    const t0 = Date.now()
+    owe('wake-b', t0)
+    vi.mocked(sendPromptToSession).mockResolvedValue('aborted-busy')
+    await deliverPendingWake('wake-b', 'agent-wake-b', t0 + WAKE_DELAY_MS + 1)
+    expect(readGateRunState('wake-b').pendingWakeAt).toBe(t0)
+  })
+
+  it('a debt older than the max age is dropped, never typed into moved-on work', async () => {
+    const t0 = Date.now()
+    owe('wake-c', t0)
+    await deliverPendingWake('wake-c', 'agent-wake-c', t0 + WAKE_MAX_AGE_MS + 1)
+    expect(sendPromptToSession).not.toHaveBeenCalled()
+    expect(readGateRunState('wake-c').pendingWakeAt).toBeNull()
+  })
+
+  it('the fast-path timer and a sweep never both deliver the same debt', async () => {
+    const t0 = Date.now()
+    owe('wake-d', t0)
+    let release: (v: 'sent') => void = () => {}
+    vi.mocked(sendPromptToSession).mockImplementation(() => new Promise((r) => { release = r }))
+    const first = deliverPendingWake('wake-d', 'agent-wake-d', t0 + WAKE_DELAY_MS + 1)
+    await deliverPendingWake('wake-d', 'agent-wake-d', t0 + WAKE_DELAY_MS + 2)
+    release('sent')
+    await first
+    expect(sendPromptToSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('checkAgent settles an owed wake on its next sweep (a dashboard restart lost the timer)', async () => {
+    const name = 'wake-e'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 1_000_000 })
+    const t0 = Date.now()
+    owe(name, t0)
+    await checkAgent(name, t0 + WAKE_DELAY_MS + 1)
+    expect(sendPromptToSession).toHaveBeenCalledTimes(1)
+    expect(readGateRunState(name).pendingWakeAt).toBeNull()
+  })
+})
+
+describe('context-restart-gate wakeAfterClear switch (LOCAL)', () => {
+  it('an agent with wakeAfterClear false owes no wake after its /clear', async () => {
+    const name = 'wake-off'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100, wakeAfterClear: false })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    const nowMs = Date.now()
+    await checkAgent(name, nowMs)
+    await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
+    expect(readGateRunState(name).lastClearAt).toBe(nowMs + PRE_CLEAR_NOTICE_MS)
+    expect(readGateRunState(name).pendingWakeAt).toBeNull()
   })
 })
