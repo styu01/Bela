@@ -14,7 +14,7 @@ import { json } from './web/http-helpers.js'
 import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureAgentStalenessHook, ensureEgressGate, ensureGovernanceGateCommands, ensureQuarantineReader, watchEgressAllowlistForReaderRender, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection, ensureSkillsPathTrapSection } from './web/agent-scaffold.js'
-import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
+import { shouldRegisterHooks, shouldRunBackgroundServices, ALLOW_SECOND_INSTANCE_SERVICES_KEY, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
 import { startGateSelfTest, reportPruneKept } from './web/gate-self-test.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
@@ -332,25 +332,36 @@ export function startWebServer(port = 3420): http.Server {
   if (webOnly) {
     logger.info('[staging] WEB_ONLY mode: background services disabled')
   }
+  // upstream 2c093a10 (#2419, ported): a second instance (worktree checkout, temp-dir clone) is off as if
+  // WEB_ONLY were set, unless it is started with the opt-in: its schedule runner would fire the live fleet's
+  // global tasks into live sessions on the shared tmux server. Both switches come from the process environment
+  // only: a .env line sets neither (there is no dotenv).
+  const services = shouldRunBackgroundServices({
+    projectRoot: PROJECT_ROOT, webOnly, tmpDir: tmpdir(),
+    allowSecondInstance: process.env[ALLOW_SECOND_INSTANCE_SERVICES_KEY] === '1',
+  })
+  const servicesOff = !services.run
+  if (servicesOff && !webOnly) logger.warn({ reason: services.reason }, 'Second instance: background services disabled (start it with ' + ALLOW_SECOND_INSTANCE_SERVICES_KEY + '=1 in the environment to run them)')
+  if (services.override) logger.warn({ reason: services.reason }, 'Second instance with ' + ALLOW_SECOND_INSTANCE_SERVICES_KEY + '=1: background services RUN (schedule runner included)')
 
-  const routerInterval = webOnly ? undefined : startMessageRouter()
-  if (!webOnly) logger.info('Agent message router started (5s poll)')
+  const routerInterval = servicesOff ? undefined : startMessageRouter()
+  if (!servicesOff) logger.info('Agent message router started (5s poll)')
 
-  const scheduleInterval = webOnly ? undefined : startScheduleRunner()
-  if (!webOnly) logger.info('Schedule runner started (60s poll)')
+  const scheduleInterval = servicesOff ? undefined : startScheduleRunner()
+  if (!servicesOff) logger.info('Schedule runner started (60s poll)')
 
   // upstream cca1e519: the kanban archive sweep used to ride along on every listKanbanCards() call,
   // so reading the board wrote to it. It is a scheduled job now -- and it MUST be started here, or
-  // KANBAN_ARCHIVE_DONE_DAYS silently stops doing anything. Same webOnly gate as every neighbouring
+  // KANBAN_ARCHIVE_DONE_DAYS silently stops doing anything. Same servicesOff gate as every neighbouring
   // runner: a web-only (staging) instance never archives.
-  const kanbanArchiveInterval = webOnly ? undefined : startKanbanArchiveRunner()
-  if (!webOnly) logger.info('Kanban archive runner started (60min poll, 70s offset)')
+  const kanbanArchiveInterval = servicesOff ? undefined : startKanbanArchiveRunner()
+  if (!servicesOff) logger.info('Kanban archive runner started (60min poll, 70s offset)')
 
   // Pre-start the interactive agent worker (subscription backend) so the first
   // heartbeat / scheduled generation after boot does not pay the cold-boot
   // latency. runViaWorker still lazy-starts + restarts it on demand, so this is
   // a warm-up, not a hard dependency. Skipped on the SDK rollback backend.
-  if (!webOnly && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
+  if (!servicesOff && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
     import('./web/agent-worker.js')
       .then(m => { m.startWorkerSession(); logger.info('Interactive agent worker pre-started') })
       .catch(err => logger.warn({ err }, 'Failed to pre-start agent worker (will lazy-start on first use)'))
@@ -367,7 +378,7 @@ export function startWebServer(port = 3420): http.Server {
   // event loop alive, so that is not just a leak: the process would never exit.
   // The other monitors are synchronous calls and cannot hit this.
   let workerLivenessCancelled = false
-  if (!webOnly && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
+  if (!servicesOff && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
     import('./web/worker-liveness.js')
       .then(m => {
         if (workerLivenessCancelled) return
@@ -377,13 +388,13 @@ export function startWebServer(port = 3420): http.Server {
       .catch(err => logger.warn({ err }, 'Failed to start the worker liveness monitor'))
   }
 
-  const pluginMonitorInterval = webOnly ? undefined : startChannelPluginMonitor()
-  if (!webOnly) logger.info('Channel plugin health monitor started (60s poll)')
+  const pluginMonitorInterval = servicesOff ? undefined : startChannelPluginMonitor()
+  if (!servicesOff) logger.info('Channel plugin health monitor started (60s poll)')
 
   // Userbot inbound-probe (gold-standard deafness detector). Safe no-op until
   // the prober session file + allowlist are configured. Wrapped so a failure
   // never crashes server startup.
-  if (!webOnly) {
+  if (!servicesOff) {
     try {
       startInboundProber()
     } catch (err) {
@@ -391,49 +402,49 @@ export function startWebServer(port = 3420): http.Server {
     }
   }
 
-  const channelHealthInterval = webOnly ? undefined : startChannelHealthMonitor()
-  if (!webOnly) logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
+  const channelHealthInterval = servicesOff ? undefined : startChannelHealthMonitor()
+  if (!servicesOff) logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
 
   // CostOps: reflect the local config's fixed costs into the ledger once at boot + every
   // 10 minutes. Deliberately NOT done inside the GET /api/costs/summary handler -- a read
   // endpoint must not write (was flagged in review); this is the one place that does.
-  const costsSyncInterval = webOnly ? undefined : startCostsSyncTask()
-  if (!webOnly) logger.info('CostOps fixed-cost sync started (10min poll + startup)')
+  const costsSyncInterval = servicesOff ? undefined : startCostsSyncTask()
+  if (!servicesOff) logger.info('CostOps fixed-cost sync started (10min poll + startup)')
 
-  const stuckInputInterval = webOnly ? undefined : startStuckInputWatcher()
-  if (!webOnly) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
+  const stuckInputInterval = servicesOff ? undefined : startStuckInputWatcher()
+  if (!servicesOff) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
 
-  const stuckToolCallInterval = webOnly ? undefined : startStuckToolCallWatcher()
-  if (!webOnly) logger.info('Stuck-tool-call watcher started (30s poll, 35s offset)')
+  const stuckToolCallInterval = servicesOff ? undefined : startStuckToolCallWatcher()
+  if (!servicesOff) logger.info('Stuck-tool-call watcher started (30s poll, 35s offset)')
 
-  const inboxNudgeInterval = webOnly ? undefined : startInboxNudgeWatcher()
-  if (!webOnly) logger.info('Inbox nudge watcher started (20s poll, 55s offset)')
+  const inboxNudgeInterval = servicesOff ? undefined : startInboxNudgeWatcher()
+  if (!servicesOff) logger.info('Inbox nudge watcher started (20s poll, 55s offset)')
 
-  const reauthHealerInterval = webOnly ? undefined : startReauthHealer()
-  if (!webOnly && reauthHealerInterval) logger.info('Reauth healer started (3min poll, 90s offset)')
+  const reauthHealerInterval = servicesOff ? undefined : startReauthHealer()
+  if (!servicesOff && reauthHealerInterval) logger.info('Reauth healer started (3min poll, 90s offset)')
 
-  const autoRestartInterval = webOnly ? undefined : startAutoRestartRunner()
-  if (!webOnly) logger.info('Auto-restart runner started (60s poll, 40s offset)')
+  const autoRestartInterval = servicesOff ? undefined : startAutoRestartRunner()
+  if (!servicesOff) logger.info('Auto-restart runner started (60s poll, 40s offset)')
 
-  const modelFallbackInterval = webOnly ? undefined : startModelFallbackRunner()
-  if (!webOnly) logger.info('Model-fallback runner started (60s poll, 50s offset)')
+  const modelFallbackInterval = servicesOff ? undefined : startModelFallbackRunner()
+  if (!servicesOff) logger.info('Model-fallback runner started (60s poll, 50s offset)')
 
-  const contextGuardInterval = webOnly ? undefined : startContextGuardRunner()
-  if (!webOnly) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
+  const contextGuardInterval = servicesOff ? undefined : startContextGuardRunner()
+  if (!servicesOff) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
 
-  if (!webOnly) {
+  if (!servicesOff) {
     startContextRestartGateRunner()
     logger.info('Context-restart gate runner started (per-agent poll, 3min initial delay)')
   }
 
-  const updateCheckerInterval = webOnly ? undefined : startUpdateChecker()
-  if (!webOnly) logger.info('Update checker started (15min poll)')
+  const updateCheckerInterval = servicesOff ? undefined : startUpdateChecker()
+  if (!servicesOff) logger.info('Update checker started (15min poll)')
 
-  const federationPollerInterval = webOnly ? undefined : startFederationPoller()
-  if (!webOnly) logger.info('Federation manifest poller started (10min poll, 25s offset)')
+  const federationPollerInterval = servicesOff ? undefined : startFederationPoller()
+  if (!servicesOff) logger.info('Federation manifest poller started (10min poll, 25s offset)')
 
-  const capabilityRunnerInterval = webOnly ? undefined : startCapabilitySummaryRunner()
-  if (!webOnly) logger.info('Capability summary runner started (5min poll, 65s offset; idle while federation is off)')
+  const capabilityRunnerInterval = servicesOff ? undefined : startCapabilitySummaryRunner()
+  if (!servicesOff) logger.info('Capability summary runner started (5min poll, 65s offset; idle while federation is off)')
 
   // Collect token usage from JSONL transcripts every hour so the run-history
   // token estimates stay fresh without requiring a manual dashboard visit.
@@ -454,10 +465,10 @@ export function startWebServer(port = 3420): http.Server {
     }
   }, 60 * 60 * 1000)
 
-  const tokenCollectInterval = webOnly ? undefined : setInterval(() => {
+  const tokenCollectInterval = servicesOff ? undefined : setInterval(() => {
     collectTokenUsage().catch(err => logger.warn({ err }, 'Periodic token usage collection failed'))
   }, 60 * 60 * 1000)
-  if (!webOnly) {
+  if (!servicesOff) {
     collectTokenUsage().catch(err => logger.warn({ err }, 'Startup token usage collection failed'))
     logger.info('Token usage auto-collect started (1h poll + startup)')
   }
@@ -488,7 +499,7 @@ export function startWebServer(port = 3420): http.Server {
   // (do NOT copy the hook backfill's ungated placement). The ensure heals
   // the two known loss vectors: update.sh --regen-claudemd and a stale
   // dashboard-editor buffer PUT.
-  if (!webOnly) {
+  if (!servicesOff) {
     ensureFederationClaudeMdSection()
     ensureAutonomySection(MAIN_AGENT_ID)
     ensureSkillsPathTrapSection(MAIN_AGENT_ID)
@@ -552,17 +563,30 @@ export function startWebServer(port = 3420): http.Server {
     logger.info('Gate self-test started (15min poll, 90s initial delay)')
   }
 
-  try {
-    ensureDefaultScheduledTasks()
-    logger.info('Default scheduled tasks seeded')
-  } catch (err) {
-    logger.warn({ err }, 'Scheduled tasks seed skipped')
+  // upstream 2b961fcd (#2415, ported): a second instance (a worktree checkout, a temp root, WEB_ONLY staging) never
+  // seeds the user-global scheduled tasks dir: it reads the "removed default" tombstones from its OWN store, so it
+  // could write back a default the owner deleted, and every task it writes is the live fleet's. The same decision
+  // as the hook registration above. (The upstream rotation heartbeat seed of the same commit does not exist here.)
+  if (!hookDecision.register) {
+    logger.info({ reason: hookDecision.reason }, 'Default scheduled tasks not seeded (second instance)')
+  } else {
+    try {
+      ensureDefaultScheduledTasks()
+      logger.info('Default scheduled tasks seeded')
+    } catch (err) {
+      logger.warn({ err }, 'Scheduled tasks seed skipped')
+    }
   }
 
-  try {
-    sweepOrphanedBackgroundTasks()
-  } catch (err) {
-    logger.warn({ err }, 'Background task sweep skipped')
+  // upstream 2c093a10 (#2419, ported): the orphan sweep finalizes the running background tasks of the instance's
+  // database and polls their tmux sessions on the SHARED tmux server, killing one past its time limit
+  // (checkAndFinalize); a second instance reads a copied database, so it could stop a live fleet session. It runs only where the background services run.
+  if (!servicesOff) {
+    try {
+      sweepOrphanedBackgroundTasks()
+    } catch (err) {
+      logger.warn({ err }, 'Background task sweep skipped')
+    }
   }
 
   try {
