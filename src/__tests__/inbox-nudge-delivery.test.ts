@@ -12,9 +12,10 @@ const h = vi.hoisted(() => ({
   sends: [] as Array<{ at: number; session: string; text: string }>,
   t0: 0,
   alert: vi.fn(),
+  warn: vi.fn(),
 }))
 
-vi.mock('../logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
+vi.mock('../logger.js', () => ({ logger: { info: vi.fn(), warn: h.warn, error: vi.fn(), debug: vi.fn() } }))
 vi.mock('../config.js', () => ({ MAIN_AGENT_ID: 'bela' }))
 vi.mock('../db.js', () => ({ getPendingMessages: () => h.pending }))
 vi.mock('../settings-store.js', () => ({ getEffectiveSettingValue: () => 'hu' }))
@@ -29,7 +30,7 @@ vi.mock('../web/agent-process.js', () => ({
   },
 }))
 
-import { startInboxNudgeWatcher, INBOX_NUDGE_INITIAL_DELAY_MS, INBOX_NUDGE_INTERVAL_MS, MIN_PENDING_AGE_MS, NUDGE_DEBOUNCE_MS, _resetNudgeStateForTest } from '../web/inbox-nudge-watcher.js'
+import { startInboxNudgeWatcher, INBOX_NUDGE_INITIAL_DELAY_MS, INBOX_NUDGE_INTERVAL_MS, MIN_PENDING_AGE_MS, NUDGE_DEBOUNCE_MS, MAX_NUDGES_PER_HOUR, _resetNudgeStateForTest } from '../web/inbox-nudge-watcher.js'
 
 let timer: NodeJS.Timeout
 const sec = (ms: number) => Math.floor(ms / 1000)
@@ -39,7 +40,7 @@ function drain() { h.pending.length = 0 }              // what the UserPromptSub
 beforeEach(() => {
   vi.useFakeTimers()
   _resetNudgeStateForTest()
-  h.pending.length = 0; h.sends.length = 0; h.ready = true; h.exists = true; h.alert.mockClear()
+  h.pending.length = 0; h.sends.length = 0; h.ready = true; h.exists = true; h.alert.mockClear(); h.warn.mockClear()
   h.t0 = Date.now()
   timer = startInboxNudgeWatcher()
 })
@@ -113,5 +114,22 @@ describe('without the router wakeup, a main-agent row still wakes the main agent
     await vi.advanceTimersByTimeAsync(30 * 60_000)
     expect(h.sends).toHaveLength(3)
     expect(h.alert).toHaveBeenCalledTimes(1)
+  })
+
+  it('the hourly budget is 20 (BELA 6197); when it runs out the log names the next free slot', async () => {
+    expect(MAX_NUDGES_PER_HOUR).toBe(20)
+    await warm()
+    let id = 100
+    // a steady stream: every 70 s a new row, drained right after each nudge (debounce 60 s)
+    for (let i = 0; i < 30; i++) {
+      arrive(id++, 20_000)
+      await vi.advanceTimersByTimeAsync(70_000)
+      drain()
+    }
+    expect(h.sends.length).toBe(20)
+    const exhausted = h.warn.mock.calls.find((c) => String(c[1]).includes('hourly budget exhausted'))
+    expect(exhausted).toBeTruthy()
+    const firstAt = h.t0 + h.sends[0]!.at
+    expect(exhausted![0].nextSlotAt).toBe(new Date(firstAt + 60 * 60_000).toISOString())
   })
 })

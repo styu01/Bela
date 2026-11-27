@@ -69,7 +69,12 @@ export const MAX_STALE_NUDGES = 3
 // Rolling hourly cap on autonomous turn generation (each nudge is a paid
 // Claude turn). Exhaustion degrades to the baseline drain cadence (next
 // human/scheduled prompt), never to message loss.
-export const MAX_NUDGES_PER_HOUR = 10
+// 20, not upstream's 10 (PROGI review 6196 / BELA 6197): with the router's blind wakeup gone the
+// watcher is the only waker of the main agent; PROGI simulated the last 14 days' 459 main-agent rows
+// with the watcher alone (always-idle, pessimistic): 385 nudges, the 10-cap hit in 4 hours, p99 delay
+// ~16.5 min, max 20 min -- all from cap exhaustion. 20 removes those hours while still bounding the
+// autonomous paid turns per hour.
+export const MAX_NUDGES_PER_HOUR = 20
 const NUDGE_BUDGET_WINDOW_MS = 60 * 60_000
 // Rate limit for the "pending mail is waiting but the session stays busy"
 // visibility log -- distinguishes a long busy spell from a dead watcher.
@@ -214,7 +219,11 @@ async function tick(): Promise<void> {
         )
       }
       if (pre.budgetLog) {
-        logger.warn({ inboxNudge: true, pending: pending.length, budget: MAX_NUDGES_PER_HOUR }, 'inbox nudge: hourly budget exhausted; falling back to baseline drain cadence')
+        // The next slot = when the OLDEST nudge of the rolling window leaves it (BELA 6197): the log
+        // says when mail will be nudged again, not only that it will wait.
+        const oldestNudge = Math.min(...state.recentNudges)
+        const nextSlotAt = Number.isFinite(oldestNudge) ? new Date(oldestNudge + NUDGE_BUDGET_WINDOW_MS).toISOString() : null
+        logger.warn({ inboxNudge: true, pending: pending.length, budget: MAX_NUDGES_PER_HOUR, nextSlotAt }, 'inbox nudge: hourly budget exhausted; falling back to baseline drain cadence')
       }
       return
     }
