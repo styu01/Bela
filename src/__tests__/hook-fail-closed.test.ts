@@ -274,3 +274,20 @@ describe('the boot prune knows the wrapper', () => {
     expect(FAIL_CLOSED_MARK).toBe(GATE_FAIL_CLOSED_TAG)
   })
 })
+
+// BELA 6223 (b): the fail-closed message names the way out that needs no Bash. The claim is pinned: the main
+// agent's tracked project settings put no gate on Read / Edit / Write (MultiEdit, NotebookEdit).
+describe('the fail-closed message names the Bash-free way out', () => {
+  it('the tail carries the sentence', () => {
+    expect(failClosedGateRun('x', 'g.mjs', 10)).toContain('Bash nelkul javithato: a fo agens Read/Edit/Write eszkoze nincs kapuzva.')
+  })
+  it('...and it is true for the main agent: no gate script on a Read / Edit / Write matcher in its project settings', () => {
+    const settings = JSON.parse(readFileSync(join(PROJECT_ROOT, '.claude', 'settings.json'), 'utf-8'))
+    const gates = /email-send-gate|self-pace-gate|kanban-write-gate|egress-gate|outgoing-copy-gate/
+    for (const e of (settings.hooks?.PreToolUse ?? []) as { matcher: string; hooks: { command: string }[] }[]) {
+      const re = new RegExp(`^(?:${e.matcher})$`)
+      const hitsFileTool = ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].some((t) => re.test(t))
+      if (hitsFileTool) for (const h of e.hooks) expect(gates.test(h.command), `${e.matcher}: ${h.command.slice(0, 80)}`).toBe(false)
+    }
+  })
+})
