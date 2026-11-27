@@ -2089,10 +2089,14 @@ export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'i
   if (!card) return false
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
+  // LOCAL (beyond upstream 7a47b24a, which re-arms only in moveKanbanCard): PUT /api/kanban/<id> can
+  // change `status` through this function too, so the same re-arm applies here -- a card PUT out of
+  // in_progress gets its dispatched_at cleared; a card that stays (or is PUT) in in_progress keeps it.
   const changed = db.prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?, is_recurring_template=?
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?, is_recurring_template=?,
+       dispatched_at = CASE WHEN ? = 'in_progress' THEN dispatched_at ELSE NULL END
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, f.is_recurring_template ? 1 : 0, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, f.is_recurring_template ? 1 : 0, f.status, id).changes > 0
   if (changed && card.is_recurring_template !== (f.is_recurring_template ? 1 : 0)) {
     db.prepare('INSERT INTO kanban_recurring_template_events (card_id, from_value, to_value, actor, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(id, card.is_recurring_template, f.is_recurring_template ? 1 : 0, recurringTemplateActor ?? 'system', now)
@@ -2113,8 +2117,16 @@ export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrd
   // Read the previous status first so we only record an audit event on a real
   // status transition (not a pure sort_order reorder within the same column).
   const prev = (db.prepare('SELECT status FROM kanban_cards WHERE id=?').get(id) as { status: string } | undefined)?.status
+  // dispatched_at guards ONE in_progress spell (one activation -> one wake-up message), it is not a
+  // permanent tombstone (upstream 7a47b24a). Nothing used to clear it, so a card pulled to in_progress
+  // and put BACK burned its dispatch forever: the board showed it alive while the next pull woke
+  // nobody (measured 2026-11-27: 40 cards carry dispatched_at outside in_progress, 2 of them
+  // 'waiting'). Clearing it on every move that does not land in in_progress re-arms the next
+  // activation -- and heals a row already stuck this way, since the clear ignores the previous status.
   const changed = db.prepare(
-    'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
+    status === 'in_progress'
+      ? 'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
+      : 'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=?, dispatched_at=NULL WHERE id=?'
   ).run(status, sortOrder, now, id).changes > 0
   if (changed && prev !== undefined && prev !== status) {
     db.prepare(
