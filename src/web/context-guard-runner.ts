@@ -17,6 +17,13 @@ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation } from '../pane-state.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
 import { readContextGuardConfig } from './context-guard-store.js'
+import {
+  readPendingResumes,
+  writePendingResumes,
+  restorableResumeStates,
+  type PendingResume,
+  type PendingResumeMap,
+} from './context-guard-resume-store.js'
 import { createAgentMessage } from '../db.js'
 import {
   decideGuard,
@@ -49,7 +56,68 @@ const INTERVAL_MS = 300_000
 // agent name -> guard state. In-memory: a dashboard restart re-arms every
 // agent at 'idle', which is safe -- the worst case is a repeated handoff
 // request, and cooldown prevents restart loops within a run.
+//
+// ONE exception: 'await-ready' is NOT safe to lose. It is the
+// only record that a fresh session is still owed its resume prompt, and
+// nothing else will ever send it -- the agent just sits at an empty prompt.
+// That obligation is mirrored to store/context-guard-pending-resume.json
+// (context-guard-resume-store.ts) and re-armed by restorePendingResumes() when
+// the runner starts.
 const guardStates = new Map<string, GuardState>()
+
+// Write-through mirror of the persisted resume obligations. Held in memory so
+// the per-sweep "drop if present" checks cost no I/O; the file is written only
+// when an entry is actually added or removed.
+let pendingResumes: PendingResumeMap = {}
+
+function persistPendingResumes(): void {
+  try { writePendingResumes(pendingResumes) }
+  catch (err) { logger.warn({ err }, 'context-guard: pending-resume persist failed') }
+}
+
+function recordPendingResume(name: string, entry: PendingResume): void {
+  pendingResumes = { ...pendingResumes, [name]: entry }
+  persistPendingResumes()
+}
+
+function dropPendingResume(name: string, why: string): void {
+  if (!(name in pendingResumes)) return
+  const { [name]: _dropped, ...rest } = pendingResumes
+  pendingResumes = rest
+  persistPendingResumes()
+  logger.info({ name, why }, 'context-guard: pending resume cleared')
+}
+
+/**
+ * Re-arm every resume obligation a previous dashboard process left behind.
+ * Live entries (younger than PENDING_RESUME_TTL_MS) put the agent back in
+ * 'await-ready', so the first sweep delivers the resume prompt exactly as the
+ * old process would have; expired ones are dropped with a WARN, because a
+ * resume that never arrived is a fact the operator should be able to find.
+ * Returns the re-armed agent names. Exported for the regression test.
+ */
+export function restorePendingResumes(nowMs: number): string[] {
+  pendingResumes = readPendingResumes()
+  const { live, expired } = restorableResumeStates(pendingResumes, nowMs)
+  for (const [name, st] of live) {
+    if (!guardStates.has(name)) guardStates.set(name, st)
+  }
+  if (expired.length > 0) {
+    for (const name of expired) {
+      logger.warn(
+        { name, restartedAtMs: pendingResumes[name]?.restartedAtMs, reason: pendingResumes[name]?.reason },
+        'context-guard: pending resume EXPIRED across a dashboard restart -- the fresh session never got its resume prompt',
+      )
+      const { [name]: _expired, ...rest } = pendingResumes
+      pendingResumes = rest
+    }
+    persistPendingResumes()
+  }
+  if (live.size > 0) {
+    logger.info({ agents: [...live.keys()] }, 'context-guard: re-armed pending resume(s) from a previous dashboard run')
+  }
+  return [...live.keys()]
+}
 const remoteSkipLogged = new Set<string>()
 
 // Per-agent observed-context high-water mark, persisted across dashboard
@@ -310,6 +378,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   // 100%-context pane (which dispatch refuses to prompt) still gets rescued.
   if (!cfg.enabled && !cfg.saturationRestart && !cfg.idleFlushEnabled) {
     guardStates.delete(name)
+    dropPendingResume(name, 'guard disabled')
     return
   }
 
@@ -397,6 +466,11 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   }
 
   guardStates.set(name, decision.nextState)
+  // Leaving await-ready WITHOUT delivering (ready timeout, guard disabled
+  // mid-wait) ends the obligation too; delivery clears it in inject-resume.
+  if (state.phase === 'await-ready' && decision.nextState.phase !== 'await-ready' && decision.action !== 'inject-resume') {
+    dropPendingResume(name, decision.reason)
+  }
   if (decision.action === 'none') {
     // Idle-flush non-decisions carry the measurement that blocked them
     // ("quiet for only 4m of 20m"), which is the only way to see the tier
@@ -452,6 +526,14 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
         }
         try {
           await performRestart(name)
+          // Persisted only AFTER the restart succeeded, so a
+          // failed rescue (rolled back below) never leaves an obligation that
+          // would send "continue from your handoff" into the OLD pane.
+          recordPendingResume(name, {
+            restartedAtMs: Date.now(),
+            handoffStaleMinutes: decision.nextState.handoffStaleMinutes,
+            reason: decision.reason,
+          })
         } catch (err) {
           // RESTARTRACE901 (ported from upstream Szotasz/marveen f78bfe63a,
           // 2026-09-10): guardStates was advanced to the post-restart phase
@@ -496,10 +578,29 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
         const hadHandoff = inputs.handoffMtime !== null || handoffMtime(name) !== null
         // Staleness was measured at RESTART time and rode here in the state;
         // measuring now would be meaningless (the old session is gone).
-        await sendPromptToSession(
-          session,
-          resumePrompt(name, handoffPathFor(name), hadHandoff, state.handoffStaleMinutes),
-        )
+        // LOCAL ADAPTATION (upstream 4e4dba22 uses its GUARDHITELES903 sendSystemDirective; we deliver through
+        // sendPromptToSession, which returns the same 'sent' | 'aborted-busy' | 'skipped-locked' outcome).
+        let outcome: Awaited<ReturnType<typeof sendPromptToSession>>
+        try {
+          outcome = await sendPromptToSession(
+            session,
+            resumePrompt(name, handoffPathFor(name), hadHandoff, state.handoffStaleMinutes),
+          )
+        } catch (err) {
+          // Not retried: a throw from the tmux layer can come after part of
+          // the text already landed, and a second copy is worse than none.
+          dropPendingResume(name, 'resume delivery threw')
+          throw err
+        }
+        if (outcome === 'sent') {
+          dropPendingResume(name, 'resume delivered')
+        } else {
+          // Nothing was injected ('aborted-busy' / 'skipped-locked'): keep
+          // the obligation and stay in await-ready, so the next sweep retries
+          // until the phase deadline instead of silently cooling down.
+          guardStates.set(name, state)
+          logger.warn({ name, outcome }, 'context-guard: resume prompt NOT injected -- retrying on the next sweep')
+        }
         break
       }
       case 'prep-handoff': {
@@ -582,6 +683,11 @@ export function getHardGuardPhase(name: string): string {
 }
 
 export function startContextGuardRunner(): NodeJS.Timeout {
+  // Before the first sweep can run, so an agent restarted by the
+  // previous dashboard process is not re-armed at 'idle' and left without its
+  // resume prompt.
+  try { restorePendingResumes(Date.now()) }
+  catch (err) { logger.warn({ err }, 'context-guard: pending-resume restore failed') }
   let tickRunning = false
   async function sweep() {
     // Re-entrancy guard: checkAgent's 'restart' action now awaits a real
