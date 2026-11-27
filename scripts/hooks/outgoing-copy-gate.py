@@ -1231,8 +1231,8 @@ def _is_stdin_shell_head(h) -> bool:
 
 
 # INTERPSTDIN2 (PROGI msg 6049, BELA msg 6050): the code rule for a program read from stdin is whole-program and
-# language-aware: _blank_python / _blank_js blank string literals and comments (keeping f-string {...} and template
-# ${...} expressions as code); a mail call outside strings sends, else a process starter / dynamic exec outside
+# language-aware: _blank_python / _blank_js blank string literals, skipping comments (SCANFIX1127; keeping f-string
+# {...} and template ${...} expressions as code); a mail call outside strings sends, else a process starter / dynamic exec outside
 # strings anywhere plus a sender name or mail call anywhere in the program sends (a call split over lines and a
 # command passed in a variable used to pass). Mirrors interpCodeSends / blankPython / blankJs in email-send-gate.mjs.
 _INTERP_EXECISH = re.compile(
@@ -1249,6 +1249,23 @@ def _is_ident_char(c) -> bool:
     return bool(c) and (c.isascii() and (c.isalnum() or c in "_$"))
 
 
+# SCANFIX1127 (PROGI msg 6118 (a) A-E, BELA msg 6120): comments are skipped but not blanked (A); a top-level ':' / '!'
+# in an f/t-string field starts the spec, which is text except nested fields (B); Python line ends \n and \r, JS \n,
+# \r, U+2028, U+2029 (C); JS regex-or-division across line ends, postfix ++/-- divides, keyword regex, and two
+# readings (D); r b u f t prefixes in any case/order (E). Mirrors the SCANFIX1127 block in email-send-gate.mjs.
+def _py_eol(c) -> bool:
+    return c == "\n" or c == "\r"
+
+
+def _js_eol(c) -> bool:
+    return c in ("\n", "\r", "\u2028", "\u2029")
+
+
+_JS_WS = re.compile(r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]")
+_JS_REGEX_AFTER_WORD = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
+                                  "case", "do", "else", "yield", "await"})
+
+
 def _blank_python(code: str) -> str:
     out = list(code)
     n = len(code)
@@ -1256,18 +1273,16 @@ def _blank_python(code: str) -> str:
 
     def blank(a, b):
         for k in range(a, min(b, n)):
-            if out[k] != "\n":
+            if out[k] != "\n" and out[k] != "\r":
                 out[k] = " "
 
-    def scan(i, stop):
+    def scan(i, stop, fexpr):
         depth = 0
         while i < n:
             c = code[i]
             if c == "#":
-                e = code.find("\n", i)
-                e = n if e < 0 else e
-                blank(i, e)
-                i = e
+                while i < n and not _py_eol(code[i]):
+                    i += 1
                 continue
             if c in "'\"":
                 i = string(i)
@@ -1279,15 +1294,35 @@ def _blank_python(code: str) -> str:
                     if depth == 0 and c == stop:
                         return i
                     depth -= 1
+                elif fexpr and depth == 0 and (c == ":" or (c == "!" and (code[i + 1] if i + 1 < n else "") != "=")):
+                    return i
             i += 1
         return n
+
+    def field(k):
+        nest[0] += 1
+        if nest[0] > _SCAN_NEST_MAX:
+            raise ValueError("nesting")
+        k = scan(k, "}", True)
+        seg = k
+        while k < n and code[k] != "}":
+            if code[k] == "{":
+                blank(seg, k + 1)
+                k = field(k + 1)
+                seg = k + 1
+                k += 1
+                continue
+            k += 1
+        blank(seg, k)
+        nest[0] -= 1
+        return k
 
     def string(i):
         q = code[i]
         p = i
-        while p > 0 and code[p - 1] in "rRbBuUfF" and i - p < 2:
+        while p > 0 and code[p - 1] in "rRbBuUfFtT" and i - p < 2:
             p -= 1
-        is_f = p < i and not _is_ident_char(code[p - 1] if p > 0 else "") and any(ch in "fF" for ch in code[p:i])
+        is_f = p < i and not _is_ident_char(code[p - 1] if p > 0 else "") and any(ch in "fFtT" for ch in code[p:i])
         triple = code.startswith(q * 3, i)
         k = i + (3 if triple else 1)
         seg = i
@@ -1299,18 +1334,14 @@ def _blank_python(code: str) -> str:
             if (code.startswith(q * 3, k) if triple else ch == q):
                 k += 3 if triple else 1
                 break
-            if not triple and ch == "\n":
+            if not triple and _py_eol(ch):
                 break
             if is_f and ch == "{":
                 if k + 1 < n and code[k + 1] == "{":
                     k += 2
                     continue
                 blank(seg, k + 1)
-                nest[0] += 1
-                if nest[0] > _SCAN_NEST_MAX:
-                    raise ValueError("nesting")
-                k = scan(k + 1, "}")
-                nest[0] -= 1
+                k = field(k + 1)
                 seg = k
                 k += 1
                 continue
@@ -1318,25 +1349,39 @@ def _blank_python(code: str) -> str:
         blank(seg, min(k, n))
         return k
 
-    scan(0, None)
+    scan(0, None, False)
     return "".join(out)
 
 
-def _blank_js(code: str) -> str:
+def _blank_js(code: str, regex_on: bool = True) -> str:
     out = list(code)
     n = len(code)
     nest = [0]
 
     def blank(a, b):
         for k in range(a, min(b, n)):
-            if out[k] != "\n":
+            if not _js_eol(out[k]):
                 out[k] = " "
 
-    def prev_sig(i):
+    def regex_start(i):
+        if not regex_on:
+            return False
         p = i - 1
-        while p >= 0 and code[p] in " \t":
+        while p >= 0 and _JS_WS.match(code[p]):
             p -= 1
-        return "" if p < 0 else code[p]
+        if p < 0:
+            return True
+        c = code[p]
+        if c in "+-" and p > 0 and code[p - 1] == c:
+            return False
+        if c in "(,=:[!&|?{};+-*%<>~^":
+            return True
+        if _is_ident_char(c):
+            s = p
+            while s > 0 and _is_ident_char(code[s - 1]):
+                s -= 1
+            return code[s:p + 1] in _JS_REGEX_AFTER_WORD
+        return False
 
     def scan(i, stop):
         depth = 0
@@ -1344,21 +1389,16 @@ def _blank_js(code: str) -> str:
             c = code[i]
             nx = code[i + 1] if i + 1 < n else ""
             if c == "/" and nx == "/":
-                e = code.find("\n", i)
-                e = n if e < 0 else e
-                blank(i, e)
-                i = e
+                while i < n and not _js_eol(code[i]):
+                    i += 1
                 continue
             if c == "/" and nx == "*":
                 e = code.find("*/", i + 2)
-                e = n if e < 0 else e + 2
-                blank(i, e)
-                i = e
+                i = n if e < 0 else e + 2
                 continue
-            ps = prev_sig(i)
-            if c == "/" and (ps == "" or ps in "\n(,=:[!&|?{};+-*%<>~^"):
+            if c == "/" and regex_start(i):
                 k, cls = i + 1, False
-                while k < n and code[k] != "\n":
+                while k < n and not _js_eol(code[k]):
                     if code[k] == "\\":
                         k += 2
                         continue
@@ -1374,7 +1414,7 @@ def _blank_js(code: str) -> str:
                 continue
             if c in "'\"":
                 k = i + 1
-                while k < n and code[k] != c and code[k] != "\n":
+                while k < n and code[k] != c and code[k] != "\n" and code[k] != "\r":
                     k += 2 if code[k] == "\\" else 1
                 blank(i, k + 1)
                 i = k + 1
@@ -1415,12 +1455,12 @@ def _blank_js(code: str) -> str:
 
 def _interp_code_sends(code: str, lang: str = "py") -> bool:
     try:
-        bare = _blank_js(code) if lang == "js" else _blank_python(code)
+        bares = [_blank_js(code, True), _blank_js(code, False)] if lang == "js" else [_blank_python(code)]
     except (ValueError, RecursionError):
         return True
-    if _CODE_SEND.search(bare):
-        return True
-    return bool(_INTERP_EXECISH.search(bare) and (_CODE_SENDER_LIT.search(code) or _CODE_SEND.search(code)))
+    return any(_CODE_SEND.search(b) or (_INTERP_EXECISH.search(b) and (_CODE_SENDER_LIT.search(code)
+                                                                       or _CODE_SEND.search(code)))
+               for b in bares)
 
 
 _STDIN_EXEC = re.compile(r"\b(?:exec|eval|compile|runpy|Function|runInThisContext|runInNewContext)\b")

@@ -2592,9 +2592,9 @@
       "expected": false
     },
     {
-      "name": "INTERPSTDIN2: control: the call only in a comment",
+      "name": "SCANFIX1127: PINNED: a call that only sits in a Python comment is refused (comments are skipped, not blanked, as production read them)",
       "cmd": "python3 - <<'EOF'\n# os.system('sendmail a@b.hu') would send\nprint(1)\nEOF",
-      "expected": false
+      "expected": true
     },
     {
       "name": "INTERPSTDIN2: control: python3 -X utf8 - printing the name",
@@ -2657,9 +2657,9 @@
       "expected": false
     },
     {
-      "name": "INTERPSTDIN2: control: a JS // comment holding the call is data",
+      "name": "SCANFIX1127: PINNED: a call that only sits in a JS // comment is refused (comments are skipped, not blanked)",
       "cmd": "node - <<'EOF'\n// require('child_process').execSync('sendmail a@b.hu')\nconsole.log(1)\nEOF",
-      "expected": false
+      "expected": true
     },
     {
       "name": "INTERPSTDIN2: a backtick inside /* */ comments after code hides no call",
@@ -2770,6 +2770,226 @@
       "name": "INTERPSTDIN2: control: f-strings nested 50 deep, no process starter",
       "cmd": "python3 - <<'EOF'\nx = f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{f'{1}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'}'\nprint(x)\nEOF",
       "expected": false
+    },
+    {
+      "name": "SCANFIX1127: f-string format spec '#' is no comment",
+      "cmd": "python3 - <<'EOF'\nprint(f\"{255:#x}\"); import os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: f-string format spec '#' on the line before the call",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{255:#x}\"); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: f-string fill character ' opens no string",
+      "cmd": "python3 - <<'EOF'\nprint(f\"{1:'>5}\"); import os; os.system('sendmail a@b.hu') #'\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: f-string fill ' with a quote later on the line",
+      "cmd": "python3 - <<'EOF'\nimport os\nv = f\"{1:'^9}\"; os.system('sendmail a@b.hu'); w = '\"'\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: Python ends a comment at a lone CR",
+      "cmd": "python3 - <<'EOF'\n# note\rimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: Python ends a comment at a lone CR (two lines)",
+      "cmd": "python3 - <<'EOF'\nimport os\n# x\ros.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a / after a line end divides",
+      "cmd": "node <<'EOF'\nlet a = 4\n/ 2; require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a / after a postfix ++ divides",
+      "cmd": "node <<'EOF'\nlet a = 4; let b = a++ / 2; require('child_process').execSync('sendmail a@b.hu'); let c = a++ / 2\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS ends a // comment at CR",
+      "cmd": "node <<'EOF'\n// note\rrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS ends a // comment at U+2028",
+      "cmd": "node <<'EOF'\n// note require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS ends a // comment at U+2029",
+      "cmd": "node <<'EOF'\n// note require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: PINNED: import smtplib after an f-string '#' spec is refused, as production",
+      "cmd": "python3 - <<'EOF'\nprint(f\"{255:#x}\"); import smtplib\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: PINNED: import smtplib after a CR-ended comment is refused, as production",
+      "cmd": "python3 - <<'EOF'\n# note\rimport smtplib\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: t-string field is code",
+      "cmd": "python3 - <<'EOF'\nimport os\nt\"{os.system('sendmail a@b.hu')}\"\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: tr-string field is code",
+      "cmd": "python3 - <<'EOF'\nimport os\ntr\"{os.system('sendmail a@b.hu')}\"\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: T-string field is code",
+      "cmd": "python3 - <<'EOF'\nimport os\nT'{os.system(\"sendmail a@b.hu\")}'\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: RT-string field is code",
+      "cmd": "python3 - <<'EOF'\nimport os\nRT'{os.system(\"sendmail a@b.hu\")}'\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: nested f-string with the same quote",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{f\"{os.system('sendmail a@b.hu')}\"}\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: a nested field in a format spec is code",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{1:{os.system('sendmail a@b.hu')}}\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: nested template literals",
+      "cmd": "node <<'EOF'\nconst cp = require('child_process'); `${`${cp.execSync('sendmail a@b.hu')}`}`\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: conversion then a spec with a nested field",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{'x'!r:>{os.system('sendmail a@b.hu')}}\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: lambda in parentheses, then a '#' spec",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{(lambda q: q)(1):#x}\"); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: subscript with quotes, then a ' fill spec",
+      "cmd": "python3 - <<'EOF'\nimport os\nd = {'a': 1}\nprint(f\"{d['a']:'<3}\"); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: '!=' in a field is an operator, not a conversion",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{1!=2}\"); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a regex after return holding a quote",
+      "cmd": "node <<'EOF'\nfunction f(s) { return /'/.test(s) }\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a regex after typeof holding a quote",
+      "cmd": "node <<'EOF'\nconst r = typeof /'/ ; require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a division across a line end, then a string",
+      "cmd": "node <<'EOF'\nlet x = 6\nlet y = x / 2 / 'q'; require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a / after a postfix -- across a line end divides",
+      "cmd": "node <<'EOF'\nlet i = 1; i--\n/ 2; require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: control: a docstring holding the call is data",
+      "cmd": "python3 - <<'EOF'\n'''\nos.system('sendmail a@b.hu')\n'''\nprint(1)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX1127: control: an f-string with a '#' spec alone",
+      "cmd": "python3 - <<'EOF'\nprint(f\"{255:#x}\")\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX1127: control: a conversion and spec around a name",
+      "cmd": "python3 - <<'EOF'\nprint(f\"{'sendmail'!r:>20}\")\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX1127: control: a JS string holding the call text",
+      "cmd": "node <<'EOF'\nconst s = 'os.system(\"sendmail a@b.hu\")'\nconsole.log(s)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX1127: control: a JS regex naming the sender",
+      "cmd": "node <<'EOF'\nconst re = /sendmail/; console.log(re.test('x'))\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX1127: control: a template text naming the sender",
+      "cmd": "node <<'EOF'\nconsole.log(`a ${1 + 1} sendmail`)\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX1127: PINNED: a call that only sits in a Python comment is refused",
+      "cmd": "python3 - <<'EOF'\n# os.system('sendmail a@b.hu')\nprint(1)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: PINNED: a call that only sits in a JS // comment is refused",
+      "cmd": "node <<'EOF'\n// require('child_process').execSync('sendmail a@b.hu')\nconsole.log(1)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: PINNED: a call that only sits in a JS /* */ comment is refused",
+      "cmd": "node <<'EOF'\n/* require('child_process').execSync('sendmail a@b.hu') */\nconsole.log(1)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: '!=' in a field: the call after it is code",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"{1 != os.system('sendmail a@b.hu')}\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: a CR ends a Python comment: the ''' after it opens a string that closes, the call after is code",
+      "cmd": "python3 - <<'EOF'\n# c\r'''\nprint(1)\n'''\nimport os; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: U+2028 ends a JS // comment: the backtick after it opens a template that closes",
+      "cmd": "node <<'EOF'\n// c `\nlet x = 1\n`\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: U+2029 ends a JS // comment (same)",
+      "cmd": "node <<'EOF'\n// c `\nlet x = 1\n`\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: CR ends a JS // comment (same)",
+      "cmd": "node <<'EOF'\n// c\r`\nlet x = 1\n`\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a '/' after the property name 'in' divides (the second, all-division reading sees the call)",
+      "cmd": "node <<'EOF'\nlet o = {in: 4}; let v = o.in / 2; require('child_process').execSync('sendmail a@b.hu'); let w = 3 / 1\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX1127: JS: a regex after return holds a quote that would otherwise open a string over the call",
+      "cmd": "node <<'EOF'\nconst cp = require('child_process')\nconst t = (s) => { return /'/.test(s) }; cp.execSync('sendmail a@b.hu'); const u = '/'\nEOF",
+      "expected": true
     }
   ]
 }

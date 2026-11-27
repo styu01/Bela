@@ -865,8 +865,8 @@ function isStdinShellHead(h) {
 // 'python3 <<< "..."', 'node <<< "...execSync(...)"', 'echo ... | python3'): that text is code, judged by a code
 // rule, never by the command-name rule (a heredoc script that mentions a sender is data).
 // INTERPSTDIN2 (PROGI msg 6049, BELA msg 6050): the code rule is now whole-program and language-aware.
-// - A language scanner (blankPython / blankJs) blanks string literals and comments, keeping f-string {...} and
-//   template ${...} expressions as code. The old per-line regexes mis-read "'''" inside a plain string, a backtick
+// - A language scanner (blankPython / blankJs) blanks string literals (comments are skipped, see SCANFIX1127), keeping
+//   f-string {...} and template ${...} expressions as code. The old per-line regexes mis-read "'''" inside a plain string, a backtick
 //   in a Python comment, an f-string call and a JS comment, and hid real code that way.
 // - interpCodeSends: a mail call outside strings (CODE_SEND) sends; else a process starter or dynamic exec
 //   outside strings (INTERP_EXECISH) anywhere in the program, plus a sender name or mail call ANYWHERE in it
@@ -885,32 +885,68 @@ const isIdentChar = (c) => c !== undefined && /[A-Za-z0-9_$]/.test(c)
 // f-string / template expressions nest by recursion; past this depth the scanners throw and interpCodeSends counts
 // the program as a send (fail-closed, and the same verdict in both twins regardless of their stack sizes).
 const SCAN_NEST_MAX = 100
-// Python: returns the code with string-literal text and comments turned into spaces (newlines kept, same length).
+// SCANFIX1127 (PROGI msg 6118 (a) A-E, BELA msg 6120): the first scanners read some code differently from python 3.14 /
+// node 22, and a real call then looked like a comment, string or regex -- 10 sends production refused were allowed.
+// A) Comments are SKIPPED but NOT blanked: a quote inside a comment still opens nothing, but code in it stays visible,
+//    as production read it (a call that only sits in a comment is refused again; it had no measured benefit and the
+//    blanking was the whole comment-desync class: '{255:#x}', '# x<CR>call', '// x<U+2028>call').
+// B) Python f/t-string replacement field: at its top level a ':' or a '!' (not '!=') ends the expression; the
+//    conversion / format spec up to the closing '}' is string text ('{1:'>5}', '{255:#x}'), nested {...} in it is code.
+// C) Line ends: Python \n, \r (and \r\n); JS \n, \r, U+2028, U+2029 end a comment / one-line string / regex literal
+//    (U+2028/9 are allowed inside JS string literals, so they do not end those).
+// D) JS regex or division: the previous significant character is found across line ends ('4\n/ 2' divides), after a
+//    postfix ++ / -- a '/' divides, after return/typeof/... it starts a regex; and JS is read TWICE, with that rule and
+//    with every '/' a division -- a send seen in either reading counts, so one wrong guess cannot hide a call.
+// E) String prefixes: r b u f t in any case and order (t/T/tr/rt are python 3.14 template strings, fields like f).
+const PY_EOL = (c) => c === '\n' || c === '\r'
+const JS_EOL = (c) => c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029'
+// JS whitespace, spelled out (the same set as the JS \s class) so the python twin can mirror it exactly.
+const JS_WS = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/
+const JS_REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw',
+  'case', 'do', 'else', 'yield', 'await'])
+// Python: returns the code with string-literal text turned into spaces (newlines kept, same length). Comments are
+// skipped, not blanked (A).
 function blankPython(code) {
   const out = code.split('')
   const n = code.length
-  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' ' }
+  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n' && out[k] !== '\r') out[k] = ' ' }
   let nest = 0
-  // scan code from i; with a stop char, return at that char on bracket depth 0 (an f-string's closing '}')
-  function scan(i, stop) {
+  // scan code from i; with a stop char, return at that char on bracket depth 0 (a field's closing '}'); inside a
+  // replacement field (fexpr), also at a top-level ':' or '!' that starts the conversion / format spec (B).
+  function scan(i, stop, fexpr) {
     let depth = 0
     while (i < n) {
       const c = code[i]
-      if (c === '#') { let e = code.indexOf('\n', i); if (e < 0) e = n; blank(i, e); i = e; continue }
+      if (c === '#') { while (i < n && !PY_EOL(code[i])) i++; continue }
       if (c === "'" || c === '"') { i = str(i); continue }
       if (stop) {
         if (c === '(' || c === '[' || c === '{') depth++
         else if (c === ')' || c === ']' || c === '}') { if (depth === 0 && c === stop) return i; depth-- }
+        else if (fexpr && depth === 0 && (c === ':' || (c === '!' && code[i + 1] !== '='))) return i
       }
       i++
     }
     return n
   }
+  // one replacement field starting at k (just after its '{'): the expression is code, the spec after a top-level
+  // ':' / '!' is text except nested {...} fields. Returns the index of the closing '}' (or n).
+  function field(k) {
+    if (++nest > SCAN_NEST_MAX) throw new Error('nesting')
+    k = scan(k, '}', true)
+    let segStart = k
+    while (k < n && code[k] !== '}') {
+      if (code[k] === '{') { blank(segStart, k + 1); k = field(k + 1); segStart = k + 1; k++; continue }
+      k++
+    }
+    blank(segStart, k)
+    nest--
+    return k
+  }
   function str(i) {
     const q = code[i]
     let p = i
-    while (p > 0 && /[rRbBuUfF]/.test(code[p - 1]) && i - p < 2) p--
-    const isF = p < i && !isIdentChar(code[p - 1]) && /[fF]/.test(code.slice(p, i))
+    while (p > 0 && /[rRbBuUfFtT]/.test(code[p - 1]) && i - p < 2) p--
+    const isF = p < i && !isIdentChar(code[p - 1]) && /[fFtT]/.test(code.slice(p, i))
     const triple = code.startsWith(q + q + q, i)
     let k = i + (triple ? 3 : 1)
     let segStart = i
@@ -918,13 +954,11 @@ function blankPython(code) {
       const ch = code[k]
       if (ch === '\\') { k += 2; continue }
       if (triple ? code.startsWith(q + q + q, k) : ch === q) { k += triple ? 3 : 1; break }
-      if (!triple && ch === '\n') break
+      if (!triple && PY_EOL(ch)) break
       if (isF && ch === '{') {
         if (code[k + 1] === '{') { k += 2; continue }
         blank(segStart, k + 1)
-        if (++nest > SCAN_NEST_MAX) throw new Error('nesting')
-        k = scan(k + 1, '}')
-        nest--
+        k = field(k + 1)
         segStart = k
         k++
         continue
@@ -934,26 +968,41 @@ function blankPython(code) {
     blank(segStart, Math.min(k, n))
     return k
   }
-  scan(0, null)
+  scan(0, null, false)
   return out.join('')
 }
-// JavaScript: strings, template literal text (keeping ${...}), // and /* */ comments, and regex literals.
-function blankJs(code) {
+// JavaScript: strings, template literal text (keeping ${...}) and regex literals turned into spaces; comments skipped,
+// not blanked (A). regexOn=false reads every '/' as a division (the second reading, D).
+function blankJs(code, regexOn = true) {
   const out = code.split('')
   const n = code.length
-  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' ' }
+  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (!JS_EOL(out[k])) out[k] = ' ' }
   let nest = 0
-  const prevSig = (i) => { let p = i - 1; while (p >= 0 && (code[p] === ' ' || code[p] === '\t')) p--; return p < 0 ? '' : code[p] }
+  function regexStart(i) {
+    if (!regexOn) return false
+    let p = i - 1
+    while (p >= 0 && JS_WS.test(code[p])) p--
+    if (p < 0) return true
+    const c = code[p]
+    if ((c === '+' || c === '-') && code[p - 1] === c) return false
+    if ('(,=:[!&|?{};+-*%<>~^'.includes(c)) return true
+    if (isIdentChar(c)) {
+      let s = p
+      while (s > 0 && isIdentChar(code[s - 1])) s--
+      return JS_REGEX_AFTER_WORD.has(code.slice(s, p + 1))
+    }
+    return false
+  }
   function scan(i, stop) {
     let depth = 0
     while (i < n) {
       const c = code[i]
-      if (c === '/' && code[i + 1] === '/') { let e = code.indexOf('\n', i); if (e < 0) e = n; blank(i, e); i = e; continue }
-      if (c === '/' && code[i + 1] === '*') { let e = code.indexOf('*/', i + 2); e = e < 0 ? n : e + 2; blank(i, e); i = e; continue }
-      if (c === '/' && (prevSig(i) === '' || '\n(,=:[!&|?{};+-*%<>~^'.includes(prevSig(i)))) {
+      if (c === '/' && code[i + 1] === '/') { while (i < n && !JS_EOL(code[i])) i++; continue }
+      if (c === '/' && code[i + 1] === '*') { const e = code.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue }
+      if (c === '/' && regexStart(i)) {
         let k = i + 1
         let cls = false
-        while (k < n && code[k] !== '\n') {
+        while (k < n && !JS_EOL(code[k])) {
           if (code[k] === '\\') { k += 2; continue }
           if (code[k] === '[') cls = true
           else if (code[k] === ']') cls = false
@@ -966,7 +1015,7 @@ function blankJs(code) {
       }
       if (c === "'" || c === '"') {
         let k = i + 1
-        while (k < n && code[k] !== c && code[k] !== '\n') k += code[k] === '\\' ? 2 : 1
+        while (k < n && code[k] !== c && code[k] !== '\n' && code[k] !== '\r') k += code[k] === '\\' ? 2 : 1
         blank(i, k + 1)
         i = k + 1
         continue
@@ -1003,10 +1052,10 @@ function blankJs(code) {
   return out.join('')
 }
 function interpCodeSends(code, lang) {
-  let bare
-  try { bare = lang === 'js' ? blankJs(code) : blankPython(code) } catch { return true }
-  if (CODE_SEND.test(bare)) return true
-  return INTERP_EXECISH.test(bare) && (CODE_SENDER_LIT.test(code) || CODE_SEND.test(code))
+  let bares
+  try { bares = lang === 'js' ? [blankJs(code, true), blankJs(code, false)] : [blankPython(code)] } catch { return true }
+  return bares.some((bare) => CODE_SEND.test(bare) ||
+    (INTERP_EXECISH.test(bare) && (CODE_SENDER_LIT.test(code) || CODE_SEND.test(code))))
 }
 // A -c / -e program that executes what it reads from stdin makes stdin the program.
 const STDIN_EXEC = /\b(?:exec|eval|compile|runpy|Function|runInThisContext|runInNewContext)\b/
