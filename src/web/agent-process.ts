@@ -2742,13 +2742,21 @@ export async function sendPromptToSession(
     logger.info({ session }, 'sendPromptToSession: pane delivery in progress; recover-mode send skipped this round')
     return 'skipped-locked'
   }
+  const outcome = lockResult.value ?? 'sent'
   if (lockResult.failedOpen) {
-    // Fail-open: the wait budget elapsed against a stuck holder and we wrote
-    // without the lock. Delivery still happened; log loudly so a wedged holder
-    // is visible rather than silently degrading into re-interleaving.
-    logger.warn({ session }, 'sendPromptToSession: delivery lock wait budget elapsed; sent WITHOUT the per-pane lock (fail-open) -- a holder may be wedged')
+    // Fail-open: the wait budget elapsed against a stuck holder and we went on
+    // without the lock. Log loudly so a wedged holder is visible rather than
+    // silently degrading into re-interleaving. PROGI 6362 / BELA 6367: say what
+    // actually happened -- with 'aborted-stale' nothing was typed, and "sent
+    // WITHOUT the per-pane lock" would send whoever reads the log after a
+    // keystroke that never existed.
+    if (outcome === 'aborted-stale') {
+      logger.warn({ session }, 'sendPromptToSession: delivery lock wait budget elapsed (fail-open), but the caller no longer wanted the prompt: nothing typed -- a holder may be wedged')
+    } else {
+      logger.warn({ session }, 'sendPromptToSession: delivery lock wait budget elapsed; sent WITHOUT the per-pane lock (fail-open) -- a holder may be wedged')
+    }
   }
-  return lockResult.value ?? 'sent'
+  return outcome
 }
 
 // How long to wait between the two capture samples when the first one
