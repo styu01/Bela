@@ -32,6 +32,8 @@ vi.mock('../db.js', () => ({
   openInboundQuestionMessageId: vi.fn(() => null),
   hasBlockingKanbanCardForAssignee: vi.fn(() => false),
   createAgentMessage: vi.fn(),
+  GATE_ALERT_ORIGIN_NOTE: 'context-restart-gate persistent-block alert',
+  GATE_NOTICE_ORIGIN_NOTE: 'context-restart-gate pre-clear notice',
 }))
 vi.mock('../web/context-restart-transcript-archive.js', () => ({
   archiveTranscriptBeforeContextRestart: vi.fn(() => ({
@@ -323,5 +325,30 @@ describe('context-restart-gate wakeAfterClear switch (LOCAL)', () => {
     await checkAgent(name, nowMs + PRE_CLEAR_NOTICE_MS)
     expect(readGateRunState(name).lastClearAt).toBe(nowMs + PRE_CLEAR_NOTICE_MS)
     expect(readGateRunState(name).pendingWakeAt).toBeNull()
+  })
+})
+
+// upstream cbef8ef4 (GATESENDER922 / GATEDEADLOCK922): the persistent-block alert's envelope and wording escalation,
+// observable only from the live sweep.
+describe('context-restart-gate persistent-block alert envelope', () => {
+  it("is sent by 'system' with its own prefix and origin note, and escalates past 120 minutes", async () => {
+    const name = 'alert-env'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100, persistentBlockAlertMs: 60_000 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    vi.mocked(hasBlockingKanbanCardForAssignee).mockReturnValue(true)
+    const t0 = Date.now()
+    await checkAgent(name, t0)
+    await checkAgent(name, t0 + 2 * 60_000)
+    const calls = () => vi.mocked(createAgentMessage).mock.calls.filter((c) => String(c[2]).startsWith('[CONTEXT-RESTART-GATE-RIASZTAS]'))
+    expect(calls().length).toBe(1)
+    const [from, to, text, note] = calls()[0]
+    expect(from).toBe('system')
+    expect(to).toBe('testmain')
+    expect(text).toContain(`"${name}"`)
+    expect(text).not.toContain('FIGYELEM: ugyanez az ok')
+    expect(note).toBe('context-restart-gate persistent-block alert')
+    await checkAgent(name, t0 + 130 * 60_000)
+    expect(calls().length).toBe(2)
+    expect(String(calls()[1][2])).toContain('FIGYELEM: ugyanez az ok 130 perce valtozatlan')
   })
 })

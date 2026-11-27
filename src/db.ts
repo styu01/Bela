@@ -2646,7 +2646,7 @@ export function getPendingBacklogByAgent(): AgentBacklog[] {
 export function closeMessagesWithoutDelivery(ids: number[], reason: string): number {
   if (!ids.length) return 0
   const now = Math.floor(Date.now() / 1000)
-  const note = `closed-without-delivery: ${reason}`
+  const note = `${CLOSED_WITHOUT_DELIVERY_PREFIX}: ${reason}`
   const stmt = db.prepare(
     `UPDATE agent_messages SET status = 'delivered', delivered_at = ?, result = ?
       WHERE id = ? AND status = 'pending'`,
@@ -2863,29 +2863,66 @@ export interface DispatchedPendingStats {
  */
 export const COMPLETION_REPORT_PREFIX = '[Eredmény]'
 
+/**
+ * origin_note stamped on the restart gate's persistent-block alert (upstream cbef8ef4, GATESELFBLOCK922). Shared so
+ * the writer and the counter that must ignore it cannot drift apart.
+ */
+export const GATE_ALERT_ORIGIN_NOTE = 'context-restart-gate persistent-block alert'
+/**
+ * LOCAL: origin_note of the gate's ten-minute pre-clear notice (87aab983). It is written FROM the main agent TO the
+ * agent about to be cleared, so without this it sat in the main agent's own pending-outbound count for two hours --
+ * the GATESELFBLOCK922 shape again, on the main agent's gate. Excluded with the alert.
+ */
+export const GATE_NOTICE_ORIGIN_NOTE = 'context-restart-gate pre-clear notice'
+
+/**
+ * Prefix the `result` field carries when a row was closed WITHOUT ever being delivered -- written by the
+ * delivered_at backfill and by closeMessagesWithoutDelivery; the counter below skips such rows (upstream cbef8ef4).
+ */
+export const CLOSED_WITHOUT_DELIVERY_PREFIX = 'closed-without-delivery'
+
 export function getDispatchedPendingStats(
   fromAgent: string,
   nowMs: number,
   staleCutoffMs: number,
+  mainAgent: string = MAIN_AGENT_ID,
 ): DispatchedPendingStats {
   const cutoffEpoch = Math.floor((nowMs - staleCutoffMs) / 1000)
   // Bound parameter, not interpolation: the prefix contains no LIKE wildcards
   // today, but a future edit adding one would silently widen the exclusion.
   const ackPattern = `${COMPLETION_REPORT_PREFIX}%`
+  const deadPattern = `${CLOSED_WITHOUT_DELIVERY_PREFIX}%`
+  // Ported from upstream cbef8ef4 (#1539):
+  // - GATESELFBLOCK922: the gate's own persistent-block alert used to be written FROM the blocked agent and landed
+  //   in the very set it complains about (a self-feeding loop: a 2 h alert cadence against a 2 h cutoff held the
+  //   count at a permanent 1). It is excluded by its origin_note. Measured here before the port: 329 such alerts,
+  //   116 under a sub-agent's name, 295 left 'delivered'; "pending-outbound-messages (1 within 2h cutoff)" 50 times.
+  // - GATEREPORTDIR924: a row a SUB-agent sent to the MAIN agent is a report, not dispatched work: the answer
+  //   arrives as a new message a fresh sub-agent can act on. Main -> sub stays counted (the main agent carries the
+  //   thread), and a sub-agent's message to ANOTHER sub-agent stays counted too (the conservative side).
+  // - Rows closed without delivery can never come back to clear the block.
+  const reportsUpward = fromAgent !== mainAgent
+  const OUTSTANDING_WORK =
+    `from_agent = ? AND to_agent != from_agent
+       AND status IN ('pending','delivered')
+       AND content NOT LIKE ?
+       AND COALESCE(result, '') NOT LIKE ?
+       AND COALESCE(origin_note, '') NOT IN ('${GATE_ALERT_ORIGIN_NOTE}', '${GATE_NOTICE_ORIGIN_NOTE}')`
+    + (reportsUpward ? `
+       AND to_agent != ?` : '')
+  const bindings = reportsUpward
+    ? [fromAgent, ackPattern, deadPattern, mainAgent]
+    : [fromAgent, ackPattern, deadPattern]
   const liveRow = db.prepare(
     `SELECT COUNT(*) AS cnt FROM agent_messages
-       WHERE from_agent = ? AND to_agent != from_agent
-         AND status IN ('pending','delivered')
-         AND content NOT LIKE ?
+       WHERE ${OUTSTANDING_WORK}
          AND CAST(created_at AS INTEGER) > ?`,
-  ).get(fromAgent, ackPattern, cutoffEpoch) as { cnt: number }
+  ).get(...bindings, cutoffEpoch) as { cnt: number }
   const staleRow = db.prepare(
     `SELECT COUNT(*) AS cnt FROM agent_messages
-       WHERE from_agent = ? AND to_agent != from_agent
-         AND status IN ('pending','delivered')
-         AND content NOT LIKE ?
+       WHERE ${OUTSTANDING_WORK}
          AND CAST(created_at AS INTEGER) <= ?`,
-  ).get(fromAgent, ackPattern, cutoffEpoch) as { cnt: number }
+  ).get(...bindings, cutoffEpoch) as { cnt: number }
   return {
     count:    liveRow?.cnt ?? 0,
     hasStale: (staleRow?.cnt ?? 0) > 0,

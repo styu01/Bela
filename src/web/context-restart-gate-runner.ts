@@ -18,6 +18,8 @@ import {
   openInboundQuestionMessageId,
   hasBlockingKanbanCardForAssignee,
   createAgentMessage,
+  GATE_ALERT_ORIGIN_NOTE,
+  GATE_NOTICE_ORIGIN_NOTE,
 } from '../db.js'
 import { archiveTranscriptBeforeContextRestart } from './context-restart-transcript-archive.js'
 import {
@@ -479,11 +481,19 @@ function getLiveWorkChildArgs(session: string, mcpPatterns: string[]): string[] 
       if (age === null || isInfrastructureChild(age, claudeAge)) continue
       const args = getChildArgsStr(pid) ?? ''
       if (isMcpProcess(args, mcpPatterns)) continue
-      result.push(args || `PID ${pid}`)
+      // AGE IS PART OF THE EVIDENCE (upstream cbef8ef4, GATEDEADLOCK922): a Task-tool subagent and a server we
+      // started ourselves look identical in the args; how long it has been alive tells them apart.
+      result.push(`${args || `PID ${pid}`} (${Math.round(age / 60)}p)`)
     }
     return result
   } catch { return [] }
 }
+
+/**
+ * Minutes of an UNCHANGED block after which the alert stops describing a wait and starts describing a defect
+ * (upstream cbef8ef4, GATEDEADLOCK922). Longer than any plausible single turn.
+ */
+const NEVER_CLEARS_MIN = 120
 
 // ---- Gate check for one agent -----------------------------------------------
 
@@ -597,7 +607,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
             MAIN_AGENT_ID,
             name,
             `[CONTEXT-RESTART-GATE] ${Math.round(PRE_CLEAR_NOTICE_MS / 60_000)} percen belül automatikus context-clear várható. Ha van folyamatban levő munkád, írj magadnak rövid állapotjegyzetet a warm memóriába MOST. A clear csak akkor történik meg, ha addig is minden biztonsági kapufeltétel tiszta marad.`,
-            'context-restart-gate pre-clear notice',
+            GATE_NOTICE_ORIGIN_NOTE,
           )
           writeGateRunState(name, { ...effectiveState, preClearNoticeAt: nowMs })
           logger.info({ agent: name, waitMs: PRE_CLEAR_NOTICE_MS },
@@ -686,11 +696,21 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
               childInfo = ` Blokkolo gyerekfolyamatok: ${workArgs.slice(0, 5).join('; ')}`
             }
           }
+          // A block that cannot clear is a finding, not patience (upstream cbef8ef4, GATEDEADLOCK922): past
+          // NEVER_CLEARS_MIN of the same block the alert says so instead of repeating itself.
+          const stuckLong = typeof blockedSinceMin === 'number' && blockedSinceMin >= NEVER_CLEARS_MIN
+          const escalation = stuckLong
+            ? ` FIGYELEM: ugyanez az ok ${blockedSinceMin} perce valtozatlan, tehat ez a feltetel magatol valoszinuleg NEM fog megszunni. Ez lelet, nem varakozas: vagy a blokkolo dolgot kell lezarni, vagy a kaput kell ra felkesziteni.`
+            : ''
+          // Sender and prefix (upstream cbef8ef4, GATESENDER922): the alert used to be written in the WATCHED
+          // agent's name (measured here: 116 of 329 under a sub-agent's name), so a genuine system alert failed the
+          // fleet's from_agent='system' rule and counted as that agent's outbound work. The prefix differs from the
+          // pre-clear notice / wake prompt ('[CONTEXT-RESTART-GATE]'): read-this vs act-on-this.
           createAgentMessage(
-            name,
+            'system',
             MAIN_AGENT_ID,
-            `[CONTEXT-RESTART-GATE] A(z) "${name}" agens kapuja ${blockedSinceMin} perce folyamatosan blokkolt. Ok: ${decision.reason}.${childInfo} A(z) ${Math.round(cfg.thresholdTokens / 1000)}k tokenes kuszob ele ert, de a kapu nem enged -- ellenorizd hogy nincs-e elakadt munka.`,
-            'context-restart-gate persistent-block alert',
+            `[CONTEXT-RESTART-GATE-RIASZTAS] A(z) "${name}" agens kapuja ${blockedSinceMin} perce folyamatosan blokkolt. Ok: ${decision.reason}.${childInfo} A(z) ${Math.round(cfg.thresholdTokens / 1000)}k tokenes kuszob ele ert, de a kapu nem enged -- ellenorizd hogy nincs-e elakadt munka.${escalation} (Tajekoztatas, nem muveletkeres.)`,
+            GATE_ALERT_ORIGIN_NOTE,
           )
           logger.warn({ agent: name, reason: decision.reason, blockedSinceMin },
             'context-restart-gate: persistent-block alert sent')

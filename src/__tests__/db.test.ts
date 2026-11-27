@@ -29,6 +29,9 @@ import {
   markMessageDone,
   markMessageFailed,
   COMPLETION_REPORT_PREFIX,
+  GATE_ALERT_ORIGIN_NOTE,
+  GATE_NOTICE_ORIGIN_NOTE,
+  closeMessagesWithoutDelivery,
 } from '../db.js'
 import { DB_FILENAME } from '../config.js'
 
@@ -559,5 +562,38 @@ describe('getRepliedButUnclosedInboundMessages -- closure-debt nudge for the exe
     expect(getRepliedButUnclosedInboundMessages('cd-exec8', 0)).toHaveLength(5)
     expect(getRepliedButUnclosedInboundMessages('cd-exec8', -5)).toHaveLength(5)
     expect(getRepliedButUnclosedInboundMessages('cd-exec8', NaN)).toHaveLength(5)
+  })
+})
+
+// upstream cbef8ef4 (#1539) + LOCAL pre-clear notice: what the restart gate's pending-outbound count leaves out.
+describe('getDispatchedPendingStats -- the gate does not count reports upward, its own messages, or dead rows', () => {
+  const NOW = Date.now()
+  const CUTOFF = 2 * 60 * 60 * 1000
+  const MAIN = 'gs-main'
+
+  it("a sub-agent's report to the main agent is not dispatched work; to another sub-agent it still is", () => {
+    createAgentMessage('gs-sub', MAIN, 'KESZ: a meres megvan')
+    expect(getDispatchedPendingStats('gs-sub', NOW, CUTOFF, MAIN).count).toBe(0)
+    createAgentMessage('gs-sub', 'gs-other', 'nezd at ezt')
+    expect(getDispatchedPendingStats('gs-sub', NOW, CUTOFF, MAIN).count).toBe(1)
+  })
+
+  it("the main agent's message to a sub-agent stays counted (it carries the thread)", () => {
+    createAgentMessage(MAIN, 'gs-sub2', 'UJ FELADAT: renderelj le')
+    expect(getDispatchedPendingStats(MAIN, NOW, CUTOFF, MAIN).count).toBe(1)
+  })
+
+  it("the gate's own alert and pre-clear notice are not counted (the self-feeding loop)", () => {
+    createAgentMessage('gs-sub3', 'gs-sub4', '[CONTEXT-RESTART-GATE-RIASZTAS] ...', GATE_ALERT_ORIGIN_NOTE)
+    expect(getDispatchedPendingStats('gs-sub3', NOW, CUTOFF, MAIN).count).toBe(0)
+    createAgentMessage('gs-main2', 'gs-sub5', '[CONTEXT-RESTART-GATE] 10 percen belul ...', GATE_NOTICE_ORIGIN_NOTE)
+    expect(getDispatchedPendingStats('gs-main2', NOW, CUTOFF, 'gs-main2').count).toBe(0)
+  })
+
+  it('a row closed without delivery can never clear a block, so it is not counted', () => {
+    const m = createAgentMessage('gs-main3', 'gs-sub6', 'feladat') as unknown as { id: number }
+    expect(getDispatchedPendingStats('gs-main3', NOW, CUTOFF, 'gs-main3').count).toBe(1)
+    closeMessagesWithoutDelivery([m.id], 'test')
+    expect(getDispatchedPendingStats('gs-main3', NOW, CUTOFF, 'gs-main3').count).toBe(0)
   })
 })
