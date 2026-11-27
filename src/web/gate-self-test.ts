@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync } from 'node:fs'
 import { join, dirname, relative, isAbsolute, resolve, sep } from 'node:path'
 import { loadavg } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, WEB_PORT } from '../config.js'
@@ -223,6 +223,40 @@ export function detectGitAnchor(root: string = PROJECT_ROOT, git: GitIo = REAL_G
   return null
 }
 
+// PROGI 6332 (C): a symlink on the wired path. The verdict was taken for the symlink's TARGET (realpath), so
+// the wired gate replaced by a symlink to an already committed pass-all file of the same repo (C1), or to a
+// forged repo / a loose file outside the checkout (C2), passed or was skipped (git status shows "typechange",
+// the self-test did not). Under the anchor the WIRED (logical) path is what counts: no component below the
+// checkout root may be a symlink (none is in the tracked tree today), for the gate and every local module it
+// loads. Symlinks above the checkout root (a symlinked home, say) are not the checkout's business.
+/** The deepest ancestor of `p` (p included) whose real path is `anchor`, or null. */
+function anchorBase(anchor: string, p: string): string | null {
+  let a = resolve(p)
+  for (;;) {
+    if (canonical(a) === anchor) return a
+    const up = dirname(a)
+    if (up === a) return null
+    a = up
+  }
+}
+/** The first path component below `base` on the way to `p` that is a symlink, with its target; else null. */
+export function symlinkBelow(base: string, p: string): { component: string; target: string } | null {
+  let cur = base
+  for (const part of relative(base, resolve(p)).split(sep).filter(Boolean)) {
+    cur = join(cur, part)
+    try {
+      if (lstatSync(cur).isSymbolicLink()) {
+        let target = '?'
+        try { target = readlinkSync(cur) } catch { /* keep ? */ }
+        return { component: relative(base, cur), target }
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
 /** null: not verifiable and not expected to be (not in a git checkout, and not under `anchor`). Otherwise ok,
  *  or the files that are not HEAD's content, or (under `anchor`) why it could not be verified there. */
 export function checkGateIntegrity(
@@ -232,8 +266,19 @@ export function checkGateIntegrity(
   exists: (path: string) => boolean = existsSync,
   anchor: string | null = null,
 ): IntegrityVerdict | null {
+  const base = anchor != null ? anchorBase(anchor, script) : null
+  if (anchor != null && base != null) {
+    const link = symlinkBelow(base, script)
+    if (link) {
+      return {
+        ok: false,
+        detail: `a kapu tartalma nem a verziokezelt: ${relative(base, resolve(script))} (szimlink a bekotott utvonalon: ${link.component} -> ${link.target}) (repo: ${anchor}). Nezd meg: ls -la ${join(anchor, link.component)}; ha nem szandekos: git -C ${anchor} restore --source=HEAD ${link.component}`,
+      }
+    }
+  }
   let real = script
   try { real = realpathSync(script) } catch { /* checked by the caller: it exists */ }
+  // (A base without a symlink below it means real = anchor/<rel>, so this covers the wired path too.)
   const underAnchor = anchor != null && isInside(anchor, real)
   const topRaw = git.run(dirname(real), ['rev-parse', '--show-toplevel'])
   if (!topRaw) {
@@ -254,6 +299,11 @@ export function checkGateIntegrity(
   }
   const bad: string[] = []
   for (const f of gateScriptClosure(real, read, exists)) {
+    // PROGI 6332 (C): a local module swapped for a symlink is judged by its wired path too.
+    if (anchor != null && isInside(anchor, f)) {
+      const link = symlinkBelow(anchor, f)
+      if (link) { bad.push(`${link.component} (szimlink: -> ${link.target})`); continue }
+    }
     let fr = f
     try { fr = realpathSync(f) } catch { /* keep */ }
     const rel = relative(top, fr)
