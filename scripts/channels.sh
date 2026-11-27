@@ -903,7 +903,8 @@ $TMUX set-option -t "=$SESSION:" remain-on-exit on 2>/dev/null || true
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin
 # soha nem toltodne be. Tobb fajta dialog elofordulhat:
 #  - "Bypass Permissions mode" (--dangerously-skip-permissions confirmation,
-#    valasz: 2 Enter = "Yes, I accept")
+#    valasz: lasd _answer_accept_dialog, a "Yes, I accept" sor a pane-bol olvasva; a regi
+#    "2 Enter" 2.1.326-on a "No, exit"-et valasztja)
 #  - a folder-trust dialogus: a regi kerdes ("Do you trust the files in this folder?") es a
 #    2.1.246+ panel ("Quick safety check: ...", opcio: "Yes, I trust this folder"); a horgony az
 #    opcio-szoveg. Valasz: lasd _answer_accept_dialog (pane-bol olvasva, nem szammal).
@@ -919,20 +920,25 @@ $TMUX set-option -t "=$SESSION:" remain-on-exit on 2>/dev/null || true
 # and project dir, 2026-11-27): on both the folder-trust and the bypass-permissions panel the
 # focused first row is "No, exit"; Enter, Tab+Enter, "1"+Enter and "2"+Enter all EXIT the session,
 # Down+Enter and Up+Enter accept, "y" does nothing. So the old "2" Enter / "1" Enter chose the exit.
-# Here: if the cursor row (the one with the glyph) is the "Yes" row, Enter; if the "Yes" row is the
-# next line, Down, then the pane is READ AGAIN and Enter goes only if the cursor now sits on "Yes"
+# Here: if the cursor row (the LAST one with the glyph) is the "Yes" row, Enter; if the "Yes" row is
+# the next line, Down, then the pane is READ AGAIN and Enter goes only if the cursor now sits on "Yes"
 # (LOCAL: upstream pressed Enter blind after the Down). Any other shape: no key at all -- on these
 # panels neither Enter nor Escape is neutral. Arg: the pane capture.
+# The LAST glyph row, and the first "Yes" row AT OR BELOW it (BELA 6219, PROGI 6218): PROGI measured
+# that after a SIGSTOP/SIGCONT the old frame stays on screen above the redrawn one, so the pane holds
+# two "❯ No, exit" rows; the first-glyph rule read that as an unknown shape and left the dialog
+# unanswered. ">=" (not ">") keeps the cursor-already-on-Yes case. The re-read after Down takes the
+# last glyph row too.
 _answer_accept_dialog() {
-  _cur=$(printf '%s\n' "$1" | grep -n "❯" | head -1 | cut -d: -f1)
-  _yes=$(printf '%s\n' "$1" | grep -n "Yes" | grep -v "No, exit" | head -1 | cut -d: -f1)
+  _cur=$(printf '%s\n' "$1" | grep -n "❯" | tail -n 1 | cut -d: -f1)
+  _yes=$(printf '%s\n' "$1" | awk -v c="${_cur:-0}" 'NR>=c && /Yes/ && !/No, exit/ {print NR; exit}')
   if [ -n "$_cur" ] && [ -n "$_yes" ] && [ "$_yes" = "$_cur" ]; then
     $TMUX send-keys -t "=$SESSION:" Enter
   elif [ -n "$_cur" ] && [ -n "$_yes" ] && [ "$_yes" = "$((_cur + 1))" ]; then
     $TMUX send-keys -t "=$SESSION:" Down
     sleep 1
     _again=$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)
-    if printf '%s\n' "$_again" | grep "❯" | head -1 | grep -q "Yes"; then
+    if printf '%s\n' "$_again" | grep "❯" | tail -n 1 | grep -q "Yes"; then
       $TMUX send-keys -t "=$SESSION:" Enter
     else
       echo "$(date '+%F %T') channels.sh: startup dialog -- the cursor did not land on Yes after Down, NO Enter (TRUSTGATE901)" >&2

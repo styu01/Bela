@@ -39,6 +39,11 @@ BYPASS_NO=$'Bypass Permissions mode\n\n❯ No, exit\n  Yes, I accept\n\nEnter to
 BYPASS_YES=$'Bypass Permissions mode\n\n  No, exit\n❯ Yes, I accept\n\nEnter to confirm · Esc to exit'
 FAR=$'❯ No, exit\n  Maybe later\n  Yes, I accept'
 NOCURSOR=$'Bypass Permissions mode\n  No, exit\n  Yes, I accept'
+# PROGI 6218: after SIGSTOP/SIGCONT the old frame stays above the redrawn one -> two glyph rows.
+STALE_NO=$'│ ❯ No, exit                           │\n│   Yes, I trust this folder           │\n╰──────────────────────────────────────╯\n│ Quick safety check: Is this a project│\n│ ❯ No, exit                           │\n│   Yes, I trust this folder           │\n╰──────────────────────────────────────╯'
+STALE_YES_AFTER=$'│ ❯ No, exit                           │\n│   Yes, I trust this folder           │\n╰──────────────────────────────────────╯\n│ Quick safety check: Is this a project│\n│   No, exit                           │\n│ ❯ Yes, I trust this folder           │\n╰──────────────────────────────────────╯'
+# stale frame shows the cursor on Yes, the live (lower) one on No: must NOT Enter straight away
+STALE_ON_YES_LIVE_NO=$'│   No, exit                           │\n│ ❯ Yes, I trust this folder           │\n╰──────────────────────────────────────╯\n│ ❯ No, exit                           │\n│   Yes, I trust this folder           │\n╰──────────────────────────────────────╯'
 
 # answer <pane> <capture after the Down>
 answer() {
@@ -67,11 +72,20 @@ answer "$NOCURSOR" ""
 eq "no cursor glyph: no key"                              "" "$(keys)"
 case "$(cat "$FAKE_DIR/err")" in *"unknown shape -- no key sent"*) pass "...and it is logged" ;; *) fail "...logged" "unknown shape" "$(cat "$FAKE_DIR/err")" ;; esac
 eq "never a number key"                                   "0" "$(grep -c "^$KEYS_WORD.* [12] Enter" "$FAKE_LOG")"
+answer "$STALE_NO" "$STALE_YES_AFTER"
+eq "6219 two glyph rows (stale frame above): last one counts, Down, re-read, Enter" "Down Enter" "$(keys)"
+answer "$STALE_NO" "$STALE_NO"
+eq "6219 two glyph rows, the Down did not land on the live row: NO Enter" "Down" "$(keys)"
+answer "$STALE_ON_YES_LIVE_NO" "$STALE_YES_AFTER"
+eq "6219 stale cursor on Yes, live cursor on No: Down first, not a blind Enter" "Down Enter" "$(keys)"
+answer "$STALE_YES_AFTER" ""
+eq "6219 live cursor already on Yes under a stale No frame: Enter only" "Enter" "$(keys)"
 
 echo "channels.sh guard wiring (read, never run)"
 guard="$(sed -n '/^while \[ "\$SECONDS" -lt "\$_boot_guard_deadline" \]; do$/,/^done$/p' "$CHANNELS")"
 eq "the bypass branch answers from the pane" "1" "$(printf '%s\n' "$guard" | sed -n '/"Bypass Permissions mode"/,/;;/p' | grep -c '_answer_accept_dialog "\$pane"')"
 eq "the trust branch answers from the pane"  "1" "$(printf '%s\n' "$guard" | sed -n '/"Do you trust the files in this folder?"/,/;;/p' | grep -c '_answer_accept_dialog "\$pane"')"
+eq "the 905-906 comment no longer says '2 Enter = Yes, I accept'" "0" "$(grep -c '2 Enter = "Yes, I accept"' "$CHANNELS")"
 eq "the trust branch also matches the 2.1.246+ option text" "1" "$(printf '%s\n' "$guard" | grep -c '\*"Do you trust the files in this folder?"\*|\*"Yes, I trust this folder"\*)')"
 eq "no number answer is left in the guard"   "0" "$(printf '%s\n' "$guard" | grep -cE "$KEYS_WORD"' -t "=\$SESSION:" "[12]" Enter')"
 fn_at="$(grep -n '^_answer_accept_dialog() {$' "$CHANNELS" | cut -d: -f1)"
