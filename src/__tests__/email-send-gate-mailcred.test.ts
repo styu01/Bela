@@ -8,6 +8,7 @@ import { gateDecision, runsMailerScript, touchesMailCredential, buildCredentialM
 
 const KEY = 'gmail_kiss_i_god_app_pw'
 const KEY2 = 'info@woowebsite.eu jelszó'
+const BS = String.fromCharCode(92) // a backslash, built: no editor or tool turns an escape into its character
 const bash = (command: string) => gateDecision('Bash', { command })
 
 const RUNS: Array<[string, string]> = [
@@ -57,6 +58,18 @@ const CREDENTIAL: Array<[string, string]> = [
   ['the Gmail id with quote breaks inside a word', `node vault-resolve.mjs <<< "gm"'ail'_kiss_i_god_app_pw`],
   ['the Gmail id, one letter as \\x escape', String.raw`node vault-resolve.mjs <<< $'gmail_kiss_i_\x67od_app_pw'`],
   ['the Gmail id url-encoded underscores', 'curl -s "$U/api/v?k=gmail%5Fkiss%5Fi%5Fgod%5Fapp%5Fpw"'],
+  // PROGI 6376 (B) / BELA 6377: the five spellings that still passed (each prints the real id); backslashes built
+  ['a shell line continuation inside the word', `echo info@woo${BS}\nwebsite.eu${BS} jelszó`],
+  ["an empty ANSI-C string inside the word ($'')", `node vault-resolve.mjs <<< info@woo$''website.eu${BS} jelszó`],
+  ['an empty locale string inside the word ($"")', `node vault-resolve.mjs <<< info@woo$""website.eu${BS} jelszó`],
+  ["the Gmail id with an empty $'' inside", `node vault-resolve.mjs <<< gmail_kiss_i$''_god_app_pw`],
+  ['python adjacent literals with a space', `python3 -c "k = 'info@woo' 'website.eu jelszó'"`],
+  ['python adjacent literals, the Gmail id', `python3 -c "k = 'gmail_kiss' '_i_god_app_pw'"`],
+  ['a four-digit octal (printf %b)', `printf '%b' 'info${BS}0100woowebsite.eu jelsz${BS}0303${BS}0263'`],
+  ['JS backslash-u{40}', `node -e "console.log('info${BS}u{40}woowebsite.eu jelszó')"`],
+  ['Python backslash-U00000040', `python3 -c "print('info${BS}U00000040woowebsite.eu jelszó')"`],
+  ['Python backslash-N{COMMERCIAL AT}', `python3 -c "print('info${BS}N{COMMERCIAL AT}woowebsite.eu jelszó')"`],
+  ['Python backslash-N{SPACE} for the space', `python3 -c "print('info@woowebsite.eu${BS}N{SPACE}jelszó')"`],
 ]
 const ALLOWED: Array<[string, string]> = [
   ['backticked names in a quoted heredoc body (markdown)', "cat > DREAM.md <<'EOF'\nrun `send_batch_daily.py 40` daily\nEOF"],
@@ -79,6 +92,10 @@ const ALLOWED: Array<[string, string]> = [
   ['the Gmail words apart', 'echo gmail kiss i god app pw'],
   ['a different Gmail key', 'echo gmail_kiss_i_god_app_token'],
   ['escapes and quotes, but not the id', String.raw`printf 'info\x40example.com jelsz\n'`],
+  // PROGI 6376: the new joins must not glue ordinary text into the id
+  ['python adjacent literals of other text', `python3 -c "k = 'info@woo' 'other.eu'"`],
+  ["an empty $'' in ordinary text", `echo foo$''bar info@woowebsite.eu`],
+  ['a line continuation in ordinary text', `echo info@woowebsite.eu ${BS}\n  && grep -n jelszo notes.txt`],
 ]
 
 describe('MAILCRED1127: running a configured mailer script is refused for a sub-agent', () => {
@@ -102,6 +119,23 @@ describe('MAILCRED1127: touching the mail credential is refused, with its own me
   it('the message routes the mail to the main agent', () => {
     expect(buildCredentialMsg('BELA')).toContain('BELA kuld')
   })
+})
+
+describe('MAILCRED spellings: the matcher stays linear on hostile input (PROGI 6376)', () => {
+  // An unbounded name in the N{...} form scanned to the end of the command at every position: 1.1 s on 96k.
+  const cases: Array<[string, string]> = [
+    ['a long unclosed N{', ('i' + BS + 'N{' + 'A'.repeat(20)).repeat(4000)],
+    ['quote-space-quote soup', "' '".repeat(40000)],
+    ['backslash-newline soup', (BS + '\n').repeat(50000)],
+    ["$'' soup", "$''".repeat(33000)],
+  ]
+  for (const [name, input] of cases) {
+    it(name, () => {
+      const t0 = performance.now()
+      expect(touchesMailCredential(input)).toBe(false)
+      expect(performance.now() - t0).toBeLessThan(250)
+    })
+  }
 })
 
 describe('MAILCRED1127: reading the scripts or mentioning the route stays allowed', () => {

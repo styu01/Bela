@@ -1380,20 +1380,28 @@ const MAILER_SCRIPT_RX = /(?:send-gmail|send_outreach|send_batch_daily)\.py(?![\
 // or Python escape for any character ($'..\x20..', '\x40' for the @), on the Gmail id too. Each id is now matched
 // character by character: every character in its plain, URL-encoded (%HH), \xHH, \u00HH or octal \OOO spelling, with
 // any run of quotes and backslashes between two characters (a quote break, or a shell backslash before an ordinary
-// character, which the shell drops); the space also as an escaped space, \x20,  , \040, a tab, \t or %09. A run
-// of only quotes and backslashes between the id's own characters does not occur in ordinary commands (measured on the
-// real command corpus: 0 new matches). Stated limit unchanged: a name assembled at run time ('a' + 'b'), read from a
-// file, or found through vault.js listSecrets() is not seen (see the header).
-const MAIL_ID_GAP = String.raw`['"\\]*`
-const MAIL_ID_SPACE = String.raw`(?: |%20|\+|\\ |\\x20|\\u0020|\\040|\t|\\t|%09)`
+// character, which the shell drops); the space also as an escaped space, \x20, backslash-u0020, \040, a tab, \t or
+// %09. A run of only quotes and backslashes between the id's own characters does not occur in ordinary commands
+// (measured on the real command corpus: 0 new matches). Stated limit unchanged: a name assembled at run time
+// ('a' + 'b'), read from a file, or found through vault.js listSecrets() is not seen (see the header).
+// PROGI msg 6376 (B), BELA msg 6377: five more syntactic spellings passed, each printing the real id: a shell line
+// continuation inside the word (backslash + newline), an empty ANSI-C / locale string inside it ($'' / $""), Python
+// adjacent literals WITH whitespace ('info@woo' 'website...'), a four-digit octal (\0100, printf %b / echo -e), and
+// the escapes backslash-u{HEX} (JS), \U0000HHHH and \N{NAME} (Python). The gap now takes those joins, the character
+// those forms. Diminishing returns, said plainly: the real control is narrowing the vault value route.
+// (A \N{...} name is bounded, letters, digits, space and hyphen, at most 64: an unbounded [^}]* scanned to the end
+// of the command at every position, quadratic on a long unclosed '\N{'; measured 1.1 s on 96k characters.)
+const MAIL_ID_GAP = String.raw`(?:['"\\]|\$''|\$""|\\\n|['"]\s+['"])*`
+const MAIL_ID_SPACE = String.raw`(?: |%20|\+|\\ |\\x20|\\u0020|\\u\{0*20\}|\\U00000020|\\040|\\0040|\t|\\t|%09|\\N\{[A-Za-z0-9 -]{1,64}\})`
 function mailIdChar(c) {
   const code = c.codePointAt(0)
   const hex = code.toString(16).padStart(2, '0')
+  const oct = code.toString(8).padStart(3, '0')
   const lit = c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return String.raw`(?:${lit}|%${hex}|\\x${hex}|\\u00${hex}|\\${code.toString(8).padStart(3, '0')})`
+  return String.raw`(?:${lit}|%${hex}|\\x${hex}|\\u00${hex}|\\u\{0*${code.toString(16)}\}|\\U0000${code.toString(16).padStart(4, '0')}|\\${oct}|\\0${oct}|\\N\{[A-Za-z0-9 -]{1,64}\})`
 }
 const mailIdSpelling = (id) => [...id].map((c) => (c === ' ' ? MAIL_ID_SPACE : mailIdChar(c))).join(MAIL_ID_GAP)
-// The second id stops at "jelsz": the accented o after it may be written in any way (ó, %C3%B3, \xc3\xb3).
+// The second id stops at "jelsz": the accented o after it may be written in any way (backslash-u00f3, %C3%B3, \xc3\xb3).
 const MAIL_CREDENTIAL_IDS_RX = new RegExp(['gmail_kiss_i_god_app_pw', 'info@woowebsite.eu jelsz'].map(mailIdSpelling).join('|'), 'i')
 const MAIL_CREDENTIAL_RX = new RegExp(MAIL_CREDENTIAL_IDS_RX.source +
   /|(?:https?:\/\/|localhost|127\.0\.0\.1|\[::1\]|:\d{2,5})[^\s'"`]*\/api\/vault\/|\/api\/vault\/[A-Za-z0-9_%$.@{-]/.source, 'i')
