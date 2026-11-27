@@ -136,7 +136,7 @@ The pair that closes it:
 
 | Hook | Event | Fires on | Does |
 | --- | --- | --- | --- |
-| `scripts/hooks/clear-capture.py` | `SessionEnd` | `reason == "clear"` | Extracts the owner's last prompts + the agent's last reply from the session transcript and writes `store/agent-clearstate/<agent>.json` |
+| `scripts/hooks/clear-capture.py` | `SessionEnd` | `reason == "clear"` | Extracts the last incoming messages (each with its provenance) + the agent's last reply from the session transcript and writes `store/agent-clearstate/<agent>.json`; an empty thread deletes the older record |
 | `scripts/hooks/clear-replay.py` | `SessionStart` | `source == "clear"` | Injects that record as `additionalContext`, then deletes it (single replay) |
 
 Notes that matter when touching this:
@@ -145,12 +145,29 @@ Notes that matter when touching this:
   on `reason` itself, so the wiring stays correct regardless of what the harness
   matches `SessionEnd` groups against. The reasons the harness emits are
   `clear`, `resume`, `logout`, `prompt_input_exit`, `other`.
-- **Agent resolution is stricter than the ledger's.** The main agent's hooks live
-  in the user-global `~/.claude/settings.json`, so they fire for the owner's own
-  Claude Code sessions in unrelated repositories too. `clearstate_lib.agent_id_from_cwd()`
-  returns `None` for a cwd outside the install instead of falling back to the
-  main agent, so an unrelated `/clear` elsewhere on the machine cannot write a
-  record the real main agent then reads back as its own.
+- **Sub-agents only.** The main agent is left out on purpose: it has the ledger
+  and task-state replays, and its settings file is the user-global
+  `~/.claude/settings.json` (which also fires for the owner's sessions in other
+  repositories, and is the seed of the sub-agents' `.claude-config`).
+  `ensureAgentHooks()` strips both hooks from it, and the library refuses the
+  install root as well.
+- **Agent resolution is exact.** `clearstate_lib.agent_id_from_cwd()` accepts
+  only a cwd that IS `<install>/agents/<id>` (not a subdirectory a `cd` drifted
+  into, not `agents/<main agent>`), and, when the payload carries a
+  `transcript_path`, only a transcript in that root's project directory (the
+  directory Claude Code names after the cwd the session started in). Anything
+  else writes and reads nothing.
+- **The replay is DATA with provenance, never "the owner's requests".** Requests
+  reach a sub-agent wrapped (`TRUSTED_PEER_PREAMBLE` / `UNTRUSTED_PREAMBLE` +
+  tag, flattened to one line by `sendPromptToSession`). The capture unwraps only
+  the exact wrapper structure that starts the typed prompt and closes it (the
+  header naming the same agent as the tag), and NEVER a channel message: a
+  `<trusted-peer>` typed into a chat stays chat text. Every carried line is
+  labelled (team-mate / external-federated / channel + sender / direct prompt,
+  sender unverified), the block says it is a quotation and not instructions, and
+  `<` `>` inside quoted text are replaced so nothing in it can open or close a
+  frame. Plumbing (gate / guard / inbox nudges, task notifications, scheduled
+  task notices, the harness's interrupt marker) is not carried.
 - **The injected block is deliberately non-directive.** A `/clear` can be a
   deliberate fresh start as easily as a gate-driven restart, and the hook cannot
   tell them apart. The block states what the previous thread was; the next

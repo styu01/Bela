@@ -36,14 +36,18 @@ def main():
     if (payload.get("reason") or "") != "clear":
         sys.exit(0)
 
-    agent = clearstate_lib.agent_id_from_cwd(payload.get("cwd"))
-    if not agent:
-        sys.exit(0)  # not one of our agents (the main hooks are user-global)
-
     transcript = payload.get("transcript_path") or ""
+    # Exact agent root, and the transcript must belong to that root's project dir (PROGI 6196).
+    agent = clearstate_lib.agent_id_from_cwd(payload.get("cwd"), transcript or None)
+    if not agent:
+        sys.exit(0)  # not one of our agents, or a drifted cwd
+
     turns = clearstate_lib.extract_turns(transcript)
     if not turns["prompts"] and not turns["lastReply"]:
-        sys.exit(0)  # nothing worth carrying across
+        # Nothing worth carrying across -- and an OLDER record must not survive to be replayed later
+        # as "the thread just cleared" (PROGI review 6196, HIBA 4).
+        clearstate_lib.drop_record(agent)
+        sys.exit(0)
 
     try:
         clearstate_lib.write_record(agent, transcript, turns)

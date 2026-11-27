@@ -11,7 +11,7 @@
 // matcher migration that carries a widened matcher to the existing fleet.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -25,6 +25,9 @@ const REPLAY = join(ROOT, 'scripts', 'hooks', 'clear-replay.py')
 // The hooks resolve the agent id from cwd relative to their own install dir,
 // so the payload cwd must sit under THIS checkout.
 const AGENT_CWD = join(ROOT, 'agents', 'tester')
+// The transcript must sit in the project dir Claude Code names after the agent root (the hooks refuse a
+// transcript of another root: PROGI review 6196, drifted-cwd risk).
+const PROJECT_DIR_NAME = AGENT_CWD.replace(/[^a-zA-Z0-9-]/g, '-')
 
 let store: string
 let transcript: string
@@ -50,7 +53,8 @@ const AGENT_TURN = (text: string) => ({ type: 'assistant', message: { content: [
 
 beforeEach(() => {
   store = mkdtempSync(join(tmpdir(), 'clearstate-'))
-  transcript = join(store, 'session.jsonl')
+  mkdirSync(join(store, 'projects', PROJECT_DIR_NAME), { recursive: true })
+  transcript = join(store, 'projects', PROJECT_DIR_NAME, 'session.jsonl')
   writeFileSync(transcript, jsonl([
     // Harness noise: an injected reminder is not something the owner typed.
     { type: 'user', isMeta: true, message: { content: '<system-reminder>zaj</system-reminder>' } },
@@ -78,16 +82,20 @@ describe('clear-capture hook (SessionEnd)', () => {
   it('saves the owner prompts and the last reply of a cleared thread', () => {
     capture()
     const r = record()
-    expect(r?.prompts).toEqual(['Javitsd meg a kanban szurot', 'A tesztet is ird meg hozza'])
+    // Each carried request keeps its provenance; a bare typed prompt is a 'prompt' with no source.
+    expect(r?.prompts).toEqual([
+      { kind: 'prompt', source: '', text: 'Javitsd meg a kanban szurot' },
+      { kind: 'prompt', source: '', text: 'A tesztet is ird meg hozza' },
+    ])
     expect(r?.lastReply).toBe('Kesz a javitas, jon a teszt.')
     expect(r?.transcriptPath).toBe(transcript)
   })
 
   it('skips harness noise: meta turns and tool_result turns are not prompts', () => {
     capture()
-    const prompts = (record()?.prompts ?? []) as string[]
-    expect(prompts.join(' ')).not.toContain('system-reminder')
-    expect(prompts.join(' ')).not.toContain('kimenet')
+    const prompts = JSON.stringify(record()?.prompts ?? [])
+    expect(prompts).not.toContain('system-reminder')
+    expect(prompts).not.toContain('kimenet')
   })
 
   it('writes nothing for a SessionEnd that is not a /clear', () => {
@@ -101,7 +109,7 @@ describe('clear-capture hook (SessionEnd)', () => {
   })
 
   it('survives an unreadable transcript without writing a record', () => {
-    capture({ transcript_path: join(store, 'does-not-exist.jsonl') })
+    capture({ transcript_path: join(store, 'projects', PROJECT_DIR_NAME, 'does-not-exist.jsonl') })
     expect(record()).toBeNull()
   })
 })

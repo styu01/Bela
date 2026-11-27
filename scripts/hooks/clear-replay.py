@@ -32,7 +32,7 @@ def main():
     if (payload.get("source") or "") != "clear":
         sys.exit(0)
 
-    agent = clearstate_lib.agent_id_from_cwd(payload.get("cwd"))
+    agent = clearstate_lib.agent_id_from_cwd(payload.get("cwd"), payload.get("transcript_path") or None)
     if not agent:
         sys.exit(0)
 
