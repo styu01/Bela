@@ -150,12 +150,15 @@ export function gateScriptPath(command: string, gate: string, projectDir: string
 // A file outside any git checkout (an install that is not a clone) is not verifiable and is skipped; a file
 // in a checkout but not in HEAD, or different from it, is a failing entry with its own effect text.
 export interface GitIo { run: (cwd: string, args: readonly string[]) => string | null }
-const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES']
+const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES', 'GIT_REPLACE_REF_BASE']
 export const REAL_GIT: GitIo = {
   run: (cwd, args) => {
     try {
       const env = { ...process.env }
       for (const k of GIT_ENV_DROP) delete env[k]
+      // PROGI 6332 (D): `git replace <HEAD commit> <forged commit>` (refs/replace/) makes HEAD:<gate> resolve to a
+      // swapped blob, and git status / diff / log hide it too. The check reads the real objects only.
+      env.GIT_NO_REPLACE_OBJECTS = '1'
       return execFileSync('git', [...args], { cwd, env, encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
     } catch {
       return null

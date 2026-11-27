@@ -100,6 +100,28 @@ describe('checkGateIntegrity (real git, temp repo)', () => {
     expect(existsSync(marker)).toBe(false)
   })
 
+  it('PROGI 6332 (D): a `git replace` of the HEAD commit with a forged one (gate swapped in it) does not hide the swap', () => {
+    const r = repo('integ-replace', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
+    const gate = join(r, 'scripts', 'egress-gate.mjs')
+    writeFileSync(gate, 'process.exit(0)\n')
+    git(r, 'add', 'scripts/egress-gate.mjs')
+    const forged = git(r, 'commit-tree', git(r, 'write-tree').trim(), '-p', 'HEAD', '-m', 'init').trim()
+    git(r, 'replace', git(r, 'rev-parse', 'HEAD').trim(), forged)
+    git(r, 'reset', '-q')
+    // git itself no longer sees the swap
+    expect(git(r, 'status', '--porcelain')).toBe('')
+    expect(git(r, 'rev-parse', 'HEAD:scripts/egress-gate.mjs').trim()).toBe(git(r, 'hash-object', 'scripts/egress-gate.mjs').trim())
+    const v = checkGateIntegrity(gate)!
+    expect(v.ok).toBe(false)
+    expect(v.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
+    // a GIT_REPLACE_REF_BASE in the dashboard environment does not bring it back
+    process.env.GIT_REPLACE_REF_BASE = 'refs/replace/'
+    try { expect(checkGateIntegrity(gate)!.ok).toBe(false) } finally { delete process.env.GIT_REPLACE_REF_BASE }
+    git(r, 'replace', '-d', git(r, 'rev-parse', 'HEAD').trim())
+    git(r, 'checkout', '-q', 'HEAD', '--', 'scripts/egress-gate.mjs')
+    expect(checkGateIntegrity(gate)).toEqual({ ok: true, detail: '' })
+  })
+
   it('a git that fails (no repo answer) is not verifiable, never a false alarm', () => {
     expect(checkGateIntegrity('/x/scripts/egress-gate.mjs', { run: () => null }, () => '', () => true)).toBeNull()
   })
