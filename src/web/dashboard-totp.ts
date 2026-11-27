@@ -5,7 +5,8 @@
 // Whether it is ON is also recorded in the database (dashboard_users.totp_enabled, Dani 81107 B2): the file alone would
 // let any process of the same OS user turn the second factor off by deleting it. On = the flag or a record; off (the
 // default) = neither. The secret is never logged and never in an API response after the setup step; the backup codes
-// are stored hashed only. The agent DB-write gate protects both the file (writes) and the table.
+// are stored hashed only. Upstream's agent DB-write gate protects both the file (writes) and the table; THIS FORK HAS
+// NO SUCH GATE (KISPROGI 6416 K1): only the sub-agents' Read deny on the file (agent-scaffold.ts), see the limit below.
 // The limit: the agents run as the same OS user, so a process of that user can read this file; the second factor
 // protects against a remote attacker who knows the password, not against a process on the machine (which still does
 // not have the password: only its hash is stored). The sub-agents' Read deny on the file (SUBAGENT_TOTP_STORE_DENY in
@@ -86,8 +87,8 @@ export function getTotpRecord(userId: number): TotpRecord | undefined {
 }
 
 /** The second factor of this dashboard user, the ONE reading every login and owner route uses (Dani 81107 B2): the
- *  record when it is on, undefined when it is off. On = the database flag (dashboard_users.totp_enabled, a table the
- *  agent DB-write gate protects) OR a record in the file. The flag set with no record in the file (the file deleted,
+ *  record when it is on, undefined when it is off. On = the database flag (dashboard_users.totp_enabled; upstream's
+ *  DB-write gate protects that table, this fork has none) OR a record in the file. The flag set with no record in the file (the file deleted,
  *  emptied or the entry removed) THROWS TotpStoreError: fail closed, never a password-only login. */
 export function getTotpForUser(user: { id: number; totp_enabled?: number }): TotpRecord | undefined {
   const rec = getTotpRecord(user.id)

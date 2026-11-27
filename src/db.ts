@@ -1070,8 +1070,10 @@ export function initDatabase(dbPathOverride?: string): void {
            WHERE id = (SELECT id FROM dashboard_users ORDER BY id ASC LIMIT 1)
              AND NOT EXISTS (SELECT 1 FROM dashboard_users WHERE is_owner = 1)`)
   // DOCKERHTTPS1119: whether the login's TOTP second factor is on. The secret lives in store/.dashboard-totp.json
-  // (0600); this flag is the record that it EXISTS, in a table the agent DB-write gate protects, so deleting or
-  // emptying that file cannot turn the second factor off: the login fails closed (503) instead.
+  // (0600); this flag is the record that it EXISTS, so deleting or emptying that file alone cannot turn the second
+  // factor off: the login fails closed (503) instead. (Upstream also protects this table with an agent DB-write gate;
+  // this fork has no such gate: a process of the same OS user could clear the flag too. See docs/public-https.md
+  // "The limit".)
   const dashUserCols = (db.prepare('PRAGMA table_info(dashboard_users)').all() as { name: string }[]).map((c) => c.name)
   if (!dashUserCols.includes('totp_enabled')) db.exec('ALTER TABLE dashboard_users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0')
   // Browser login sessions. NOT named `sessions` -- that table already maps
