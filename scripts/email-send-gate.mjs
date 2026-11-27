@@ -1375,7 +1375,26 @@ const MAILER_SCRIPT_RX = /(?:send-gmail|send_outreach|send_batch_daily)\.py(?![\
 // default key of send_outreach.py). Both ids are matched in every spelling seen in commands: plain (the prefix up to
 // "jelsz" also covers a ó escape), and URL-encoded (%40 for @, %20 or + for the space), as urllib.parse.quote
 // and curl --data-urlencode write them.
-const MAIL_CREDENTIAL_IDS_RX = /gmail_kiss_i_god_app_pw|info(?:@|%40)woowebsite\.eu(?: |%20|\+)jelsz/i
+// MAILCRED spellings (PROGI msg 6142, BELA msg 6152): the same id written so that the plain pattern above missed it
+// passed: a shell-escaped space or a tab between the parts, a quote break inside the word ("a""b", "a "'b'), an ANSI-C
+// or Python escape for any character ($'..\x20..', '\x40' for the @), on the Gmail id too. Each id is now matched
+// character by character: every character in its plain, URL-encoded (%HH), \xHH, \u00HH or octal \OOO spelling, with
+// any run of quotes and backslashes between two characters (a quote break, or a shell backslash before an ordinary
+// character, which the shell drops); the space also as an escaped space, \x20,  , \040, a tab, \t or %09. A run
+// of only quotes and backslashes between the id's own characters does not occur in ordinary commands (measured on the
+// real command corpus: 0 new matches). Stated limit unchanged: a name assembled at run time ('a' + 'b'), read from a
+// file, or found through vault.js listSecrets() is not seen (see the header).
+const MAIL_ID_GAP = String.raw`['"\\]*`
+const MAIL_ID_SPACE = String.raw`(?: |%20|\+|\\ |\\x20|\\u0020|\\040|\t|\\t|%09)`
+function mailIdChar(c) {
+  const code = c.codePointAt(0)
+  const hex = code.toString(16).padStart(2, '0')
+  const lit = c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return String.raw`(?:${lit}|%${hex}|\\x${hex}|\\u00${hex}|\\${code.toString(8).padStart(3, '0')})`
+}
+const mailIdSpelling = (id) => [...id].map((c) => (c === ' ' ? MAIL_ID_SPACE : mailIdChar(c))).join(MAIL_ID_GAP)
+// The second id stops at "jelsz": the accented o after it may be written in any way (ó, %C3%B3, \xc3\xb3).
+const MAIL_CREDENTIAL_IDS_RX = new RegExp(['gmail_kiss_i_god_app_pw', 'info@woowebsite.eu jelsz'].map(mailIdSpelling).join('|'), 'i')
 const MAIL_CREDENTIAL_RX = new RegExp(MAIL_CREDENTIAL_IDS_RX.source +
   /|(?:https?:\/\/|localhost|127\.0\.0\.1|\[::1\]|:\d{2,5})[^\s'"`]*\/api\/vault\/|\/api\/vault\/[A-Za-z0-9_%$.@{-]/.source, 'i')
 // 'sed -n 1,40p FILE...' only prints: sed is not a never-exec program for the name layer (its e/w commands run and

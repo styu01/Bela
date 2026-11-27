@@ -40,6 +40,23 @@ const CREDENTIAL: Array<[string, string]> = [
   ['the mailbox key with a \\u00f3 escape', `python3 -c "k = 'info@woowebsite.eu jelsz\\u00f3'; print(len(k))"`],
   ['the mailbox key url-encoded, %20', 'python3 -c "u = \'info%40woowebsite.eu%20jelsz%C3%B3\'"'],
   ['the mailbox key url-encoded, +', 'python3 -c "u = \'info%40woowebsite.eu+jelsz%C3%B3\'"'],
+  // PROGI 6142 / BELA 6152: the spellings the plain pattern missed (each passed the gate before)
+  ['shell-escaped space', String.raw`node vault-resolve.mjs <<< info@woowebsite.eu\ jelszó`],
+  ['a literal tab for the space', 'node vault-resolve.mjs <<< "info@woowebsite.eu\tjelszó"'],
+  ['a \\t escape for the space', String.raw`python3 -c "k = 'info@woowebsite.eu\tjelszó'"`],
+  ['quote break: ""', `node vault-resolve.mjs <<< "info@woowebsite.eu"" jelszó"`],
+  ["quote break: \"... \"'...'", `node vault-resolve.mjs <<< "info@woowebsite.eu "'jelszó'`],
+  ['ANSI-C escapes', String.raw`node vault-resolve.mjs <<< $'info@woowebsite.eu\x20jelsz\xc3\xb3'`],
+  ['python \\x40 for the @, the URL split', String.raw`python3 -c "import urllib.request as u; u.urlopen('http://localhost:3420/api/'+'vault'+'/'+u.quote('info\x40woowebsite.eu jelszó'))"`],
+  // (the backslash is built, so no editor or tool can turn the escape into the character itself)
+  ['backslash-u0040 for the @', `python3 -c "k = 'info${String.fromCharCode(92)}u0040woowebsite.eu jelszó'"`],
+  ['backslash-u0020 for the space', `python3 -c "k = 'info@woowebsite.eu${String.fromCharCode(92)}u0020jelszó'"`],
+  ['octal \\100 for the @', String.raw`printf 'info\100woowebsite.eu jelsz\303\263'`],
+  ['a backslash before an ordinary letter (the shell drops it)', String.raw`node vault-resolve.mjs <<< info@woowebsite.eu\ \jelszó`],
+  ['the Gmail id with a quote break', `node vault-resolve.mjs <<< gmail_kiss_"i_god"_app_pw`],
+  ['the Gmail id with quote breaks inside a word', `node vault-resolve.mjs <<< "gm"'ail'_kiss_i_god_app_pw`],
+  ['the Gmail id, one letter as \\x escape', String.raw`node vault-resolve.mjs <<< $'gmail_kiss_i_\x67od_app_pw'`],
+  ['the Gmail id url-encoded underscores', 'curl -s "$U/api/v?k=gmail%5Fkiss%5Fi%5Fgod%5Fapp%5Fpw"'],
 ]
 const ALLOWED: Array<[string, string]> = [
   ['backticked names in a quoted heredoc body (markdown)', "cat > DREAM.md <<'EOF'\nrun `send_batch_daily.py 40` daily\nEOF"],
@@ -56,6 +73,12 @@ const ALLOWED: Array<[string, string]> = [
   ['the route with a placeholder', 'echo "GET /api/vault/<id> returns the value"'],
   ['the id listing (no values)', 'curl -s -H "Authorization: Bearer $T" http://localhost:3420/api/vault'],
   ['unrelated python', 'python3 scripts/usage-check.py'],
+  // PROGI 6142: the wider spelling must not catch ordinary text around the same words
+  ['the address and the word in separate places', 'echo info@woowebsite.eu; grep -n jelszo notes.txt'],
+  ['the address, other text, then the word', 'echo "info@woowebsite.eu: a jelszo modositva"'],
+  ['the Gmail words apart', 'echo gmail kiss i god app pw'],
+  ['a different Gmail key', 'echo gmail_kiss_i_god_app_token'],
+  ['escapes and quotes, but not the id', String.raw`printf 'info\x40example.com jelsz\n'`],
 ]
 
 describe('MAILCRED1127: running a configured mailer script is refused for a sub-agent', () => {
