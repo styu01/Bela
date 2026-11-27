@@ -906,13 +906,24 @@ $TMUX set-option -t "=$SESSION:" remain-on-exit on 2>/dev/null || true
 #    valasz: 2 Enter = "Yes, I accept")
 #  - "Do you trust the files in this folder?" / "trust" prompts (Y Enter)
 #  - "Welcome to Claude Code" / kezdo vezetes (Enter a folytatashoz)
-# 12 sec timeout ket retry-jal, mert WSL/tmux paint slow lehet first-run-on.
+# A guard CHANNELS_BOOT_GUARD_S masodpercig figyel (alap 90, korabban fix 12), de a kesz
+# bannerre azonnal kilep, tehat normal indulasnal nem var tovabb (upstream aca174dd, #2389).
 #
 # EPERM fallback (Claude Code 2.1.183+ regression): launching --channels in a
 # trusted project directory throws EPERM before any dialog appears. Detected
 # below; one auto-restart from /tmp where the trust dialog fires instead.
 _eperm_restarted=0
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+# #2389: the guard watches the pane for CHANNELS_BOOT_GUARD_S seconds (default
+# 90, was a fixed 12). REPORTED (2026-10-31, Linux/Discord): on a lagging boot
+# the trust dialog was drawn after the 12 s window, nobody answered it, and the
+# session sat on it until the /rename step. The loop still leaves at once on the
+# ready banner, so a normal boot does not wait longer. Not a positive integer ->
+# the default.
+_boot_guard_s="${CHANNELS_BOOT_GUARD_S:-90}"
+case "$_boot_guard_s" in ''|*[!0-9]*|0) _boot_guard_s=90 ;; esac
+i=0
+while [ "$i" -lt "$_boot_guard_s" ]; do
+  i=$((i + 1))
   sleep 1
   pane=$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)
   case "$pane" in
@@ -954,23 +965,40 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
       sleep 1
       continue
       ;;
+    # 2.1.296 dropped "channel" and the colon from the ready banner
+    # ("Listening for messages from <x>"); match both wordings (upstream 21fc3eac).
+    # Before the welcome branch (Dani 63870, #2389): a pane that shows the ready
+    # banner is never answered with the welcome's blind Enter, which would land
+    # in the live input box.
+    *"Listening for channel messages"*|*"Listening for messages from"*)
+      break
+      ;;
     *"Welcome to Claude Code"*)
       $TMUX send-keys -t "=$SESSION:" Enter
       sleep 1
       continue
       ;;
-    *"Listening for channel messages"*)
-      break
-      ;;
   esac
 done
-unset _eperm_restarted
+unset _eperm_restarted _boot_guard_s
 
 # Set agent name once the session is ready. (/remote-control dropped: the operator no
 # longer uses Remote Control.)
 _bot_name="${BOT_NAME:-${MAIN_AGENT_ID:-marveen}}"
 sleep 1
-$TMUX send-keys -t "=$SESSION:" "/name ${_bot_name}" Enter
+# #1954: text and Enter go separately, and the Enter is repeated (bounded) while
+# the input box still holds the command -- a one-shot send whose Enter was lost
+# parked `/rename` in the box for an hour after a reboot. See the library.
+# If the library cannot be loaded, the old one-shot send still names the session.
+# LOCAL: this install used "/name", an alias of /rename in Claude Code 2.1.326
+# (aliases:["name"]); the canonical /rename is typed now, as upstream.
+# shellcheck source=lib/main-rename.sh
+if . "$INSTALL_DIR/scripts/lib/main-rename.sh"; then
+  main_rename_send "$TMUX" "=$SESSION:" "$_bot_name" || true
+else
+  echo "$(date '+%F %T') channels.sh: scripts/lib/main-rename.sh could not be loaded -- one-shot /rename" >&2
+  $TMUX send-keys -t "=$SESSION:" "/rename ${_bot_name}" Enter
+fi
 unset _bot_name
 
 # Reset the keep-alive watchdog baseline so a session that was just restarted
