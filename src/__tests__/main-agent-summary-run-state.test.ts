@@ -31,6 +31,7 @@ vi.mock('node:child_process', async (orig) => ({
 
 import { MAIN_AGENT_ID } from '../config.js'
 import { MAIN_CHANNELS_SESSION } from '../web/main-agent.js'
+import { sessionOfTmuxTarget } from '../tmux-target.js'
 import { tryHandleAgents } from '../web/routes/agents.js'
 import type { RouteContext } from '../web/routes/types.js'
 
@@ -63,7 +64,8 @@ describe('GET /api/agents/<main-id> run state (MSGWARN908)', () => {
     // (which never exists for the main id) -- guards against a regression that
     // re-derives session from agentSessionName() and silently no-ops the fix.
     const captured = h.calls.filter(a => a.includes('capture-pane'))
-    expect(captured.some(a => a.includes(MAIN_CHANNELS_SESSION))).toBe(true)
+    // b03b7979: every tmux target is exact (=NAME:), so compare the target's session name.
+    expect(captured.some(a => a.some(x => sessionOfTmuxTarget(x) === MAIN_CHANNELS_SESSION))).toBe(true)
     expect(captured.some(a => a.includes(`agent-${MAIN_AGENT_ID}`))).toBe(false)
   })
 })

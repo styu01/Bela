@@ -25,7 +25,7 @@ expect_check "several panes, one dead" dead 'printf "0\n1\n0\n"'
 expect_check "failed tmux query is fail-safe alive" alive 'exit 1'
 expect_check "garbage is alive" alive 'echo no-server'
 
-printf '#!/bin/sh\ncase "$*" in *"-t marveen-channels "*) echo 1;; *) echo 0;; esac\n' > "$FAKE"; chmod +x "$FAKE"
+printf '#!/bin/sh\ncase "$*" in *"-t =marveen-channels: "*) echo 1;; *) echo 0;; esac\n' > "$FAKE"; chmod +x "$FAKE"
 got="$(CHANNELS_TMUX_BIN="$FAKE" bash "$CHANNELS" --pane-dead-check marveen-channels 2>/dev/null)"
 if [ "$got" = dead ]; then pass "uses requested session"; else fail "uses requested session" dead "$got"; fi
 

@@ -65,7 +65,7 @@ if [ "$OS" = "Darwin" ]; then
   launchctl unload "$PLIST_DIR/com.marveen.channels.plist" 2>/dev/null || true
   launchctl unload "$PLIST_DIR/com.marveen.dashboard.plist" 2>/dev/null || true
 fi
-tmux kill-session -t marveen-channels 2>/dev/null || true
+tmux kill-session -t "=marveen-channels:" 2>/dev/null || true
 
 # DB rewrite. Use the SQLite CLI that ships with the project.
 DB="$INSTALL_DIR/store/claudeclaw.db"

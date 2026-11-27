@@ -54,6 +54,7 @@ import {
   type StuckToolCallState,
   type StuckToolCallThresholds,
 } from '../pane-state.js'
+import { exactTmuxTarget } from '../tmux-target.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -293,7 +294,7 @@ function sampleToolChildren(session: string, nowMs: number): void {
   const prev = toolChildState.get(session) ?? { cpuMs: null, lastActiveAt: null }
   try {
     // LOCAL: plain session target, like the rest of this file (upstream's exactTmuxTarget arrives with b03b7979).
-    const panePid = execFileSync(TMUX, ['list-panes', '-t', session, '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const panePid = execFileSync(TMUX, ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
       .split('\n')[0]?.trim()
     if (!panePid || !/^\d+$/.test(panePid)) throw new Error('no pane pid')
     const out = execFileSync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,stat=,cputime=,comm='], { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })

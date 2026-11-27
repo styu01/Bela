@@ -224,7 +224,7 @@ PYEOF
 log "9. Régi session cleanup..."
 pkill -f "scripts/channels.sh" 2>/dev/null || true
 sleep 1
-tmux kill-session -t "$SESSION_NAME" 2>/dev/null && log "   régi session kilőve" || log "   nincs régi session"
+tmux kill-session -t "=$SESSION_NAME:" 2>/dev/null && log "   régi session kilőve" || log "   nincs régi session"
 sleep 2
 
 # ---- 10. BÉLA indítás -------------------------------------------------------
@@ -235,7 +235,7 @@ CHANNELS_PID=$!
 log "   channels.sh PID: $CHANNELS_PID"
 
 sleep 20
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then
     log "   BÉLA session él ✓"
 else
     log "   WARN: BÉLA session nem található 20s után"

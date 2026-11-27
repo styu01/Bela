@@ -46,7 +46,7 @@ fi
 # Collect candidate text: recent log lines + live tmux pane
 CANDIDATE="$(
   { tail -n 200 "$STORE/channels.log" "$STORE/channels.error.log" "$STORE/dashboard.log" 2>/dev/null;
-    tmux capture-pane -t "$SESSION" -p 2>/dev/null;
+    tmux capture-pane -t "=$SESSION:" -p 2>/dev/null;
   } | grep -iE "usage limit reached|reached your (usage|plan|weekly) limit|your limit will reset|approaching your usage limit|rate_limit_error|429 too many requests|quota exceeded|out of (usage|credits)" \
     | grep -viE "rate.?limit.?error class|no rate|within limit|limit-monitor|LIMIT-FIGYELMEZT|email/nap|req/nap|/nap free|kérés/hó|/hó\b|approaching\.\*limit"
 )"

@@ -231,7 +231,7 @@ MAIN_AGENT_ID="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" 2>/dev/null | hea
 MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
 MAIN_SESSION="${MAIN_AGENT_ID}-channels"
 
-if ! tmux has-session -t "$MAIN_SESSION" 2>/dev/null; then
+if ! tmux has-session -t "=$MAIN_SESSION:" 2>/dev/null; then
   # Mutual-exclusion gate, mirroring channel-watchdog.sh's gate 4. The dashboard
   # channel-monitor, channel-watchdog.sh, systemd (Restart=always) and this cron
   # loop can all recreate the main channels session; they coordinate through the
@@ -250,7 +250,7 @@ if ! tmux has-session -t "$MAIN_SESSION" 2>/dev/null; then
     echo "$(timestamp) [watchdog] $MAIN_SESSION missing, restarting..." >> "$LOG"
     nohup "$INSTALL_DIR/scripts/channels.sh" >> "$INSTALL_DIR/logs/marveen-channels.log" 2>&1 &
     sleep 5
-    if tmux has-session -t "$MAIN_SESSION" 2>/dev/null; then
+    if tmux has-session -t "=$MAIN_SESSION:" 2>/dev/null; then
       echo "$(timestamp) [watchdog] $MAIN_SESSION restarted OK" >> "$LOG"
     else
       echo "$(timestamp) [watchdog] $MAIN_SESSION restart FAILED" >> "$LOG"
@@ -269,7 +269,7 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   AGENT_ID=$(basename "$AGENT_DIR")
   SESSION_NAME="agent-${AGENT_ID}"
 
-  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then
     continue
   fi
 
@@ -328,7 +328,7 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   tmux new-session -d -s "$SESSION_NAME" "$CMD" 2>/dev/null
   sleep 2
 
-  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then
     echo "$(timestamp) [watchdog] $AGENT_ID restarted OK" >> "$LOG"
     # Stamp our own spawn so the shared timestamp always means "last respawn by
     # ANY actor" (keeps a later watchdog cycle / any future dashboard-side check

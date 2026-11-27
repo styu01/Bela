@@ -58,7 +58,7 @@ describe('bot.pid owner check', () => {
 })
 
 function watchdogLoop(): string {
-  const start = channelsSh.indexOf('while $TMUX has-session -t "$SESSION"')
+  const start = channelsSh.indexOf('while $TMUX has-session -t "=$SESSION:"')
   expect(start).toBeGreaterThan(0)
   const end = channelsSh.indexOf('\ndone\n', start)
   expect(end).toBeGreaterThan(start)

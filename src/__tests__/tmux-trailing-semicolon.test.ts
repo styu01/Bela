@@ -22,8 +22,8 @@ describe('protectTrailingSemicolon', () => {
     expect(protectTrailingSemicolon('a\\;b')).toBe('a\\;b')
   })
   it('literalKeyArgs carries the protected text', () => {
-    // Adapted: this fork's literalKeyArgs passes the plain target (no `=s:` exact-match form).
-    expect(literalKeyArgs('s', 'x;')).toEqual(['send-keys', '-t', 's', '-l', '--', 'x\\;'])
+    // b03b7979: the target is now the exact-match form `=s:` (as upstream).
+    expect(literalKeyArgs('s', 'x;')).toEqual(['send-keys', '-t', '=s:', '-l', '--', 'x\\;'])
   })
 })
 

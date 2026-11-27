@@ -22,7 +22,7 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh" && nvm use 22 --silent 2>/dev/null
 
 # ---- A. Session/process ellenőrzés ----------------------------------------
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then
     CLAUDE_PID=$(pgrep -f "claude.*--channels.*telegram" 2>/dev/null | head -1)
     if [ -z "$CLAUDE_PID" ]; then
         log "WARN: session él de claude process nem fut"
@@ -41,7 +41,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
             TRANSCRIPT_MTIME=$(find "$TRANSCRIPT_DIR" -name "*.jsonl" -printf "%T@\n" 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
             if [ -n "$TRANSCRIPT_MTIME" ] && [ "$((NOW - TRANSCRIPT_MTIME))" -gt 300 ]; then
                 # Transcript 5+ perce nem frissült — ellenőrizd a pane-t is
-                PANE=$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null)
+                PANE=$(tmux capture-pane -t "=$SESSION_NAME:" -p 2>/dev/null)
                 case "$PANE" in
                     *"esc to interrupt"*|*"Working"*|*"Thinking"*)
                         log "INFO: transcript régi de BÉLA aktívan dolgozik — nem indítjuk újra"
@@ -64,8 +64,8 @@ else
 fi
 
 # ---- A2. Pane-szintű auth hiba ellenőrzés (session él, de 401-be ragadt) --
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    PANE_AUTH_CHECK=$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null | tail -10)
+if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then
+    PANE_AUTH_CHECK=$(tmux capture-pane -t "=$SESSION_NAME:" -p 2>/dev/null | tail -10)
     case "$PANE_AUTH_CHECK" in
         *"401"*|*"Invalid authentication"*|*"Please run /login"*)
             log "WARN: pane 401/auth hibát mutat -- auth-down értesítés (NINCS restart, OAuth-ot kézzel kell rendezni)"

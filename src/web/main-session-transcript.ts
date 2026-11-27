@@ -38,6 +38,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { projectsDirFor } from './active-model.js'
 import { resolveFromPath } from '../platform.js'
+import { exactTmuxTarget } from '../tmux-target.js'
 
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -144,7 +145,7 @@ export const liveOwnTranscriptDeps: OwnTranscriptDeps = {
 // this IS its claude process (measured: pane_pid comm=claude, launched without a wrapper shell).
 export function tmuxPanePid(session: string): number | null {
   try {
-    const out = execFileSync(resolveFromPath('tmux'), ['list-panes', '-t', session, '-F', '#{pane_pid}'],
+    const out = execFileSync(resolveFromPath('tmux'), ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'],
       { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
     const first = out.split('\n')[0]?.trim()
     return first && /^\d+$/.test(first) ? Number(first) : null

@@ -9,6 +9,7 @@ import { isMainChannelsAgent, MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import { literalKeyArgs, specialKeyArgs, loginSequence, type LoginStep } from '../tmux-keys.js'
 import { readTerminalInputEnabled, writeTerminalInputEnabled } from '../terminal-input-store.js'
 import type { RouteContext } from './types.js'
+import { exactTmuxTarget } from '../../tmux-target.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -23,7 +24,7 @@ function sleep(ms: number): Promise<void> {
 
 function isTmuxSessionAlive(session: string): boolean {
   try {
-    execFileSync(TMUX, ['has-session', '-t', session], { timeout: 3000, stdio: 'ignore' })
+    execFileSync(TMUX, ['has-session', '-t', exactTmuxTarget(session)], { timeout: 3000, stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -162,7 +163,7 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
       // the visible pane) so the frontend can offer scroll-back; the frontend
       // repaints the full snapshot (clear-scrollback + clear + home) each changed
       // frame and only when the user is at the bottom, so scrolling up is stable.
-      execFile(TMUX, ['capture-pane', '-t', session, '-S', '-2000', '-e', '-p'], { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      execFile(TMUX, ['capture-pane', '-t', exactTmuxTarget(session), '-S', '-2000', '-e', '-p'], { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
         inFlight = false
         if (closed) return
         const pane = err ? '' : (stdout ?? '')

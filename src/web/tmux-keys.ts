@@ -3,6 +3,8 @@
 // the mapping (the part most likely to drift) is unit-testable without spawning
 // tmux. The actual execFile lives in routes/agent-terminal.ts.
 
+import { exactTmuxTarget } from '../tmux-target.js'
+
 // Named special keys the web terminal may send (xterm captures these and posts
 // {special}). tmux understands these key names directly in send-keys.
 const SPECIAL_KEYS: Record<string, string[]> = {
@@ -48,7 +50,7 @@ export function literalKeyArgs(session: string, text: string): string[] | null {
   if (!text) return null
   // `-l` sends the keys literally (no key-name interpretation), so text like
   // "Enter" or "C-c" typed by the user is inserted as characters, not actions.
-  return ['send-keys', '-t', session, '-l', '--', protectTrailingSemicolon(text)]
+  return ['send-keys', '-t', exactTmuxTarget(session), '-l', '--', protectTrailingSemicolon(text)]
 }
 
 /**
@@ -70,7 +72,7 @@ export function protectTrailingSemicolon(text: string): string {
 export function specialKeyArgs(session: string, name: string): string[] | null {
   const keys = resolveSpecialKey(name)
   if (!keys) return null
-  return ['send-keys', '-t', session, ...keys]
+  return ['send-keys', '-t', exactTmuxTarget(session), ...keys]
 }
 
 // The scripted /login flow, split into the two phases Szabi described

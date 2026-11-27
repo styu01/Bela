@@ -77,6 +77,7 @@ export function delay(ms: number): Promise<void> {
 }
 
 import { CHANNEL_PLUGIN_IDS } from './plugin-ids.js'
+import { exactTmuxTarget } from '../tmux-target.js'
 export { CHANNEL_PLUGIN_IDS }
 
 // Pure: compute the enabledPlugins map for a sub-agent so that exactly its own
@@ -1097,7 +1098,7 @@ export function sessionExistsOnHost(host: string | null, session: string): boole
 export function getAgentRunningSince(name: string, session: string = agentSessionName(name)): number | null {
   try {
     const host = readAgentRemoteHost(name)
-    const out = captureTmux(host, ['display-message', '-p', '-t', session, '#{session_created}']).trim()
+    const out = captureTmux(host, ['display-message', '-p', '-t', exactTmuxTarget(session), '#{session_created}']).trim()
     const ts = parseInt(out, 10)
     return Number.isFinite(ts) ? ts : null
   } catch {
@@ -1248,7 +1249,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
 
   try {
     try {
-      runTmux(null, ['kill-session', '-t', session])
+      runTmux(null, ['kill-session', '-t', exactTmuxTarget(session)])
       await delay(3000)
     } catch { /* ok */ }
 
@@ -1620,7 +1621,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
         try { pane = capturePane(session) ?? '' } catch { /* transient capture miss */ }
         if (!epermRestarted && /EPERM|[Oo]peration not permitted/.test(pane)) {
           epermRestarted = true
-          try { runTmux(null, ['kill-session', '-t', session], { timeout: 5000 }) } catch { /* already gone */ }
+          try { runTmux(null, ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 5000 }) } catch { /* already gone */ }
           try {
             const fallbackCwd = mkdtempSync(join(tmpdir(), `marveen-agent-${name}-`))
             const agentClaudeMd = join(dir, 'CLAUDE.md')
@@ -1637,11 +1638,11 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
         }
         if (epermRestarted) {
           if (/Do you trust the files in this folder\?/.test(pane)) {
-            try { runTmux(null, ['send-keys', '-t', session, '1', 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
+            try { runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), '1', 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
           } else if (/Bypass Permissions mode/.test(pane) && /Yes, I accept/.test(pane)) {
-            try { runTmux(null, ['send-keys', '-t', session, '2', 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
+            try { runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), '2', 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
           } else if (/Welcome to Claude Code/.test(pane)) {
-            try { runTmux(null, ['send-keys', '-t', session, 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
+            try { runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
           }
         }
         if (/Listening for channel messages/.test(pane)) return
@@ -1697,7 +1698,7 @@ export async function stopAgentProcess(name: string): Promise<{ ok: boolean; err
   const host = readAgentRemoteHost(name)
 
   try {
-    runTmux(host, ['kill-session', '-t', session], { timeout: 5000 })
+    runTmux(host, ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 5000 })
     await delay(2000)
     // Reap any orphaned plugin grandchild that tmux did not tear down. This is
     // a LOCAL pkill against this host's process table, so it only makes sense
@@ -1791,9 +1792,9 @@ const SURVEY_MODAL_RX = /How is Claude doing this session/
 
 async function dismissSurveyModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
-    const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
+    const pane = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
     if (!SURVEY_MODAL_RX.test(pane)) return
-    runTmux(host, ['send-keys', '-t', session, '0'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
     await delay(300)
@@ -1813,11 +1814,11 @@ const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
 export async function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
-    const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
+    const pane = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
-    runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '1'], { timeout: 5000 })
     await delay(100)
-    runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
     // /compact starts immediately and can run for minutes; we only need to
     // unblock the modal so detectPaneState can transition off 'unknown'.
     await delay(300)
@@ -1840,11 +1841,11 @@ export async function dismissResumeSummaryModalIfPresent(session: string, host: 
 // (pure detector, quoted-text-proof), so this adds no blind-injection surface.
 export async function dismissModelConsentDialogIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
-    const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
+    const pane = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
     if (!detectsModelConsentDialog(pane)) return
-    runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '1'], { timeout: 5000 })
     await delay(150)
-    runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
     await delay(300)
     logger.info({ session }, 'Answered model usage-credit consent dialog: kept the configured model (option 1, never the switch default)')
   } catch (err) {
@@ -1884,16 +1885,16 @@ export async function answerFirstRunGates(
     if (gate === 'login') return 'login'
     try {
       if (gate === 'trust') {
-        runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '1'], { timeout: 5000 })
         await delay(150)
-        runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
       } else if (gate === 'bypass-permissions') {
-        runTmux(host, ['send-keys', '-t', session, '2'], { timeout: 5000 })
+        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '2'], { timeout: 5000 })
         await delay(150)
-        runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
       } else {
         // theme / welcome: Enter accepts the highlighted default and moves on.
-        runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
       }
     } catch (err) {
       logger.warn({ err, session, gate }, 'first-run gate: answer keystroke failed')
@@ -1941,7 +1942,7 @@ export async function scheduleIdentitySetup(session: string, displayName: string
         void (async () => {
           try {
             for (const cmd of identitySlashCommands(displayName)) {
-              runTmux(host, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+              runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), cmd, 'Enter'], { timeout: 5000 })
               await delay(1000)
             }
             logger.info({ session, displayName }, 'Set session /name')
@@ -2035,7 +2036,7 @@ export async function clearInputBuffer(session: string, host: string | null = nu
     try {
       const pane = capturePane(session, host)
       for (const key of parkedClearSequence(pane != null ? parkedInputRowCount(pane) : 0)) {
-        runTmux(host, ['send-keys', '-t', session, key], { timeout: 5000 })
+        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), key], { timeout: 5000 })
       }
       // Settle briefly so the next send-keys lands in the freshly cleared
       // buffer rather than racing the clear.
@@ -2097,7 +2098,7 @@ async function discardPlaceholderBuffer(session: string, host: string | null = n
     // would quit the TUI.
     if (pane != null && !detectsPastePlaceholder(pane)) return true
     try {
-      runTmux(host, ['send-keys', '-t', session, 'C-c'], { timeout: 5000 })
+      runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'C-c'], { timeout: 5000 })
     } catch (err) {
       logger.warn({ err, session }, 'discardPlaceholderBuffer: Ctrl-C send failed')
       return false
@@ -2243,7 +2244,7 @@ export async function sendPromptToSession(
   // prove the buffer is clean, but proceeding without the clear is no
   // worse than the pre-fix status quo.
   try {
-    const preCapture = captureTmux(host, ['capture-pane', '-t', session, '-p'])
+    const preCapture = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
     if (shouldClearTruncatedPreamble(preCapture)) {
       logger.info({ session }, 'Cleared stale preamble from input buffer before sending prompt')
       await clearInputBuffer(session, host)
@@ -2270,11 +2271,11 @@ export async function sendPromptToSession(
     let i = 0
     while (i < oneLine.length) {
       const { chunk, end } = computeTmuxChunk(oneLine, i, CHUNK)
-      runTmux(host, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
+      runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '-l', chunk], { timeout: 5000 })
       i = end
       if (i < oneLine.length) await delay(30)
     }
-    runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
   }
   await sendChunks()
 
@@ -2325,7 +2326,7 @@ export async function sendPromptToSession(
     }
     // action === 'retry-enter'
     try {
-      runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+      runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
     } catch (err) {
       logger.warn({ err, session, attempt }, 'Retry-Enter send failed')
       break
@@ -2372,7 +2373,7 @@ const PANE_READY_CONFIRM_DELAY_MS = 250
 // tmux failure is logged and swallowed so the watcher loop keeps going.
 export function sendEnterToSession(session: string, host: string | null = null): boolean {
   try {
-    runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
     return true
   } catch (err) {
     logger.warn({ err, session }, 'sendEnterToSession: failed to send recovery Enter')
@@ -2390,7 +2391,7 @@ export function capturePane(session: string, host: string | null = null): string
     // to the bottom it is removed so the live footer/spinner classifies normally
     // (a banner otherwise pins detectPaneState 'unknown', blocking scheduler +
     // inter-agent delivery). See stripSessionTitleBanner.
-    return stripAllAnsi(stripSessionTitleBanner(captureTmux(host, ['capture-pane', '-t', session, '-e', '-p'])))
+    return stripAllAnsi(stripSessionTitleBanner(captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-e', '-p'])))
   } catch {
     return null
   }
@@ -2407,7 +2408,7 @@ export function capturePane(session: string, host: string | null = null): string
 // failure (treated as "nothing parked"), matching capturePane's contract.
 export function captureParkedInputView(session: string, host: string | null = null): string | null {
   try {
-    return stripGhostSuggestion(captureTmux(host, ['capture-pane', '-t', session, '-e', '-p']))
+    return stripGhostSuggestion(captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-e', '-p']))
   } catch {
     return null
   }
@@ -2626,7 +2627,7 @@ export async function clearStaleParkedInput(session: string, host: string | null
   // immediately instead of spending the whole budget.
   const sequence = parkedClearSequence(parkedInputRowCount(a))
   for (let i = 0; i < sequence.length; i++) {
-    runTmux(host, ['send-keys', '-t', session, sequence[i]], { timeout: 5000 })
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), sequence[i]], { timeout: 5000 })
     if (i % PARKED_CLEAR_RECHECK_EVERY === PARKED_CLEAR_RECHECK_EVERY - 1) {
       await delay(PARKED_CLEAR_SETTLE_MS)
       const after = capturePane(session, host)

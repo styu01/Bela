@@ -31,6 +31,7 @@ import {
   WAKE_DELAY_MS,
   type GateInputs,
 } from '../context-restart-gate.js'
+import { exactTmuxTarget } from '../tmux-target.js'
 
 // Fleet context-restart gate: proactively send /clear to an agent session
 // before the context grows unwieldy, while holding the send lane and only
@@ -292,7 +293,7 @@ function capturePaneOrNull(session: string): string | null {
 
 function getPanePid(session: string): number | null {
   try {
-    const raw = execFileSync(TMUX, ['list-panes', '-t', session, '-F', '#{pane_pid}'],
+    const raw = execFileSync(TMUX, ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'],
       { timeout: 3000, encoding: 'utf-8' })
     const pid = parseInt(raw.split('\n')[0]?.trim() ?? '', 10)
     return Number.isFinite(pid) && pid > 0 ? pid : null
@@ -682,8 +683,8 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
           })
           logger.info({ agent: name, archive: archive.path, source: archive.sourcePath },
             'context-restart-gate: cold-tier transcript archive created before /clear')
-          execFileSync(TMUX, ['send-keys', '-t', session, '-l', '/clear'], { timeout: 5000 })
-          execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+          execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), '-l', '/clear'], { timeout: 5000 })
+          execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
         })
         logger.info({ agent: name, contextTokens }, 'context-restart-gate: /clear sent')
         if (name === MAIN_AGENT_ID) settleMainSessionMemoryAfterClear()

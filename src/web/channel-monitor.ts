@@ -58,6 +58,7 @@ import { decideDownAgentAction, AGENT_MAX_RESTART_ATTEMPTS, parseEtimeToSeconds 
 // module so the standalone channel-coordinator reuses the exact same probe.
 import { getClaudePidForSession, hasChannelPluginAlive, probeChannelPluginLiveness, classifyRespawnStampAdvance } from '../channel-coordinator/liveness.js'
 import { getDesiredAgents } from './agent-desired-state.js'
+import { exactTmuxTarget } from '../tmux-target.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -435,7 +436,7 @@ async function performStuckInputAction(
           // first (no-op when absent); an Enter on the then-idle prompt is
           // harmless.
           await dismissModelConsentDialogIfPresent(session)
-          execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+          execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
         }
         submitted = true
         break
@@ -461,7 +462,7 @@ async function performStuckInputAction(
         // Enter must never reach the model consent dialog (its default SWITCHES
         // the model). No-op when the dialog is absent.
         await dismissModelConsentDialogIfPresent(session)
-        execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
         submitted = true
         break
       case 'hold':
@@ -843,7 +844,7 @@ export function respawnMainSessionFresh(): void {
     isolatedConfigDir: ensureMainAgentIsolatedConfigDir(),
     fleetToken: hasFleetOauthToken(),
   })
-  execFileSync(TMUX, ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+  execFileSync(TMUX, ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
   // Stamp IMMEDIATELY after the respawn, before the scheduling follow-ups.
   // The stamp is a coordination contract, not bookkeeping: five watchers read
   // lastMainRespawnAt() / store/.channel-last-respawn and suppress themselves
@@ -938,7 +939,7 @@ export async function resumeMarveenSession(
       isolatedConfigDir: ensureMainAgentIsolatedConfigDir(),
       fleetToken: hasFleetOauthToken(),
     })
-    execFileSync(TMUX, ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+    execFileSync(TMUX, ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
 
     // --continue replays the last conversation. When the prior session is large
     // (>200k tokens) Claude Code opens with a "Resume from summary" modal that
@@ -1127,7 +1128,7 @@ let marveenLastSessionCreate = 0
 
 export function mainChannelsSessionExists(): boolean {
   try {
-    execFileSync(TMUX, ['has-session', '-t', MAIN_CHANNELS_SESSION], { timeout: 3000 })
+    execFileSync(TMUX, ['has-session', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION)], { timeout: 3000 })
     return true
   } catch {
     return false
@@ -1197,7 +1198,7 @@ function respawnMarveenSessionFresh(): boolean {
       isolatedConfigDir: ensureMainAgentIsolatedConfigDir(),
       fleetToken: hasFleetOauthToken(),
     })
-    execFileSync(TMUX, ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+    execFileSync(TMUX, ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
     logger.warn({ provider: provider.type }, 'Hard restart: marveen session respawned fresh (no --continue)')
     // Re-establish /name on the fresh process (see note in resumeMarveenSession).
     // scheduleIdentitySetup only schedules delayed timers -> fire-and-forget.
@@ -2100,7 +2101,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           } else {
             logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
             try {
-              execFileSync(TMUX, ['send-keys', '-t', t.session, 'Escape'], { timeout: 5000 })
+              execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(t.session), 'Escape'], { timeout: 5000 })
             } catch (err) {
               logger.warn({ err, session: t.session }, 'Menu-recovery Escape failed')
             }
