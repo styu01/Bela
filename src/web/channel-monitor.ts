@@ -259,6 +259,70 @@ const STUCK_RESTART_MAX_CONSECUTIVE = 3
 let stuckRestartCount = 0
 let lastStuckRestartAt = 0
 
+// STUCKFRAGMENT915 (upstream 360e2e26, ported). A clear that FAILED leaves behind
+// a fragment we KNOW is machine-origin: WE parked it and WE failed to clear it.
+// But the fragment may have lost every marker parkedMachineOriginInput matches on,
+// and the restart guard then reads it as "possibly a human draft" and defers.
+// LOCAL: here the sent-text-registry fallback (isKnownRecentInjection, card
+// d8c16050) catches such a fragment, but only within its 10-minute window; after
+// that the same defer-forever shape returns. Measured here: 19 "Input buffer could
+// not be emptied" errors in store/dashboard.log (2026-10-09 .. 2026-11-26), every
+// one on the main session, each from clear-scheduled.
+//
+// A better detector cannot fix this: the cut destroyed the evidence, so the fact is
+// no longer IN the bytes. It is only knowable at the moment the clear failed, so it
+// is recorded there.
+//
+// The record is bound to the FRAGMENT, not to the session (PROGI review 6238, blocking): a session-level
+// flag survived a person deleting the fragment and typing their own text between two 60 s ticks (the box
+// was never SEEN empty), so the person's draft inherited "machine-origin" and ~6 minutes later the main
+// pane was respawned, the draft and the agent's context gone. Now:
+//   - after a clear returned false (clear-scheduled / clear-preamble) the box is captured again and the
+//     SIGNATURE of what is left (stuckInputSignature of the parked view, the same value the stuck-input
+//     tracker keeps as parkedSig) is recorded; no signature (empty box, failed capture) records nothing;
+//   - the guard counts it only while the parked signature is EXACTLY that one; any edit (delete + type,
+//     append) changes the signature and drops back to the old defer behaviour, while the unchanged
+//     fragment of the 25 h wedge still escalates;
+//   - the record is forgotten when the box is not parked or holds a different signature.
+// Only the main session is recorded: only its restart guard reads the record (no per-sub-agent leak).
+const machineFragmentLeft = new Map<string, string>()
+
+export function noteMachineFragmentLeft(session: string, sig: string): void { machineFragmentLeft.set(session, sig) }
+export function clearMachineFragmentLeft(session: string): void { machineFragmentLeft.delete(session) }
+/** Is the fragment parked NOW (parkedSig) the very one a failed clear of ours left behind? */
+export function hasMachineFragmentLeft(session: string, parkedSig: string | null): boolean {
+  const rec = machineFragmentLeft.get(session)
+  return rec !== undefined && parkedSig !== null && rec === parkedSig
+}
+
+/** What a parked-clear attempt is allowed to record. LOCAL: clearInputBuffer returns a boolean here
+ *  (true = the read-back saw an empty box). Only `false` with a readable leftover is a fact about the BOX:
+ *  `sigAfter` is the signature of the fragment re-captured right after the failed clear (null = nothing
+ *  readable, nothing recorded). Only the main session is recorded. `true` does not erase an earlier
+ *  record: forgetting has one owner (onParkedState). */
+export function onClearResult(session: string, cleared: boolean, sigAfter: string | null): void {
+  if (!cleared && sigAfter !== null && session === MAIN_CHANNELS_SESSION) noteMachineFragmentLeft(session, sigAfter)
+}
+
+/** Forget when the box is not parked, or when it holds anything other than the recorded fragment. */
+export function onParkedState(session: string, parkedSig: string | null): void {
+  const rec = machineFragmentLeft.get(session)
+  if (rec === undefined) return
+  if (parkedSig === null || parkedSig !== rec) clearMachineFragmentLeft(session)
+}
+
+/** The signature of what a failed clear left in the box, or null when nothing readable is parked. */
+function leftoverSignature(session: string): string | null {
+  const view = captureParkedInputView(session)
+  return view != null ? stuckInputSignature(view) : null
+}
+
+// Pure. The capture-derived heuristics are authoritative when they FIRE; it is their SILENCE that is
+// unreliable, so our own record can only ever add machine-origin, never take it away.
+export function resolveMachineOrigin(heuristic: boolean, leftByUs: boolean): boolean {
+  return heuristic || leftByUs
+}
+
 // Pure decision for the stuck-input restart escalation.
 //   'restart' -> soft recovery exhausted + input still parked + rate-limit ok
 //   'alert'   -> restarts are not clearing the wedge (cap reached) -> surface once
@@ -444,7 +508,8 @@ async function performStuckInputAction(
       case 'clear-preamble': {
         logger.warn({ session, attempt }, 'Stuck input -- truncated safety preamble, clearing buffer (no re-inject)')
         const cleared = await clearInputBuffer(session)
-        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-preamble left text in the box; the leftover stays parked')
+        onClearResult(session, cleared, cleared ? null : leftoverSignature(session))
+        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-preamble left text in the box; the leftover stays parked (recorded as machine-origin)')
         break
       }
       case 'clear-scheduled': {
@@ -454,7 +519,8 @@ async function performStuckInputAction(
         // stops matching a delivery wrapper, so every later restart decision
         // reads it as a human draft. Say so in the log rather than reporting a
         // clean clear that did not happen.
-        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-scheduled left a fragment in the box; expect machineOrigin=false on the next tick')
+        onClearResult(session, cleared, cleared ? null : leftoverSignature(session))
+        if (!cleared) logger.warn({ session, attempt }, 'Stuck input -- clear-scheduled left a fragment in the box; recorded as machine-origin so the restart guard does not read it as a human draft')
         break
       }
       case 'enter':
@@ -1331,6 +1397,9 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   const parked = state.parkedSig !== null
   // A cleared input box ends the spell -> reset the escalation counter so the
   // next genuine wedge starts fresh (and a successful restart is not penalised).
+  // STUCKFRAGMENT915: the empty box is reported BEFORE the early return, so it is
+  // seen on every tick (the record's only forget point).
+  onParkedState(MAIN_CHANNELS_SESSION, state.parkedSig)
   if (!parked) { stuckRestartCount = 0; return }
   // Busy-guard: never hard-restart while the main pane is actively generating --
   // a parked <channel> block then is a busy session, not a wedge. See
@@ -1357,7 +1426,10 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   const parkedFragment = parkedView != null ? parkedInputText(parkedView) : null
   const machineOriginByRegistry = !machineOriginByPrefix && parkedFragment != null
     && isKnownRecentInjection(MAIN_CHANNELS_SESSION, parkedFragment)
-  const machineOrigin = machineOriginByPrefix || machineOriginByRegistry
+  const machineOrigin = resolveMachineOrigin(
+    machineOriginByPrefix || machineOriginByRegistry,
+    hasMachineFragmentLeft(MAIN_CHANNELS_SESSION, state.parkedSig),
+  )
   // Same registry fallback as machineOriginByRegistry above, applied to the
   // scheduledTaskBlock fact inside parkedMainInputHasRemedy (Kanban c4aef78c,
   // 2026-08-26) -- otherwise a scrolled scheduled-task fragment reads as
@@ -1375,7 +1447,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   ), { machineOrigin, softRemedy })
   if (action === 'skip' && shouldDeferKeepaliveRespawn(paneState)) {
     logger.info(
-      { paneState, attempts: state.attempts, machineOrigin, softRemedy, scheduledTaskByRegistry },
+      { paneState, attempts: state.attempts, machineOrigin, fragmentLeftByUs: hasMachineFragmentLeft(MAIN_CHANNELS_SESSION, state.parkedSig), softRemedy, scheduledTaskByRegistry },
       paneState === 'busy'
         ? 'Stuck-input restart deferred -- main pane is busy (working, not wedged)'
         : 'Stuck-input restart deferred -- parked input still recoverable or possibly a human draft',
