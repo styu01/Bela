@@ -1331,6 +1331,12 @@ export function ensureFleetRosterSection(name: string): void {
   atomicWriteFileSync(claudeMdPath, updated)
 }
 
+/** Upstream 68f5c43a (PR-I4, plan 8.4): the marked fleet-roster block for `name`, as ensureFleetRosterSection writes it;
+ *  the package repair writes it WITH the shell in one exclusive write. */
+export function fleetRosterBlock(name: string): string {
+  return `${FLEET_ROSTER_BEGIN}\n${buildFleetRosterBody(name)}\n${FLEET_ROSTER_END}`
+}
+
 // SKILLUTCSAPDA822: the near-identical `.claude-config/skills` path IS the
 // shared global directory (a symlink to ~/.claude/skills, single-copy
 // distribution -- deliberate, see skills-symlink-single-copy), and the

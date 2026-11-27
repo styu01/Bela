@@ -11,6 +11,7 @@ import { ensureFederationClaudeMdSection } from '../federation/onboarding.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { measureClaudeCliVersion } from '../claude-cli-version.js'
 import { CLAUDE_MODEL_MIN_CLI, claudeSupportForCli, isModelUnsupportedByCli } from '../../claude-cli-support.js'
+import { readUpdatingTrace } from '../agent-package/update.js'
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
@@ -411,6 +412,8 @@ interface AgentSummary {
    *  reports the existing resolution, it does not change it. */
   modelProfile: string | null
   modelSource: 'explicit_model' | 'model_profile' | 'default'
+  /** Upstream 68f5c43a (plan 8.4, D11): the trace of an interrupted package update, or null. */
+  interruptedUpdate: { from: string; to: string; startedAt: string } | null
   modelProfileError: string | null
   activeModel: string | null
   runningSince: number | null
@@ -521,6 +524,8 @@ function getAgentSummary(name: string): AgentSummary {
     description: packageDescription(dir) ?? extractDescriptionFromClaudeMd(claudeMd),
     package: packageSummaryField(dir),
     packageApproval: (() => { const st = packageApprovalState(name).state; return st === 'not_package' ? null : st === 'approved' ? 'approved' : 'pending' })(),
+    // Upstream 68f5c43a (plan 8.4, D11): an interrupted package update shows, instead of looking like an available one.
+    interruptedUpdate: readUpdatingTrace(name),
     model: modelResolution.model,
     modelProfile: typeof agentModelConfig.modelProfile === 'string' ? agentModelConfig.modelProfile : null,
     modelSource: modelResolution.source,

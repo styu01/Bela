@@ -25,13 +25,14 @@ import { startWebServer } from './web.js'
 import { removeCredentialTmpLeftovers } from './web/agent-package/remote.js'
 import { flushPendingPackageNotices, reapInterruptedPackageInstalls } from './web/agent-package/install.js'
 import { escalatePackageNotice } from './web/agent-package/notices.js'
+import { removeOrphanUpdatingTraces } from './web/agent-package/update.js'
 import { logger } from './logger.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
 import { startStoreWatcher, stopStoreWatcher } from './store-watcher.js'
 import { shouldRunBackgroundServices, ALLOW_SECOND_INSTANCE_SERVICES_KEY } from './web/hook-registration-guard.js'
-import { AGENTS_BASE_DIR } from './web/agent-config.js'
+import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import {
   acquirePortLock,
   acquirePidfileLock,
@@ -494,6 +495,14 @@ async function main(): Promise<void> {
     if (reaped.setAside + reaped.removedMarkers + reaped.badMarkers + reaped.blocked > 0) logger.warn({ reaped }, 'agent package installs: interrupted-install cleanup')
   } catch (err) {
     logger.error({ err }, 'agent package interrupted-install cleanup did not run')
+  }
+  // MIOAGENTB4-1122 (plan 8.4, D11, Samu (2)): the trace of an interrupted package UPDATE of an agent that no longer
+  // exists goes; a living agent's trace stays until its next successful apply.
+  try {
+    const removed = removeOrphanUpdatingTraces((n) => listAgentNames().includes(n))
+    if (removed > 0) logger.info({ removed }, 'agent package update traces of removed agents deleted')
+  } catch (err) {
+    logger.warn({ err }, 'agent package update trace cleanup did not run')
   }
 
   // Backfill embeddings for memories saved before Ollama was available.
