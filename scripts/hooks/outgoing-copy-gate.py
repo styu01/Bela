@@ -130,10 +130,11 @@ _CURLISH = re.compile(r"^(curl|wget|http)$", re.I)
 #     a name assembled at run time, python -c with an attached code argument (-c'...'; node refuses an attached -e).
 # These forms hide ANY command, not only a mailer binary: the explicit send.py / Resend / graph-mail rules of this
 # gate, and the Gmail-script / mail-credential rule MAILCRED1127, are bypassed the same way. Corrected 2026-11-27
-# (PROGI msg 6118 (e)): this host DOES have a configured, live mail path -- scripts/send-gmail.py and the outreach
-# scripts take a Gmail SMTP app password from the vault through GET /api/vault/<id> (src/web/routes/connectors.ts),
-# which hands any secret to any holder of the dashboard token, and every agent can read that token. MAILCRED1127
-# refuses running those scripts and touching that credential for a sub-agent, but it is a name rule; the real
+# (PROGI msgs 6118 (e), 6134 (3)): this host DOES have configured, live mail paths -- scripts/send-gmail.py and the
+# outreach scripts take an SMTP password from the vault through GET /api/vault/<id> (src/web/routes/connectors.ts),
+# which hands any secret to any holder of the dashboard token, and every agent can read that token. There are TWO
+# such credentials: the Gmail app password and the woowebsite.eu mailbox password (send_outreach.py's default key).
+# MAILCRED1127 refuses running those scripts and touching either credential for a sub-agent, but it is a name rule; the real
 # control is restricting the vault value route to the main agent. Also measured: no mailer binary on PATH, /usr/sbin
 # or /usr/lib, and support-mail/send.py has no SUPPORT_* settings in .env.
 # Mirrored in the header of scripts/email-send-gate.mjs (STATED LIMIT).
@@ -1279,6 +1280,11 @@ def _py_eol(c) -> bool:
     return c == "\n" or c == "\r"
 
 
+def _esc_len(code, k) -> int:
+    """SCANFIX2 F1: how far a backslash escape at k reaches (CR LF after it is one line continuation)."""
+    return 3 if code[k + 1:k + 3] == "\r\n" else 2
+
+
 def _js_eol(c) -> bool:
     return c in ("\n", "\r", "\u2028", "\u2029")
 
@@ -1351,7 +1357,7 @@ def _blank_python(code: str) -> str:
         while k < n:
             ch = code[k]
             if ch == "\\":
-                k += 2
+                k += _esc_len(code, k)
                 continue
             if (code.startswith(q * 3, k) if triple else ch == q):
                 k += 3 if triple else 1
@@ -1385,15 +1391,43 @@ def _blank_js(code: str, regex_on: bool = True) -> str:
             if not _js_eol(out[k]):
                 out[k] = " "
 
+    cmt = bytearray(n + 1)
+    kw_close = set()
+    parens = []
+
+    def prev_sig_idx(i):
+        p = i - 1
+        while p >= 0 and (_JS_WS.match(code[p]) or cmt[p]):
+            p -= 1
+        return p
+
+    def word_ending_at(p):
+        s = p
+        while s > 0 and _is_ident_char(code[s - 1]):
+            s -= 1
+        return code[s:p + 1]
+
+    def skip_line(i):
+        while i < n and not _js_eol(code[i]):
+            cmt[i] = 1
+            i += 1
+        return i
+
+    def line_starts_before(i):
+        p = i - 1
+        while p >= 0 and not _js_eol(code[p]) and (code[p] in " \t" or cmt[p]):
+            p -= 1
+        return p < 0 or _js_eol(code[p])
+
     def regex_start(i):
         if not regex_on:
             return False
-        p = i - 1
-        while p >= 0 and _JS_WS.match(code[p]):
-            p -= 1
+        p = prev_sig_idx(i)
         if p < 0:
             return True
         c = code[p]
+        if c == ")" and p in kw_close:
+            return True
         if c in "+-" and p > 0 and code[p - 1] == c:
             return False
         if c in "(,=:[!&|?{};+-*%<>~^":
@@ -1411,13 +1445,30 @@ def _blank_js(code: str, regex_on: bool = True) -> str:
             c = code[i]
             nx = code[i + 1] if i + 1 < n else ""
             if c == "/" and nx == "/":
-                while i < n and not _js_eol(code[i]):
-                    i += 1
+                i = skip_line(i)
                 continue
             if c == "/" and nx == "*":
-                e = code.find("*/", i + 2)
-                i = n if e < 0 else e + 2
+                e0 = code.find("*/", i + 2)
+                e = n if e0 < 0 else e0 + 2
+                while i < e:
+                    cmt[i] = 1
+                    i += 1
                 continue
+            if i == 0 and c == "#" and nx == "!":
+                i = skip_line(i)
+                continue
+            if c == "<" and code.startswith("<!--", i):
+                i = skip_line(i)
+                continue
+            if c == "-" and code.startswith("-->", i) and line_starts_before(i):
+                i = skip_line(i)
+                continue
+            if c == "(":
+                p = prev_sig_idx(i)
+                parens.append(p >= 0 and _is_ident_char(code[p]) and word_ending_at(p) in ("if", "while", "for", "with"))
+            elif c == ")":
+                if parens and parens.pop():
+                    kw_close.add(i)
             if c == "/" and regex_start(i):
                 k, cls = i + 1, False
                 while k < n and not _js_eol(code[k]):
@@ -1437,7 +1488,7 @@ def _blank_js(code: str, regex_on: bool = True) -> str:
             if c in "'\"":
                 k = i + 1
                 while k < n and code[k] != c and code[k] != "\n" and code[k] != "\r":
-                    k += 2 if code[k] == "\\" else 1
+                    k += _esc_len(code, k) if code[k] == "\\" else 1
                 blank(i, k + 1)
                 i = k + 1
                 continue
@@ -1445,7 +1496,7 @@ def _blank_js(code: str, regex_on: bool = True) -> str:
                 k, seg = i + 1, i
                 while k < n and code[k] != "`":
                     if code[k] == "\\":
-                        k += 2
+                        k += _esc_len(code, k)
                         continue
                     if code[k] == "$" and k + 1 < n and code[k + 1] == "{":
                         blank(seg, k + 2)

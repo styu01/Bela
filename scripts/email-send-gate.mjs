@@ -30,10 +30,11 @@
 //     a name assembled at run time, python -c with an attached code argument (-c'...'; node refuses an attached -e).
 // These forms hide ANY command, not only a mailer binary: the explicit send.py / Resend / graph-mail rules of this
 // gate, and the Gmail-script / mail-credential rule MAILCRED1127, are bypassed the same way. Corrected 2026-11-27
-// (PROGI msg 6118 (e)): this host DOES have a configured, live mail path -- scripts/send-gmail.py and the outreach
-// scripts take a Gmail SMTP app password from the vault through GET /api/vault/<id> (src/web/routes/connectors.ts),
-// which hands any secret to any holder of the dashboard token, and every agent can read that token. MAILCRED1127
-// refuses running those scripts and touching that credential for a sub-agent, but it is a name rule; the real
+// (PROGI msgs 6118 (e), 6134 (3)): this host DOES have configured, live mail paths -- scripts/send-gmail.py and the
+// outreach scripts take an SMTP password from the vault through GET /api/vault/<id> (src/web/routes/connectors.ts),
+// which hands any secret to any holder of the dashboard token, and every agent can read that token. There are TWO
+// such credentials: the Gmail app password and the woowebsite.eu mailbox password (send_outreach.py's default key).
+// MAILCRED1127 refuses running those scripts and touching either credential for a sub-agent, but it is a name rule; the real
 // control is restricting the vault value route to the main agent. Also measured: no mailer binary on PATH, /usr/sbin
 // or /usr/lib, and support-mail/send.py has no SUPPORT_* settings in .env.
 // Mirrored in scripts/hooks/outgoing-copy-gate.py (KIMONDOTT HATAR block).
@@ -921,7 +922,14 @@ const SCAN_NEST_MAX = 100
 //    postfix ++ / -- a '/' divides, after return/typeof/... it starts a regex; and JS is read TWICE, with that rule and
 //    with every '/' a division -- a send seen in either reading counts, so one wrong guess cannot hide a call.
 // E) String prefixes: r b u f t in any case and order (t/T/tr/rt are python 3.14 template strings, fields like f).
+// SCANFIX2 (PROGI msg 6134, BELA msg 6135): F1) a backslash before CR LF steps over all three (a CRLF line
+// continuation keeps the string open, in python and node); F2) the JS regex-or-division look-back skips comments as
+// well as whitespace; F3) a ')' that closes 'if (' / 'while (' / 'for (' / 'with (' is followed by a regex (a paren
+// stack, exact); plus the JS comment forms node accepts in a script: a '#!' hashbang at offset 0, and the CommonJS
+// HTML-like comments '<!--' anywhere and '-->' at the start of a line.
 const PY_EOL = (c) => c === '\n' || c === '\r'
+// F1: how far a backslash escape at k reaches (CR LF after it is one line continuation).
+const escLen = (code, k) => (code[k + 1] === '\r' && code[k + 2] === '\n' ? 3 : 2)
 const JS_EOL = (c) => c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029'
 // JS whitespace, spelled out (the same set as the JS \s class) so the python twin can mirror it exactly.
 const JS_WS = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/
@@ -975,7 +983,7 @@ function blankPython(code) {
     let segStart = i
     while (k < n) {
       const ch = code[k]
-      if (ch === '\\') { k += 2; continue }
+      if (ch === '\\') { k += escLen(code, k); continue }
       if (triple ? code.startsWith(q + q + q, k) : ch === q) { k += triple ? 3 : 1; break }
       if (!triple && PY_EOL(ch)) break
       if (isF && ch === '{') {
@@ -1001,12 +1009,20 @@ function blankJs(code, regexOn = true) {
   const n = code.length
   const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (!JS_EOL(out[k])) out[k] = ' ' }
   let nest = 0
+  const cmt = new Uint8Array(n + 1)
+  const kwClose = new Set()
+  const parens = []
+  // the previous significant index: whitespace and comment characters (F2) are skipped
+  const prevSigIdx = (i) => { let p = i - 1; while (p >= 0 && (JS_WS.test(code[p]) || cmt[p])) p--; return p }
+  const wordEndingAt = (p) => { let s = p; while (s > 0 && isIdentChar(code[s - 1])) s--; return code.slice(s, p + 1) }
+  const skipLine = (i) => { while (i < n && !JS_EOL(code[i])) cmt[i++] = 1; return i }
+  const lineStartsBefore = (i) => { let p = i - 1; while (p >= 0 && !JS_EOL(code[p]) && (code[p] === ' ' || code[p] === '\t' || cmt[p])) p--; return p < 0 || JS_EOL(code[p]) }
   function regexStart(i) {
     if (!regexOn) return false
-    let p = i - 1
-    while (p >= 0 && JS_WS.test(code[p])) p--
+    const p = prevSigIdx(i)
     if (p < 0) return true
     const c = code[p]
+    if (c === ')' && kwClose.has(p)) return true
     if ((c === '+' || c === '-') && code[p - 1] === c) return false
     if ('(,=:[!&|?{};+-*%<>~^'.includes(c)) return true
     if (isIdentChar(c)) {
@@ -1020,8 +1036,13 @@ function blankJs(code, regexOn = true) {
     let depth = 0
     while (i < n) {
       const c = code[i]
-      if (c === '/' && code[i + 1] === '/') { while (i < n && !JS_EOL(code[i])) i++; continue }
-      if (c === '/' && code[i + 1] === '*') { const e = code.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue }
+      if (c === '/' && code[i + 1] === '/') { i = skipLine(i); continue }
+      if (c === '/' && code[i + 1] === '*') { const e0 = code.indexOf('*/', i + 2); const e = e0 < 0 ? n : e0 + 2; while (i < e) cmt[i++] = 1; continue }
+      if (i === 0 && c === '#' && code[1] === '!') { i = skipLine(i); continue }
+      if (c === '<' && code.startsWith('<!--', i)) { i = skipLine(i); continue }
+      if (c === '-' && code.startsWith('-->', i) && lineStartsBefore(i)) { i = skipLine(i); continue }
+      if (c === '(') { const p = prevSigIdx(i); parens.push(p >= 0 && isIdentChar(code[p]) && ['if', 'while', 'for', 'with'].includes(wordEndingAt(p))) }
+      else if (c === ')') { if (parens.pop()) kwClose.add(i) }
       if (c === '/' && regexStart(i)) {
         let k = i + 1
         let cls = false
@@ -1038,7 +1059,7 @@ function blankJs(code, regexOn = true) {
       }
       if (c === "'" || c === '"') {
         let k = i + 1
-        while (k < n && code[k] !== c && code[k] !== '\n' && code[k] !== '\r') k += code[k] === '\\' ? 2 : 1
+        while (k < n && code[k] !== c && code[k] !== '\n' && code[k] !== '\r') k += code[k] === '\\' ? escLen(code, k) : 1
         blank(i, k + 1)
         i = k + 1
         continue
@@ -1047,7 +1068,7 @@ function blankJs(code, regexOn = true) {
         let k = i + 1
         let segStart = i
         while (k < n && code[k] !== '`') {
-          if (code[k] === '\\') { k += 2; continue }
+          if (code[k] === '\\') { k += escLen(code, k); continue }
           if (code[k] === '$' && code[k + 1] === '{') {
             blank(segStart, k + 2)
             if (++nest > SCAN_NEST_MAX) throw new Error('nesting')

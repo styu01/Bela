@@ -2990,6 +2990,196 @@
       "name": "SCANFIX1127: JS: a regex after return holds a quote that would otherwise open a string over the call",
       "cmd": "node <<'EOF'\nconst cp = require('child_process')\nconst t = (s) => { return /'/.test(s) }; cp.execSync('sendmail a@b.hu'); const u = '/'\nEOF",
       "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY CRLF continuation (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\ns = 'a\\\r\n'; os.system(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PINNED: import smtplib after a CRLF-continued string is refused, as production",
+      "cmd": "python3 - <<'EOF'\ns = 'a\\\r\n'; import smtplib as m\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS CRLF continuation (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nlet s = 'a\\\r\n'; require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS CRLF cont dq (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nlet s = \"a\\\r\n\"; require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS regex after if() backtick (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nif (1) /`/.test('');\nrequire('child_process').execSync('sendmail a@b.hu')\nif (1) /`/.test('');\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS regex after if() quote (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nif (1) /'/.test(''); require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS regex after while() bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nwhile (0) /`/;\nrequire('child_process').execSync('sendmail a@b.hu')\nwhile (0) /`/;\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS regex after for(;;) bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nfor (;0;) /`/;\nrequire('child_process').execSync('sendmail a@b.hu')\nfor (;0;) /`/;\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS regex after } bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\n{}\n/`/.test('');\nrequire('child_process').execSync('sendmail a@b.hu')\n{}\n/`/.test('');\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS regex after => bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nconst f = () => /`/;\nrequire('child_process').execSync('sendmail a@b.hu')\nconst g = () => /`/;\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS <!-- comment bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\n<!-- `\nrequire('child_process').execSync('sendmail a@b.hu')\n<!-- `\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS --> comment bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\n--> `\nrequire('child_process').execSync('sendmail a@b.hu')\n--> `\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS hashbang bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\n#!/x `\nrequire('child_process').execSync('sendmail a@b.hu')\n// `\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS <!-- quote (PROGI 6134)",
+      "cmd": "node - <<'EOF'\n<!-- '\nrequire('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PINNED: a unicode_escape coding cookie program is refused, as production",
+      "cmd": "python3 - <<'EOF'\n# coding: unicode_escape\nimport os; os.system(\\x27sendmail a@b.hu\\x27)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PINNED: a raw_unicode_escape coding cookie program is refused, as production",
+      "cmd": "python3 - <<'EOF'\n# coding: raw_unicode_escape\nimport os; os.system(\\u0027sendmail a@b.hu\\u0027)\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY formfeed comment (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\n\f# x\nos.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY \\N in f (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(f\"\\N{DIGIT ONE}\"); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY if-string (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\nif'a': os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY t nested spec (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\nx=1\nprint(t\"{x:{os.system('sendmail a@b.hu')}}\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY rb string brace (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(rb'{'); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY Rt (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\nprint(Rt'{os.system(\"sendmail a@b.hu\")}')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY fstring walrus spec (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\nx=1\nprint(f\"{x:=5}\"); os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: control: PY- string mention (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nprint('sendmail a@b.hu')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX2: control: JS- string mention (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nconsole.log('sendmail a@b.hu')\nEOF",
+      "expected": false
+    },
+    {
+      "name": "SCANFIX2: JS block-comment then regex (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nlet x = /* c */ /'/.test(''); require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS line-comment then regex (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nlet x = // c\n/'/.test(''); require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS while() regex q (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nwhile (0) /'/; require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS for() regex q (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nfor (;0;) /'/; require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS with() regex q (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nwith ({}) /'/; require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS if() regex dq (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nif (1) /\"/.test(''); require('child_process').execSync('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS hashbang no slash bt (PROGI 6134)",
+      "cmd": "node - <<'EOF'\n#! `\nrequire(\"child_process\").execSync(\"sendmail a@b.hu\")\n// `\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY CRLF f-string (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\ns = f'a\\\r\n'; os.system(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY CRLF b-string (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\ns = b'a\\\r\n'; os.system(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY CRLF dq (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport os\ns = \"a\\\r\n\"; os.system('sendmail a@b.hu')\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: PY CRLF subprocess (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\nimport subprocess\ns = 'a\\\r\n'; subprocess.run(['sendmail','a@b.hu'])\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: JS CRLF in template expr str (PROGI 6134)",
+      "cmd": "node - <<'EOF'\nlet s = `${'a\\\r\n'}`; require(\"child_process\").execSync(\"sendmail a@b.hu\")\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SCANFIX2: control: PY- CRLF harmless (PROGI 6134)",
+      "cmd": "python3 - <<'EOF'\ns = 'a\\\r\n'; print(1)\nEOF",
+      "expected": false
     }
   ]
 }
