@@ -122,6 +122,14 @@ eq "...1 Enter + MAIN_RENAME_MAX_ENTERS (3) retries"  "4" "$(enters)"
 eq "...never anything but the text and Enter (no clear)" "0" "$(nonenter)"
 case "$(cat "$FAKE_DIR/err")" in *"left as is"*) pass "...and the give-up is logged" ;; *) fail "...and the give-up is logged" "left as is" "$(cat "$FAKE_DIR/err")" ;; esac
 
+# LOCAL (PROGI review 6212): text already in the box BEFORE typing -> nothing typed, logged.
+run "$OTHER"
+eq "LOCAL text in the box before typing: nothing is typed" "0" "$(grep -c '^send-keys' "$FAKE_LOG")"
+eq "LOCAL ...exit 3"                                  "3" "$RC"
+case "$(cat "$FAKE_DIR/err")" in *"the input box is not empty, NOT typing"*) pass "LOCAL ...and the skip is logged" ;; *) fail "LOCAL ...and the skip is logged" "the input box is not empty, NOT typing" "$(cat "$FAKE_DIR/err")" ;; esac
+run "$PARKED_NBSP"
+eq "LOCAL ...also with the 2.1.326 NBSP box"          "0" "$(grep -c '^send-keys' "$FAKE_LOG")"
+
 run "$READY" "$OTHER"
 eq "someone else's text in the box: no extra Enter"  "1" "$(enters)"
 eq "...exit 0"                                        "0" "$RC"
@@ -231,11 +239,20 @@ if [ -n "$fallback" ] && [ "$fallback" -le 6 ]; then pass "...inside the else br
 # channels.sh itself and run here, so the test follows the real code.
 eq "the fixed 12-pass guard loop is gone"             "0" "$(grep -c '^for i in 1 2 3 4 5 6 7 8 9 10 11 12; do$' "$CHANNELS")"
 # Dani 63870: the ready banner is matched before the welcome's blind Enter in the guard.
-guard_loop="$(sed -n '/^while \[ "\$i" -lt "\$_boot_guard_s" \]; do$/,/^done$/p' "$CHANNELS")"
+guard_loop="$(sed -n '/^while \[ "\$SECONDS" -lt "\$_boot_guard_deadline" \]; do$/,/^done$/p' "$CHANNELS")"
 ready_at="$(printf '%s\n' "$guard_loop" | grep -n 'Listening for channel messages' | head -1 | cut -d: -f1)"
 welcome_at="$(printf '%s\n' "$guard_loop" | grep -n '"Welcome to Claude Code"' | head -1 | cut -d: -f1)"
 if [ -n "$ready_at" ] && [ -n "$welcome_at" ] && [ "$ready_at" -lt "$welcome_at" ]; then pass "the ready banner's branch comes before the welcome's blind Enter"; else fail "ready before welcome" "ready < welcome" "ready=$ready_at welcome=$welcome_at"; fi
-eq "the guard loop is bounded by _boot_guard_s"       "1" "$(grep -c '^while \[ "\$i" -lt "\$_boot_guard_s" \]; do$' "$CHANNELS")"
+# LOCAL: wall-clock bound (PROGI review 6212), not a pass count.
+eq "the guard loop is bounded by a wall-clock deadline" "1" "$(grep -c '^while \[ "\$SECONDS" -lt "\$_boot_guard_deadline" \]; do$' "$CHANNELS")"
+eq "...set from _boot_guard_s"                        "1" "$(grep -c '^_boot_guard_deadline=\$((SECONDS + _boot_guard_s))$' "$CHANNELS")"
+welcome_branch="$(printf '%s\n' "$guard_loop" | sed -n '/"Welcome to Claude Code"/,/;;/p')"
+skip_at="$(printf '%s\n' "$welcome_branch" | grep -n 'main_rename_prompt_drawn "\$pane"' | head -1 | cut -d: -f1)"
+enter_at="$(printf '%s\n' "$welcome_branch" | grep -n ' Enter$' | head -1 | cut -d: -f1)"
+if [ -n "$skip_at" ] && [ -n "$enter_at" ] && [ "$skip_at" -lt "$enter_at" ]; then pass "LOCAL the welcome branch skips its Enter when the input box is drawn"; else fail "LOCAL welcome skip" "skip before Enter" "skip=$skip_at enter=$enter_at"; fi
+lib_at="$(grep -n '^if \. "\$INSTALL_DIR/scripts/lib/main-rename.sh" 2>/dev/null; then _mr_lib=1; fi$' "$CHANNELS" | cut -d: -f1)"
+loop_at="$(grep -n '^while \[ "\$SECONDS" -lt "\$_boot_guard_deadline" \]; do$' "$CHANNELS" | cut -d: -f1)"
+if [ -n "$lib_at" ] && [ -n "$loop_at" ] && [ "$lib_at" -lt "$loop_at" ]; then pass "LOCAL ...the library is loaded before the guard loop"; else fail "LOCAL early library load" "lib < loop" "lib=$lib_at loop=$loop_at"; fi
 guard_parse="$(grep -E '^_boot_guard_s="\$\{CHANNELS_BOOT_GUARD_S:-90\}"$|^case "\$_boot_guard_s" in ' "$CHANNELS")"
 eq "...both parsing lines are found"                  "2" "$(printf '%s\n' "$guard_parse" | grep -c .)"
 guard_for() { ( unset CHANNELS_BOOT_GUARD_S; [ "$1" = "<unset>" ] || CHANNELS_BOOT_GUARD_S="$1"; eval "$guard_parse"; printf '%s' "$_boot_guard_s" ); }

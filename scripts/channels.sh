@@ -921,9 +921,15 @@ _eperm_restarted=0
 # the default.
 _boot_guard_s="${CHANNELS_BOOT_GUARD_S:-90}"
 case "$_boot_guard_s" in ''|*[!0-9]*|0) _boot_guard_s=90 ;; esac
-i=0
-while [ "$i" -lt "$_boot_guard_s" ]; do
-  i=$((i + 1))
+# LOCAL (PROGI review 6212): the bound is WALL-CLOCK time (bash SECONDS), not a pass count. The
+# dialog and welcome branches sleep an extra second per pass, so 90 passes could take ~180 s.
+_boot_guard_deadline=$((SECONDS + _boot_guard_s))
+# The rename library is loaded here already: the welcome branch below asks it whether the input
+# box is drawn. Loading it again at the rename step is harmless (functions only).
+_mr_lib=0
+# shellcheck source=lib/main-rename.sh
+if . "$INSTALL_DIR/scripts/lib/main-rename.sh" 2>/dev/null; then _mr_lib=1; fi
+while [ "$SECONDS" -lt "$_boot_guard_deadline" ]; do
   sleep 1
   pane=$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)
   case "$pane" in
@@ -974,13 +980,19 @@ while [ "$i" -lt "$_boot_guard_s" ]; do
       break
       ;;
     *"Welcome to Claude Code"*)
+      # LOCAL (PROGI review 6212): 2.1.326 draws "Welcome to Claude Code" in its compact header
+      # whenever the terminal is under 30 rows (our sessions are 80x24), with the input box already
+      # live. An Enter then lands in the box; only a screen WITHOUT a drawn box gets it.
+      if [ "$_mr_lib" = "1" ] && main_rename_prompt_drawn "$pane"; then
+        continue
+      fi
       $TMUX send-keys -t "=$SESSION:" Enter
       sleep 1
       continue
       ;;
   esac
 done
-unset _eperm_restarted _boot_guard_s
+unset _eperm_restarted _boot_guard_s _boot_guard_deadline _mr_lib
 
 # Set agent name once the session is ready. (/remote-control dropped: the operator no
 # longer uses Remote Control.)

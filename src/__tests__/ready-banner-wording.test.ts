@@ -19,7 +19,8 @@ const OLD = 'Listening for channel messages from: plugin:telegram@claude-plugins
 
 describe('the channels ready banner, old and new wording', () => {
   it('channels.sh: the startup guard breaks on both wordings', () => {
-    const loopStart = CHANNELS.indexOf('while [ "$i" -lt "$_boot_guard_s" ]; do')
+    const loopStart = CHANNELS.indexOf('while [ "$SECONDS" -lt "$_boot_guard_deadline" ]; do')
+    expect(loopStart).toBeGreaterThan(0)
     const loop = CHANNELS.slice(loopStart, CHANNELS.indexOf('\ndone\n', loopStart))
     const branch = loop.match(/^\s*(\*"Listening[^\n]*)\)\s*\n\s*break/m)
     expect(branch).not.toBeNull()

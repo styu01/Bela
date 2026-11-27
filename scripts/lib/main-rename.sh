@@ -86,6 +86,14 @@ main_rename_wait_prompt() {
       return 1
     fi
     if main_rename_prompt_drawn "$pane" && ! main_rename_dialog_visible "$pane"; then
+      # LOCAL (PROGI review 6212): only an EMPTY box. Text there (a delivery typed at boot, a
+      # human draft) would get "/rename <name>" appended and sent with it; skip instead, logged.
+      # Measured: with CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false (channels.sh) a drawn idle box
+      # reads empty in a plain capture, on the live main pane and on every idle agent pane.
+      if [ -n "$(main_rename_box_text "$pane")" ]; then
+        echo "$(date '+%F %T') channels.sh: boot /rename -- the input box is not empty, NOT typing" >&2
+        return 1
+      fi
       return 0
     fi
     n=$((n + 1))
