@@ -121,6 +121,8 @@ window._i18n.hu = {
   'agentCatalog.confirm.files': "Ezek a fájlok kerülnek a gépedre:",
   'agentCatalog.confirm.trial': "Próbaidős fiók: ez lesz az egyetlen ügynököd a próbaidő alatt, utána nem cserélhető.",
   'agentCatalog.confirm.trial_ack': "Értem, a próbaidő végéig nem cserélhető.",
+  'agentCatalog.confirm.name': "Név (nem kötelező)",
+  'agentCatalog.confirm.name_hint': "Így jelenik meg a dashboardon. Üresen a csomag saját neve marad.",
   'agentCatalog.file.package': "leírás",
   'agentCatalog.file.soul': "személyiség",
   'agentCatalog.file.skill': "skill",

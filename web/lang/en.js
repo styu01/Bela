@@ -121,6 +121,8 @@ window._i18n.en = {
   'agentCatalog.confirm.files': "These files go onto your machine:",
   'agentCatalog.confirm.trial': "Trial account: this will be your only agent during the trial, and it cannot be changed later.",
   'agentCatalog.confirm.trial_ack': "I understand it cannot be changed until the trial ends.",
+  'agentCatalog.confirm.name': "Name (optional)",
+  'agentCatalog.confirm.name_hint': "This is how the dashboard shows it. Left empty, the package's own name stays.",
   'agentCatalog.file.package': "description",
   'agentCatalog.file.soul': "personality",
   'agentCatalog.file.skill': "skill",
