@@ -28,7 +28,7 @@ function repo(name: string, files: Record<string, string>): string {
 }
 
 describe('gateScriptClosure', () => {
-  it('follows relative static, re-export, side-effect and dynamic imports; ignores packages and missing files; survives a cycle', () => {
+  it('follows relative static, re-export, side-effect and dynamic imports; ignores packages and missing files; survives a cycle', async () => {
     const d = join(tmp, 'closure'); mkdirSync(join(d, 'lib'), { recursive: true })
     writeFileSync(join(d, 'gate.mjs'), "import { a } from './a.mjs'\nimport fs from 'node:fs'\nexport { b } from \"./lib/b.mjs\"\nimport './c.mjs'\nconst x = await import('./d.mjs')\nimport y from './missing.mjs'\n")
     writeFileSync(join(d, 'a.mjs'), "import { g } from './gate.mjs'\n")
@@ -38,7 +38,7 @@ describe('gateScriptClosure', () => {
     const got = gateScriptClosure(join(d, 'gate.mjs'), read).map((p) => p.slice(d.length + 1)).sort()
     expect(got).toEqual(['a.mjs', 'c.mjs', 'd.mjs', 'gate.mjs', 'lib/b.mjs'])
   })
-  it('a Python gate: same-directory modules only (from x import, import a, b), the standard library is not a file here', () => {
+  it('a Python gate: same-directory modules only (from x import, import a, b), the standard library is not a file here', async () => {
     const d = join(tmp, 'closure-py'); mkdirSync(d, { recursive: true })
     writeFileSync(join(d, 'gate.py'), 'import json, os\nimport helper, other\nfrom util import f\n  import nested\n')
     for (const f of ['helper.py', 'other.py', 'util.py', 'nested.py']) writeFileSync(join(d, f), '')
@@ -48,36 +48,36 @@ describe('gateScriptClosure', () => {
 })
 
 describe('checkGateIntegrity (real git, temp repo)', () => {
-  it('HEAD content: ok; a changed gate, a changed imported module, an untracked gate: named; outside a checkout: null', () => {
+  it('HEAD content: ok; a changed gate, a changed imported module, an untracked gate: named; outside a checkout: null', async () => {
     const r = repo('integ', {
       'scripts/kanban-write-gate.mjs': "import { s } from './self-pace-gate.mjs'\nprocess.exit(0)\n",
       'scripts/self-pace-gate.mjs': 'export const s = 1\n',
     })
     const gate = join(r, 'scripts', 'kanban-write-gate.mjs')
-    expect(checkGateIntegrity(gate)).toEqual({ ok: true, detail: '' })
+    expect((await checkGateIntegrity(gate))).toEqual({ ok: true, detail: '' })
     writeFileSync(join(r, 'scripts', 'self-pace-gate.mjs'), 'export const s = 1 // allow all\n')
-    const v = checkGateIntegrity(gate)!
+    const v = (await checkGateIntegrity(gate))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain('scripts/self-pace-gate.mjs (elter a git HEAD-tol)')
     expect(v.detail).not.toContain('kanban-write-gate.mjs (')
     expect(v.detail).toContain(`git -C ${r} restore --source=HEAD scripts/self-pace-gate.mjs`)
     expect(v.detail).not.toMatch(/—| -- /)
     git(r, 'checkout', '-q', 'HEAD', '--', 'scripts/self-pace-gate.mjs')
-    expect(checkGateIntegrity(gate)!.ok).toBe(true)
+    expect((await checkGateIntegrity(gate))!.ok).toBe(true)
     writeFileSync(join(r, 'scripts', 'egress-gate.mjs'), 'process.exit(0)\n')
-    expect(checkGateIntegrity(join(r, 'scripts', 'egress-gate.mjs'))!.detail).toContain('scripts/egress-gate.mjs (nincs a git HEAD-ben)')
+    expect((await checkGateIntegrity(join(r, 'scripts', 'egress-gate.mjs')))!.detail).toContain('scripts/egress-gate.mjs (nincs a git HEAD-ben)')
     const outside = join(tmp, 'plain'); mkdirSync(outside, { recursive: true }); writeFileSync(join(outside, 'egress-gate.mjs'), '')
-    expect(checkGateIntegrity(join(outside, 'egress-gate.mjs'))).toBeNull()
+    expect((await checkGateIntegrity(join(outside, 'egress-gate.mjs')))).toBeNull()
   })
-  it('a symlinked gate path is judged by the repo file it points to', () => {
+  it('a symlinked gate path is judged by the repo file it points to', async () => {
     const r = repo('integ-link', { 'scripts/egress-gate.mjs': 'process.exit(0)\n' })
     const link = join(tmp, 'egress-link.mjs')
     symlinkSync(join(r, 'scripts', 'egress-gate.mjs'), link)
-    expect(checkGateIntegrity(link)).toEqual({ ok: true, detail: '' })
+    expect((await checkGateIntegrity(link))).toEqual({ ok: true, detail: '' })
     writeFileSync(join(r, 'scripts', 'egress-gate.mjs'), 'process.exit(0) // x\n')
-    expect(checkGateIntegrity(link)!.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
+    expect((await checkGateIntegrity(link))!.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
   })
-  it('BELA 6319 (A) / PROGI 6318: a clean filter from .git/info/attributes + .git/config neither hides a swapped gate nor gets run', () => {
+  it('BELA 6319 (A) / PROGI 6318: a clean filter from .git/info/attributes + .git/config neither hides a swapped gate nor gets run', async () => {
     const r = repo('integ-filter', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
     const gate = join(r, 'scripts', 'egress-gate.mjs')
     const headCopy = join(r, '.git', 'headcopy')
@@ -90,17 +90,17 @@ describe('checkGateIntegrity (real git, temp repo)', () => {
     writeFileSync(gate, 'process.exit(0)\n')
     expect(git(r, 'status', '--porcelain')).toBe('')
     rmSync(marker, { force: true })
-    const v = checkGateIntegrity(gate)!
+    const v = (await checkGateIntegrity(gate))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
     expect(existsSync(marker)).toBe(false) // the command from .git/config did NOT run
     // the HEAD content itself still verifies with the filter configured (no false alarm)
     writeFileSync(gate, readFileSync(headCopy))
-    expect(checkGateIntegrity(gate)).toEqual({ ok: true, detail: '' })
+    expect((await checkGateIntegrity(gate))).toEqual({ ok: true, detail: '' })
     expect(existsSync(marker)).toBe(false)
   })
 
-  it('PROGI 6332 (D): a `git replace` of the HEAD commit with a forged one (gate swapped in it) does not hide the swap', () => {
+  it('PROGI 6332 (D): a `git replace` of the HEAD commit with a forged one (gate swapped in it) does not hide the swap', async () => {
     const r = repo('integ-replace', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
     const gate = join(r, 'scripts', 'egress-gate.mjs')
     writeFileSync(gate, 'process.exit(0)\n')
@@ -111,19 +111,19 @@ describe('checkGateIntegrity (real git, temp repo)', () => {
     // git itself no longer sees the swap
     expect(git(r, 'status', '--porcelain')).toBe('')
     expect(git(r, 'rev-parse', 'HEAD:scripts/egress-gate.mjs').trim()).toBe(git(r, 'hash-object', 'scripts/egress-gate.mjs').trim())
-    const v = checkGateIntegrity(gate)!
+    const v = (await checkGateIntegrity(gate))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
     // a GIT_REPLACE_REF_BASE in the dashboard environment does not bring it back
     process.env.GIT_REPLACE_REF_BASE = 'refs/replace/'
-    try { expect(checkGateIntegrity(gate)!.ok).toBe(false) } finally { delete process.env.GIT_REPLACE_REF_BASE }
+    try { expect((await checkGateIntegrity(gate))!.ok).toBe(false) } finally { delete process.env.GIT_REPLACE_REF_BASE }
     git(r, 'replace', '-d', git(r, 'rev-parse', 'HEAD').trim())
     git(r, 'checkout', '-q', 'HEAD', '--', 'scripts/egress-gate.mjs')
-    expect(checkGateIntegrity(gate)).toEqual({ ok: true, detail: '' })
+    expect((await checkGateIntegrity(gate))).toEqual({ ok: true, detail: '' })
   })
 
-  it('a git that fails (no repo answer) is not verifiable, never a false alarm', () => {
-    expect(checkGateIntegrity('/x/scripts/egress-gate.mjs', { run: () => null }, () => '', () => true)).toBeNull()
+  it('a git that fails (no repo answer) is not verifiable, never a false alarm', async () => {
+    expect((await checkGateIntegrity('/x/scripts/egress-gate.mjs', { run: () => null }, () => '', () => true))).toBeNull()
   })
 })
 
@@ -204,7 +204,7 @@ describe('runGateSelfTest with the integrity check', () => {
 })
 
 describe('gateFailureText for an integrity failure', () => {
-  it('names the effect as unknown and the git restore as the fix', () => {
+  it('names the effect as unknown and the git restore as the fix', async () => {
     const r: GateRunResult = { entry: { agent: 'a', settingsPath: '/s', projectDir: '/p', matcher: 'Bash', command: 'x', timeoutSec: 10, gate: 'egress-gate.mjs' }, ok: false, detail: 'a kapu tartalma nem a verziokezelt: scripts/egress-gate.mjs (elter a git HEAD-tol)', integrity: true }
     const t = gateFailureText([r], [0, 0, 0])
     expect(t).toContain('Hatas: ismeretlen')

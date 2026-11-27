@@ -31,75 +31,75 @@ function repo(name: string, files: Record<string, string>): string {
 const NOGIT: GitIo = { run: () => null }
 
 describe('detectGitAnchor', () => {
-  it('the checkout top of the root (also from a subdirectory); a plain directory: null', () => {
+  it('the checkout top of the root (also from a subdirectory); a plain directory: null', async () => {
     const r = repo('anchor', { 'scripts/egress-gate.mjs': 'process.exit(0)\n' })
-    expect(detectGitAnchor(r)).toBe(r)
-    expect(detectGitAnchor(join(r, 'scripts'))).toBe(r)
+    expect((await detectGitAnchor(r))).toBe(r)
+    expect((await detectGitAnchor(join(r, 'scripts')))).toBe(r)
     const plain = join(tmp, 'plain-root'); mkdirSync(plain, { recursive: true })
-    expect(detectGitAnchor(plain)).toBeNull()
+    expect((await detectGitAnchor(plain))).toBeNull()
   })
-  it('git not answering at boot: a .git entry at the root still makes it a clone; without one, not a clone', () => {
-    expect(detectGitAnchor('/srv/app', NOGIT, (p) => p === '/srv/app/.git')).toBe('/srv/app')
-    expect(detectGitAnchor('/srv/app', NOGIT, () => false)).toBeNull()
+  it('git not answering at boot: a .git entry at the root still makes it a clone; without one, not a clone', async () => {
+    expect((await detectGitAnchor('/srv/app', NOGIT, (p) => p === '/srv/app/.git'))).toBe('/srv/app')
+    expect((await detectGitAnchor('/srv/app', NOGIT, () => false))).toBeNull()
   })
 })
 
 describe('checkGateIntegrity under the install anchor (real git)', () => {
-  it('a broken .git/HEAD: unverifiable failing verdict under the anchor; the old null without one', () => {
+  it('a broken .git/HEAD: unverifiable failing verdict under the anchor; the old null without one', async () => {
     const r = repo('broken-head', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
     const gate = join(r, 'scripts', 'egress-gate.mjs')
-    expect(checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r)).toEqual({ ok: true, detail: '' })
+    expect((await checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r))).toEqual({ ok: true, detail: '' })
     writeFileSync(gate, 'process.exit(0)\n') // swapped AND the checkout broken: the swap must not get through silently
     writeFileSync(join(r, '.git', 'HEAD'), 'garbage\n')
-    const v = checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r)!
+    const v = (await checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r))!
     expect(v.ok).toBe(false)
     expect(v.unverifiable).toBe(true)
     expect(v.detail).toContain('nem ellenorizheto')
     expect(v.detail).toContain(`git -C ${r} status`)
     expect(v.detail).not.toMatch(/—| -- /)
-    expect(checkGateIntegrity(gate, REAL_GIT)).toBeNull()
+    expect((await checkGateIntegrity(gate, REAL_GIT))).toBeNull()
     writeFileSync(join(r, '.git', 'HEAD'), 'ref: refs/heads/master\n')
   })
-  it('an unreadable .git (chmod 000): unverifiable under the anchor', () => {
+  it('an unreadable .git (chmod 000): unverifiable under the anchor', async () => {
     const r = repo('unreadable', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
     const gate = join(r, 'scripts', 'egress-gate.mjs')
     chmodSync(join(r, '.git'), 0o000)
     try {
-      const v = checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r)
+      const v = (await checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r))
       expect(v?.ok).toBe(false)
       expect(v?.unverifiable).toBe(true)
     } finally { chmodSync(join(r, '.git'), 0o755) }
-    expect(checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r)).toEqual({ ok: true, detail: '' })
+    expect((await checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r))).toEqual({ ok: true, detail: '' })
   })
-  it('git not answering at all (safe.directory refusal, hung / missing git): unverifiable under the anchor only', () => {
+  it('git not answering at all (safe.directory refusal, hung / missing git): unverifiable under the anchor only', async () => {
     const r = repo('nogit', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
-    expect(checkGateIntegrity(join(r, 'scripts', 'egress-gate.mjs'), NOGIT, undefined, undefined, r)?.unverifiable).toBe(true)
+    expect((await checkGateIntegrity(join(r, 'scripts', 'egress-gate.mjs'), NOGIT, undefined, undefined, r))?.unverifiable).toBe(true)
     // a gate OUTSIDE the anchor (e.g. a user-level hook in no checkout) keeps the skip
     const outside = join(tmp, 'outside'); mkdirSync(outside, { recursive: true }); writeFileSync(join(outside, 'egress-gate.mjs'), '')
-    expect(checkGateIntegrity(join(outside, 'egress-gate.mjs'), NOGIT, undefined, undefined, r)).toBeNull()
+    expect((await checkGateIntegrity(join(outside, 'egress-gate.mjs'), NOGIT, undefined, undefined, r))).toBeNull()
     // a sibling directory sharing the anchor's name prefix is not "under" it
     const sib = `${r}-x`; mkdirSync(sib, { recursive: true }); writeFileSync(join(sib, 'egress-gate.mjs'), '')
-    expect(checkGateIntegrity(join(sib, 'egress-gate.mjs'), NOGIT, undefined, undefined, r)).toBeNull()
+    expect((await checkGateIntegrity(join(sib, 'egress-gate.mjs'), NOGIT, undefined, undefined, r))).toBeNull()
   })
-  it('a nested .git inside the checkout whose HEAD matches the swapped gate: unverifiable under the anchor (was ok)', () => {
+  it('a nested .git inside the checkout whose HEAD matches the swapped gate: unverifiable under the anchor (was ok)', async () => {
     const r = repo('nested', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
     const gate = join(r, 'scripts', 'egress-gate.mjs')
     writeFileSync(gate, 'process.exit(0) // allow all\n')
     git(join(r, 'scripts'), 'init', '-q')
     git(join(r, 'scripts'), 'add', '-A')
     git(join(r, 'scripts'), 'commit', '-q', '-m', 'forged')
-    expect(checkGateIntegrity(gate, REAL_GIT)).toEqual({ ok: true, detail: '' }) // the bypass without the anchor
-    const v = checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r)!
+    expect((await checkGateIntegrity(gate, REAL_GIT))).toEqual({ ok: true, detail: '' }) // the bypass without the anchor
+    const v = (await checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r))!
     expect(v.ok).toBe(false)
     expect(v.unverifiable).toBe(true)
     expect(v.detail).toContain('beagyazott')
     expect(v.detail).toContain(join(r, 'scripts'))
   })
-  it('the anchor checkout itself working: the usual verdicts (ok / differs) are unchanged', () => {
+  it('the anchor checkout itself working: the usual verdicts (ok / differs) are unchanged', async () => {
     const r = repo('normal', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
     const gate = join(r, 'scripts', 'egress-gate.mjs')
     writeFileSync(gate, 'process.exit(0)\n')
-    const v = checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r)!
+    const v = (await checkGateIntegrity(gate, REAL_GIT, undefined, undefined, r))!
     expect(v.ok).toBe(false)
     expect(v.unverifiable).toBeUndefined()
     expect(v.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
@@ -277,7 +277,7 @@ describe('reconcileUnverifiable (pure)', () => {
   const entry = (agent: string, gate: string, sp = `/s/${agent}`) => ({ agent, settingsPath: sp, projectDir: '/p', matcher: 'Bash', command: 'x', timeoutSec: 10, gate })
   const u = (agent: string, gate: string, sp?: string): GateRunResult => ({ entry: entry(agent, gate, sp), ok: false, detail: 'd', integrity: true, unverifiable: true })
   const ok = (agent: string, gate: string): GateRunResult => ({ entry: entry(agent, gate), ok: true, detail: '' })
-  it('fail / re-raise only on a new gate script / quiet / recover / an unreadable settings file keeps it open', () => {
+  it('fail / re-raise only on a new gate script / quiet / recover / an unreadable settings file keeps it open', async () => {
     expect(reconcileUnverifiable(null, [u('a', 'g1')], [u('a', 'g1')])).toEqual({ fail: { reraise: false }, recover: false })
     const open = { repo: '/r', gates: new Set(['g1']), results: [u('a', 'g1', '/s/a')], raisedAt: 0 }
     expect(reconcileUnverifiable(open, [u('a', 'g1'), u('b', 'g1')], [])).toEqual({ fail: null, recover: false })
@@ -287,7 +287,7 @@ describe('reconcileUnverifiable (pure)', () => {
     expect(reconcileUnverifiable(open, [], [], new Set())).toEqual({ fail: null, recover: true })
     expect(reconcileUnverifiable(null, [], [ok('a', 'g1')])).toEqual({ fail: null, recover: false })
   })
-  it('the alert text groups by gate script and names the checkout', () => {
+  it('the alert text groups by gate script and names the checkout', async () => {
     const t = gateUnverifiableText('/r', [u('a', 'g1'), u('b', 'g1'), u('a', 'g2')])
     expect(t).toContain('a telepites git checkoutjaban (/r) 2 kapu-szkript')
     expect(t).toContain('- kapu: g1 (2 bekotott bejegyzes, agensek: a, b): d.')

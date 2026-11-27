@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync } from 'node:fs'
 import { join, dirname, relative, isAbsolute, resolve, sep } from 'node:path'
 import { loadavg } from 'node:os'
@@ -149,7 +149,12 @@ export function gateScriptPath(command: string, gate: string, projectDir: string
 // --no-filters` (the raw bytes, no attribute filter) against `git rev-parse HEAD:<path>`.
 // A file outside any git checkout (an install that is not a clone) is not verifiable and is skipped; a file
 // in a checkout but not in HEAD, or different from it, is a failing entry with its own effect text.
-export interface GitIo { run: (cwd: string, args: readonly string[]) => string | null }
+// PROGI 6318 (4): asynchronous. With execFileSync a hung git froze the dashboard's event loop for up to 5 s a
+// call (12 calls a pass, twice with the re-check: up to 120 s). The git layer may answer synchronously (the
+// test doubles) or with a promise; every caller awaits it.
+type Awaitable<T> = T | Promise<T>
+export interface GitIo { run: (cwd: string, args: readonly string[]) => Awaitable<string | null> }
+export const GIT_CALL_TIMEOUT_MS = 5000
 const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES', 'GIT_REPLACE_REF_BASE']
 export const REAL_GIT: GitIo = {
   run: (cwd, args) => {
@@ -159,7 +164,16 @@ export const REAL_GIT: GitIo = {
       // PROGI 6332 (D): `git replace <HEAD commit> <forged commit>` (refs/replace/) makes HEAD:<gate> resolve to a
       // swapped blob, and git status / diff / log hide it too. The check reads the real objects only.
       env.GIT_NO_REPLACE_OBJECTS = '1'
-      return execFileSync('git', [...args], { cwd, env, encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+      return new Promise<string | null>((done) => {
+        // SIGKILL at the deadline: a git stuck on a lock / a dead mount must not outlive the pass. On the
+        // deadline execFile also destroys the child's pipes, so a process that inherited them cannot hold the
+        // answer back (tested).
+        const child = execFile('git', [...args], { cwd, env, encoding: 'utf-8', timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 1 << 20 },
+          (err, stdout) => done(err ? null : String(stdout).trim()))
+        // No git command here reads stdin; closing it keeps one from waiting on it.
+        child.stdin?.on('error', () => { /* already gone */ })
+        child.stdin?.end()
+      })
     } catch {
       return null
     }
@@ -216,8 +230,8 @@ const isInside = (root: string, p: string): boolean => {
 // the checkout, whose own HEAD could be made to match any swapped gate).
 /** The git checkout PROJECT_ROOT is in, taken once at dashboard start; null: not a clone. A .git entry at the
  *  root counts even when git does not answer at boot (a broken checkout is then reported, not skipped). */
-export function detectGitAnchor(root: string = PROJECT_ROOT, git: GitIo = REAL_GIT, exists: (path: string) => boolean = existsSync): string | null {
-  const top = git.run(root, ['rev-parse', '--show-toplevel'])
+export async function detectGitAnchor(root: string = PROJECT_ROOT, git: GitIo = REAL_GIT, exists: (path: string) => boolean = existsSync): Promise<string | null> {
+  const top = await git.run(root, ['rev-parse', '--show-toplevel'])
   if (top) return canonical(top)
   if (exists(join(root, '.git'))) return canonical(root)
   return null
@@ -266,13 +280,13 @@ export function symlinkBelow(base: string, p: string): { component: string; targ
 
 /** null: not verifiable and not expected to be (not in a git checkout, and not under `anchor`). Otherwise ok,
  *  or the files that are not HEAD's content, or (under `anchor`) why it could not be verified there. */
-export function checkGateIntegrity(
+export async function checkGateIntegrity(
   script: string,
   git: GitIo = REAL_GIT,
   read: (path: string) => string | null = (p) => { try { return readFileSync(p, 'utf-8') } catch { return null } },
   exists: (path: string) => boolean = existsSync,
   anchor: string | null = null,
-): IntegrityVerdict | null {
+): Promise<IntegrityVerdict | null> {
   const base = anchor != null ? anchorBase(anchor, script) : null
   if (anchor != null && base != null) {
     const link = symlinkBelow(base, script)
@@ -287,7 +301,7 @@ export function checkGateIntegrity(
   try { real = realpathSync(script) } catch { /* checked by the caller: it exists */ }
   // (A base without a symlink below it means real = anchor/<rel>, so this covers the wired path too.)
   const underAnchor = anchor != null && isInside(anchor, real)
-  const topRaw = git.run(dirname(real), ['rev-parse', '--show-toplevel'])
+  const topRaw = await git.run(dirname(real), ['rev-parse', '--show-toplevel'])
   if (!topRaw) {
     if (!underAnchor) return null
     return {
@@ -315,13 +329,13 @@ export function checkGateIntegrity(
     try { fr = realpathSync(f) } catch { /* keep */ }
     const rel = relative(top, fr)
     if (rel.startsWith('..') || isAbsolute(rel)) { bad.push(`${fr} (a repon kivul)`); continue }
-    const head = git.run(top, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`])
+    const head = await git.run(top, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`])
     if (!head) { bad.push(`${rel} (nincs a git HEAD-ben)`); continue }
     // BELA 6319 (A) / PROGI 6318: --no-filters, the hash of the RAW bytes. With --path the path's attributes
     // applied, so a clean filter set through .git/info/attributes + .git/config could hide a swapped gate (git
     // status / diff use the same filter, so they would not show it either) AND this test would run that
     // filter's command from .git/config every pass. No gate here has an eol / encoding attribute (.mjs, .py).
-    const work = git.run(top, ['hash-object', '--no-filters', '--', fr])
+    const work = await git.run(top, ['hash-object', '--no-filters', '--', fr])
     if (work !== head) bad.push(`${rel} (elter a git HEAD-tol)`)
   }
   if (!bad.length) return { ok: true, detail: '' }
@@ -333,10 +347,10 @@ export function checkGateIntegrity(
 }
 
 /** Run one wired gate command exactly as written, with a benign call on stdin. Never throws. */
-export function runGateCommand(
+export async function runGateCommand(
   entry: GateEntry,
   port: number | string = WEB_PORT,
-  integrity?: (script: string) => IntegrityVerdict | null,
+  integrity?: (script: string) => Awaitable<IntegrityVerdict | null>,
 ): Promise<GateRunResult> {
   const cwd = existsSync(entry.projectDir) ? entry.projectDir : PROJECT_ROOT
   const call = benignToolCall(entry.matcher, cwd, port)
@@ -348,12 +362,12 @@ export function runGateCommand(
   // not block the owner's only channel), so running it would pass silently; the file itself is checked.
   const script = gateScriptPath(entry.command, entry.gate, cwd)
   if (script != null && script.startsWith('/') && !existsSync(script)) {
-    return Promise.resolve({ entry, ok: false, detail: `a kapu fajlja hianyzik: ${script}`, timeoutLike: false })
+    return { entry, ok: false, detail: `a kapu fajlja hianyzik: ${script}`, timeoutLike: false }
   }
   if (integrity && script != null && script.startsWith('/')) {
     let v: IntegrityVerdict | null = null
-    try { v = integrity(script) } catch { v = null }
-    if (v != null && !v.ok) return Promise.resolve({ entry, ok: false, detail: v.detail, timeoutLike: false, integrity: true, ...(v.unverifiable ? { unverifiable: true } : {}) })
+    try { v = await integrity(script) } catch { v = null }
+    if (v != null && !v.ok) return { entry, ok: false, detail: v.detail, timeoutLike: false, integrity: true, ...(v.unverifiable ? { unverifiable: true } : {}) }
   }
   return new Promise((resolve) => {
     let stdout = ''
@@ -585,7 +599,7 @@ export function reconcileGateEscalations(
 }
 let running = false
 // BELA 6319 (B): set once by startGateSelfTest (dashboard start); undefined: not started (tests).
-let bootGitAnchor: string | null | undefined
+let bootGitAnchor: Promise<string | null> | undefined
 
 /** One self-test pass. Exported for tests (targets, reader, alerter / sender and the re-run wait injectable). */
 export async function runGateSelfTest(opts: {
@@ -612,11 +626,13 @@ export async function runGateSelfTest(opts: {
     const results: GateRunResult[] = []
     // BELA 6270: one integrity verdict per gate script per pass (the same file is wired in many settings).
     const git = opts.git === undefined ? REAL_GIT : opts.git
-    const anchor = opts.gitAnchor !== undefined ? opts.gitAnchor : (bootGitAnchor ?? null)
-    const verdicts = new Map<string, IntegrityVerdict | null>()
+    // The boot detection is asynchronous now: a pass started before it settled waits for it.
+    const anchor = opts.gitAnchor !== undefined ? opts.gitAnchor : ((await bootGitAnchor) ?? null)
+    const verdicts = new Map<string, Promise<IntegrityVerdict | null>>()
     const integrity = git == null ? undefined : (script: string) => {
-      if (!verdicts.has(script)) verdicts.set(script, checkGateIntegrity(script, git, undefined, opts.exists, anchor))
-      return verdicts.get(script) ?? null
+      let v = verdicts.get(script)
+      if (!v) { v = checkGateIntegrity(script, git, undefined, opts.exists, anchor); verdicts.set(script, v) }
+      return v
     }
     // Sequential on purpose: ~30 short processes every 15 minutes, never a burst on a loaded host.
     for (const e of entries) results.push(await runGateCommand(e, opts.port, integrity))
@@ -733,8 +749,8 @@ export function resetGateSelfTestState(): void {
 }
 
 export function startGateSelfTest(): NodeJS.Timeout {
-  bootGitAnchor = detectGitAnchor()
-  logger.info({ anchor: bootGitAnchor }, 'gate self-test: install checkout for the integrity check (null: not a git clone, skipped)')
+  bootGitAnchor = detectGitAnchor().catch(() => null)
+  void bootGitAnchor.then((anchor) => logger.info({ anchor }, 'gate self-test: install checkout for the integrity check (null: not a git clone, skipped)'))
   setTimeout(() => { void runGateSelfTest().catch((err) => logger.warn({ err }, 'gate self-test failed')) }, GATE_SELF_TEST_INITIAL_DELAY_MS).unref()
   return setInterval(() => { void runGateSelfTest().catch((err) => logger.warn({ err }, 'gate self-test failed')) }, GATE_SELF_TEST_INTERVAL_MS)
 }

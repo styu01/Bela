@@ -31,12 +31,12 @@ const chk = (gate: string, anchor: string | null) => checkGateIntegrity(gate, RE
 const OK = { ok: true, detail: '' }
 
 describe('symlink on the wired gate path, under the anchor', () => {
-  it('(C1) the gate swapped for a symlink to an already COMMITTED pass-all file of the same repo: failing (was ok)', () => {
+  it('(C1) the gate swapped for a symlink to an already COMMITTED pass-all file of the same repo: failing (was ok)', async () => {
     const r = repo('c1')
-    expect(chk(r.gate, r.d)).toEqual(OK)
+    expect((await chk(r.gate, r.d))).toEqual(OK)
     unlinkSync(r.gate); symlinkSync('noop.mjs', r.gate)
-    expect(chk(r.gate, null)).toEqual(OK) // without an anchor: the old judgement of the target (documented)
-    const v = chk(r.gate, r.d)!
+    expect((await chk(r.gate, null))).toEqual(OK) // without an anchor: the old judgement of the target (documented)
+    const v = (await chk(r.gate, r.d))!
     expect(v.ok).toBe(false)
     expect(v.unverifiable).toBeUndefined() // a detectable swap, not "cannot check"
     expect(v.detail).toContain('scripts/gate.mjs (szimlink a bekotott utvonalon: scripts/gate.mjs -> noop.mjs)')
@@ -44,41 +44,41 @@ describe('symlink on the wired gate path, under the anchor', () => {
     expect(v.detail).not.toMatch(/—| -- /)
     // the suggested fix works
     git(r.d, 'restore', '--source=HEAD', 'scripts/gate.mjs')
-    expect(chk(r.gate, r.d)).toEqual(OK)
+    expect((await chk(r.gate, r.d))).toEqual(OK)
   })
 
-  it('(C2) a symlink into a forged repo outside the anchor (was ok), and to a loose file outside any repo (was a silent skip): failing', () => {
+  it('(C2) a symlink into a forged repo outside the anchor (was ok), and to a loose file outside any repo (was a silent skip): failing', async () => {
     const r = repo('c2')
     const fake = repo('c2-fake')
     writeFileSync(fake.gate, 'process.exit(0)\n'); git(fake.d, 'commit', '-qam', 'swap')
     unlinkSync(r.gate); symlinkSync(fake.gate, r.gate)
-    expect(chk(r.gate, r.d)?.ok).toBe(false)
-    expect(chk(r.gate, r.d)?.detail).toContain(`scripts/gate.mjs -> ${fake.gate}`)
+    expect((await chk(r.gate, r.d))?.ok).toBe(false)
+    expect((await chk(r.gate, r.d))?.detail).toContain(`scripts/gate.mjs -> ${fake.gate}`)
     const loose = join(tmp, 'loose'); mkdirSync(loose, { recursive: true }); writeFileSync(join(loose, 'g.mjs'), 'process.exit(0)\n')
     unlinkSync(r.gate); symlinkSync(join(loose, 'g.mjs'), r.gate)
-    expect(chk(r.gate, null)).toBeNull() // the old skip without an anchor
-    expect(chk(r.gate, r.d)?.ok).toBe(false)
+    expect((await chk(r.gate, null))).toBeNull() // the old skip without an anchor
+    expect((await chk(r.gate, r.d))?.ok).toBe(false)
   })
 
-  it('a PARENT directory of the gate swapped for a symlink (to a forged copy outside): failing, the directory named', () => {
+  it('a PARENT directory of the gate swapped for a symlink (to a forged copy outside): failing, the directory named', async () => {
     const r = repo('parent')
     const fake = repo('parent-fake')
     writeFileSync(fake.gate, 'process.exit(0)\n'); git(fake.d, 'commit', '-qam', 'swap')
     renameSync(join(r.d, 'scripts'), join(tmp, 'parent-scripts-aside'))
     symlinkSync(join(fake.d, 'scripts'), join(r.d, 'scripts'))
-    const v = chk(r.gate, r.d)!
+    const v = (await chk(r.gate, r.d))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain(`(szimlink a bekotott utvonalon: scripts -> ${join(fake.d, 'scripts')})`)
     expect(v.detail).toMatch(/restore --source=HEAD scripts$/) // the symlinked directory itself, not the file under it
     git(r.d, 'restore', '--source=HEAD', 'scripts')
-    expect(chk(r.gate, r.d)).toEqual(OK)
+    expect((await chk(r.gate, r.d))).toEqual(OK)
   })
 
-  it('a local MODULE swapped for a symlink to a committed permissive module: failing, the module named', () => {
+  it('a local MODULE swapped for a symlink to a committed permissive module: failing, the module named', async () => {
     const r = repo('module')
     unlinkSync(join(r.d, 'scripts', 'mod.mjs')); symlinkSync('mod-open.mjs', join(r.d, 'scripts', 'mod.mjs'))
-    expect(chk(r.gate, null)).toEqual(OK) // the old bypass
-    const v = chk(r.gate, r.d)!
+    expect((await chk(r.gate, null))).toEqual(OK) // the old bypass
+    const v = (await chk(r.gate, r.d))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain('scripts/mod.mjs (szimlink: -> mod-open.mjs)')
     expect(v.detail).not.toContain('scripts/gate.mjs (')
@@ -87,53 +87,53 @@ describe('symlink on the wired gate path, under the anchor', () => {
 })
 
 describe('(F) a symlink inside the checkout pointing back to its root (PROGI 6338, BELA 6339)', () => {
-  it('a wired path through a link back to the checkout root: failing (was ok, the verified file ran as <root>/scripts/gate.mjs)', () => {
+  it('a wired path through a link back to the checkout root: failing (was ok, the verified file ran as <root>/scripts/gate.mjs)', async () => {
     const r = repo('loop', { 'agents/x/keep.txt': '' })
     symlinkSync(r.d, join(r.d, 'agents', 'x', 'root'))
     const wired = join(r.d, 'agents', 'x', 'root', 'scripts', 'gate.mjs')
-    const v = chk(wired, r.d)!
+    const v = (await chk(wired, r.d))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain(`szimlink a bekotott utvonalon: agents/x/root -> ${r.d}`)
     expect(v.unverifiable).toBeUndefined()
   })
-  it('PROGI PoC: scripts/hooks swapped for a link to the root, a pass-all gate.mjs COMMITTED at the root: failing (was ok)', () => {
+  it('PROGI PoC: scripts/hooks swapped for a link to the root, a pass-all gate.mjs COMMITTED at the root: failing (was ok)', async () => {
     const r = repo('loop-pass', { 'scripts/hooks/gate.mjs': GATE, 'scripts/hooks/mod.mjs': 'export function deny() { return true }\n', 'gate.mjs': 'process.exit(0)\n' })
     const wired = join(r.d, 'scripts', 'hooks', 'gate.mjs')
-    expect(chk(wired, r.d)).toEqual(OK) // the real directory: ok (GATE + its module)
+    expect((await chk(wired, r.d))).toEqual(OK) // the real directory: ok (GATE + its module)
     rmSync(join(r.d, 'scripts', 'hooks'), { recursive: true }); symlinkSync(r.d, join(r.d, 'scripts', 'hooks'))
-    const v = chk(wired, r.d)!
+    const v = (await chk(wired, r.d))!
     expect(v.ok).toBe(false)
     expect(v.detail).toContain(`szimlink a bekotott utvonalon: scripts/hooks -> ${r.d}`)
     expect(v.detail).toContain(`git -C ${r.d} restore --source=HEAD scripts/hooks`)
   })
-  it('through an alias ABOVE the root the inner loop link is still found; the alias alone stays ok', () => {
+  it('through an alias ABOVE the root the inner loop link is still found; the alias alone stays ok', async () => {
     const r = repo('loop-alias', { 'agents/x/keep.txt': '' })
     const alias = join(tmp, 'alias-of-loop'); symlinkSync(r.d, alias)
-    expect(chk(join(alias, 'scripts', 'gate.mjs'), r.d)).toEqual(OK)
+    expect((await chk(join(alias, 'scripts', 'gate.mjs'), r.d))).toEqual(OK)
     symlinkSync(r.d, join(r.d, 'agents', 'x', 'root'))
-    expect(chk(join(alias, 'agents', 'x', 'root', 'scripts', 'gate.mjs'), r.d)?.detail).toContain(`szimlink a bekotott utvonalon: agents/x/root -> ${r.d}`)
+    expect((await chk(join(alias, 'agents', 'x', 'root', 'scripts', 'gate.mjs'), r.d))?.detail).toContain(`szimlink a bekotott utvonalon: agents/x/root -> ${r.d}`)
   })
 })
 
 describe('no false alarm', () => {
-  it('a symlink ABOVE the checkout root (an alias of the install path) is not the checkout\'s business: ok', () => {
+  it('a symlink ABOVE the checkout root (an alias of the install path) is not the checkout\'s business: ok', async () => {
     const r = repo('above')
     const alias = join(tmp, 'alias-of-above'); symlinkSync(r.d, alias)
-    expect(chk(join(alias, 'scripts', 'gate.mjs'), r.d)).toEqual(OK)
+    expect((await chk(join(alias, 'scripts', 'gate.mjs'), r.d))).toEqual(OK)
     // ... and a symlink swap below the root is still seen through the alias
     unlinkSync(r.gate); symlinkSync('noop.mjs', r.gate)
-    expect(chk(join(alias, 'scripts', 'gate.mjs'), r.d)?.detail).toContain('szimlink a bekotott utvonalon: scripts/gate.mjs -> noop.mjs')
+    expect((await chk(join(alias, 'scripts', 'gate.mjs'), r.d))?.detail).toContain('szimlink a bekotott utvonalon: scripts/gate.mjs -> noop.mjs')
   })
-  it('plain files (today\'s install): ok; a gate outside the anchor keeps the old rules', () => {
+  it('plain files (today\'s install): ok; a gate outside the anchor keeps the old rules', async () => {
     const r = repo('plain')
-    expect(chk(r.gate, r.d)).toEqual(OK)
+    expect((await chk(r.gate, r.d))).toEqual(OK)
     const other = repo('plain-other')
-    expect(chk(other.gate, r.d)).toEqual(OK)
+    expect((await chk(other.gate, r.d))).toEqual(OK)
   })
 })
 
 describe('symlinkBelow', () => {
-  it('first symlink component below the base with its target; none; a missing component: null', () => {
+  it('first symlink component below the base with its target; none; a missing component: null', async () => {
     const b = join(tmp, 'sb'); mkdirSync(join(b, 'a', 'b'), { recursive: true }); writeFileSync(join(b, 'a', 'b', 'f'), '')
     expect(symlinkBelow(b, join(b, 'a', 'b', 'f'))).toBeNull()
     symlinkSync(join(b, 'a'), join(b, 'l'))
