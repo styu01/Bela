@@ -101,6 +101,7 @@ vi.mock('../web/active-model.js', () => ({
   readContextTokensFromProjectDir: () => null,
   readActiveModelFromProjectDir: () => null,
   readTranscriptMtimeFromProjectDir: () => null,
+  readLastTurnActivityMs: () => null,
 }))
 vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'marveen-channels' }))
 vi.mock('../notify.js', () => ({ notifyChannel: async () => {} }))
