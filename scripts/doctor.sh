@@ -139,6 +139,19 @@ if [ -f ".claude/settings.json" ]; then
 else
   fail ".claude/settings.json missing"
 fi
+# PROGI review 6212: on Claude Code 2.1.326 the bypass-permissions panel focuses "No, exit"
+# (measured); channels.sh answers it from the pane, but the setting that suppresses the panel is the
+# first line of defence for the main agent's restart loop. Checked where the main session reads it.
+for _sf in "$HOME/.claude/settings.json" "$INSTALL_DIR/.channels-config/settings.json"; do
+  [ -f "$_sf" ] || continue
+  _skip=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('skipDangerousModePermissionPrompt') is True)" "$_sf" 2>/dev/null)
+  if [ "$_skip" = "True" ]; then
+    ok "skipDangerousModePermissionPrompt: true ($_sf)"
+  else
+    fail "skipDangerousModePermissionPrompt NOT true in $_sf -- the bypass panel would stop the main session's start"
+  fi
+done
+unset _sf _skip
 
 # --- .env keys ---
 echo -e "\n${BOLD}.env keys${RESET}"

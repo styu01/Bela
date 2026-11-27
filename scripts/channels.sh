@@ -904,7 +904,9 @@ $TMUX set-option -t "=$SESSION:" remain-on-exit on 2>/dev/null || true
 # soha nem toltodne be. Tobb fajta dialog elofordulhat:
 #  - "Bypass Permissions mode" (--dangerously-skip-permissions confirmation,
 #    valasz: 2 Enter = "Yes, I accept")
-#  - "Do you trust the files in this folder?" / "trust" prompts (Y Enter)
+#  - a folder-trust dialogus: a regi kerdes ("Do you trust the files in this folder?") es a
+#    2.1.246+ panel ("Quick safety check: ...", opcio: "Yes, I trust this folder"); a horgony az
+#    opcio-szoveg. Valasz: lasd _answer_accept_dialog (pane-bol olvasva, nem szammal).
 #  - "Welcome to Claude Code" / kezdo vezetes (Enter a folytatashoz)
 # A guard CHANNELS_BOOT_GUARD_S masodpercig figyel (alap 90, korabban fix 12), de a kesz
 # bannerre azonnal kilep, tehat normal indulasnal nem var tovabb (upstream aca174dd, #2389).
@@ -912,6 +914,35 @@ $TMUX set-option -t "=$SESSION:" remain-on-exit on 2>/dev/null || true
 # EPERM fallback (Claude Code 2.1.183+ regression): launching --channels in a
 # trusted project directory throws EPERM before any dialog appears. Detected
 # below; one auto-restart from /tmp where the trust dialog fires instead.
+# The startup dialogs are answered FROM THE PANE, never by number or default (upstream ef83f266,
+# TRUSTGATE901, ported; PROGI review 6212). MEASURED on Claude Code 2.1.326 (own pty, throwaway HOME
+# and project dir, 2026-11-27): on both the folder-trust and the bypass-permissions panel the
+# focused first row is "No, exit"; Enter, Tab+Enter, "1"+Enter and "2"+Enter all EXIT the session,
+# Down+Enter and Up+Enter accept, "y" does nothing. So the old "2" Enter / "1" Enter chose the exit.
+# Here: if the cursor row (the one with the glyph) is the "Yes" row, Enter; if the "Yes" row is the
+# next line, Down, then the pane is READ AGAIN and Enter goes only if the cursor now sits on "Yes"
+# (LOCAL: upstream pressed Enter blind after the Down). Any other shape: no key at all -- on these
+# panels neither Enter nor Escape is neutral. Arg: the pane capture.
+_answer_accept_dialog() {
+  _cur=$(printf '%s\n' "$1" | grep -n "❯" | head -1 | cut -d: -f1)
+  _yes=$(printf '%s\n' "$1" | grep -n "Yes" | grep -v "No, exit" | head -1 | cut -d: -f1)
+  if [ -n "$_cur" ] && [ -n "$_yes" ] && [ "$_yes" = "$_cur" ]; then
+    $TMUX send-keys -t "=$SESSION:" Enter
+  elif [ -n "$_cur" ] && [ -n "$_yes" ] && [ "$_yes" = "$((_cur + 1))" ]; then
+    $TMUX send-keys -t "=$SESSION:" Down
+    sleep 1
+    _again=$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)
+    if printf '%s\n' "$_again" | grep "❯" | head -1 | grep -q "Yes"; then
+      $TMUX send-keys -t "=$SESSION:" Enter
+    else
+      echo "$(date '+%F %T') channels.sh: startup dialog -- the cursor did not land on Yes after Down, NO Enter (TRUSTGATE901)" >&2
+    fi
+  else
+    echo "$(date '+%F %T') channels.sh: startup dialog in an unknown shape -- no key sent (TRUSTGATE901)" >&2
+  fi
+  unset _cur _yes _again
+}
+
 _eperm_restarted=0
 # #2389: the guard watches the pane for CHANNELS_BOOT_GUARD_S seconds (default
 # 90, was a fixed 12). REPORTED (2026-10-31, Linux/Discord): on a lagging boot
@@ -962,12 +993,12 @@ while [ "$SECONDS" -lt "$_boot_guard_deadline" ]; do
       continue
       ;;
     *"Bypass Permissions mode"*"Yes, I accept"*)
-      $TMUX send-keys -t "=$SESSION:" "2" Enter
+      _answer_accept_dialog "$pane"
       sleep 1
       continue
       ;;
-    *"Do you trust the files in this folder?"*)
-      $TMUX send-keys -t "=$SESSION:" "1" Enter
+    *"Do you trust the files in this folder?"*|*"Yes, I trust this folder"*)
+      _answer_accept_dialog "$pane"
       sleep 1
       continue
       ;;
