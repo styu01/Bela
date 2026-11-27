@@ -274,4 +274,36 @@ describe('BELA 6297 (A): the consent handler shares the per-session dialog lock 
     expect(maxActive).toBe(1)
     expect(tl).toEqual(['r1:Enter'])
   })
+
+  // PROGI 6312: the check above counts inside a synchronous capture, where the count is always 1. Here every
+  // pane operation (capture, key, wait) of every run goes on one timeline, with real timer yields in each
+  // wait; the lock holds iff each run's operations form ONE contiguous block (no run resumes after another
+  // run touched the pane). Without the lock the runs interleave.
+  it('stress: 3 rounds x 12 mixed callers with real waits; every run touches the pane in one contiguous block', async () => {
+    const timeline: number[] = []
+    const landed = CREDITS_ON.replace(' ❯ Switch', '   Switch').replace('   Continue with Fable 5', ' ❯ Continue with Fable 5')
+    let nextId = 0
+    const run = (kind: 'resume' | 'consent', i: number) => {
+      const id = nextId++
+      let n = 0
+      const frames = kind === 'resume' ? [RESUME, RESUME, IDLE] : [CREDITS_ON, CREDITS_ON, landed, IDLE]
+      const io = {
+        capture: () => { timeline.push(id); return frames[Math.min(n++, frames.length - 1)] },
+        send: () => { timeline.push(id) },
+        wait: () => { timeline.push(id); return new Promise<void>((r) => setTimeout(r, 1 + ((i * 7) % 5))) },
+      }
+      return kind === 'resume' ? dismissResumeSummaryModalIfPresent('agent-stress', null, io) : dismissModelConsentDialogIfPresent('agent-stress', null, io)
+    }
+    for (let round = 0; round < 3; round++) {
+      const calls: Promise<unknown>[] = []
+      for (let i = 0; i < 12; i++) {
+        calls.push(run(i % 3 === 0 ? 'resume' : 'consent', i + round))
+        await new Promise((r) => setTimeout(r, (i * 3) % 4))
+      }
+      await Promise.all(calls)
+    }
+    const blocks = timeline.filter((id, k) => k === 0 || timeline[k - 1] !== id)
+    expect(blocks.length).toBeGreaterThan(3)                 // several runs really touched the pane
+    expect(new Set(blocks).size).toBe(blocks.length)        // none of them in two separate blocks
+  }, 20_000)
 })
