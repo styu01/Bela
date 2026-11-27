@@ -765,7 +765,7 @@ window._i18n.en = {
   'settings.desc.KANBAN_AGING_CRITICAL_COLOR': 'Aging badge color at the critical threshold.',
   'settings.desc.KANBAN_SWIMLANE_DEFAULT_GROUP': 'Default board grouping on load. none = flat view.',
   'settings.desc.KANBAN_SWIMLANE_SEPARATOR_COLOR': 'Background color of the swimlane separator header.',
-  'settings.desc.DASHBOARD_PUBLIC_URL':        'Publicly accessible URL of the dashboard (e.g. https://{agentId}.example.com). Empty = no additional CORS whitelist.',
+  'settings.desc.DASHBOARD_PUBLIC_URL':        'Publicly accessible URL of the dashboard (e.g. https://{agentId}.example.com). Empty = no additional CORS whitelist. Note: the agents reach the API on this address too; the public HTTPS listener\'s address does NOT go here but into WEB_PUBLIC_URL in .env (docs/public-https.md).',
   'settings.desc.OLLAMA_URL':                  'Base URL for the Ollama API. Used for memory embedding and model suggestions.',
   'settings.desc.DASHBOARD_LANG':              'Default display language of the dashboard (hu = Hungarian, en = English). Browser-saved preference (localStorage) overrides this.',
   'settings.desc.HEARTBEAT_START_HOUR':        'Start of the heartbeat active time window (local time, 0-22). No notifications sent before this hour.',

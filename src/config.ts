@@ -326,6 +326,12 @@ export const DASHBOARD_PUBLIC_URL = cfg('DASHBOARD_PUBLIC_URL') ?? ''
 // .env (upstream 3a8b912b: the listener starts from .env, there is no dotenv here) or the process environment. NO
 // default: unset means no public listener at all.
 export const WEB_PUBLIC_PORT_RAW = env['WEB_PUBLIC_PORT'] ?? process.env['WEB_PUBLIC_PORT'] ?? ''
+// The https:// address the local proxy serves the public listener on (KISPROGI 6416 H1). Its OWN key on purpose:
+// DASHBOARD_PUBLIC_URL is the address the AGENTS reach the API on (agent-scaffold.ts resolveDashboardOrigin, the
+// heartbeat's CLAW_DASHBOARD_ORIGIN); pointing that at the public listener would send the fleet's bearer calls out to
+// the public host name, where the bearer is refused (401) and the token would leave the loopback. Same sources as
+// WEB_PUBLIC_PORT (.env or the process environment), not a Settings key.
+export const WEB_PUBLIC_URL = (env['WEB_PUBLIC_URL'] ?? process.env['WEB_PUBLIC_URL'] ?? '').trim()
 // Extra browser origins allowed to make state-changing dashboard requests
 // (CORS + CSRF allowlist), comma-separated, e.g. for VPN/LAN addresses that
 // aren't covered by WEB_HOST or DASHBOARD_PUBLIC_URL. Empty by default so

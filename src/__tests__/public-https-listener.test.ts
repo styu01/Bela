@@ -71,9 +71,16 @@ describe('configuration: off by default, no default port', () => {
     expect(publicListenerPort('3999')).toBe(3999)
     expect(publicListenerPort(' 4100 ')).toBe(4100)
   })
-  it('the decision: not configured is the default and is silent', () => {
+  it('the decision: not configured (unset or empty) is the default and is silent', () => {
     expect(publicListenerDecision({ publicPortRaw: undefined, internalPort: 3420, publicUrl: '', users: [] })).toEqual({ start: false, reason: 'not-configured' })
-    expect(publicListenerDecision({ publicPortRaw: '', internalPort: 3420, publicUrl: 'https://a.example', users: [{ username: 'a', disabled: 0, totp_enabled: 1 }] })).toEqual({ start: false, reason: 'not-configured' })
+    for (const raw of ['', '  ']) expect(publicListenerDecision({ publicPortRaw: raw, internalPort: 3420, publicUrl: 'https://a.example', users: [{ username: 'a', disabled: 0, totp_enabled: 1 }] })).toEqual({ start: false, reason: 'not-configured' })
+  })
+  it('KISPROGI 6416 K2: a WEB_PUBLIC_PORT that is set but not a port is refused WITH a reason (logged), not silently', () => {
+    for (const raw of [':3500', '0', '70000', 'abc', '34-21']) {
+      const d = publicListenerDecision({ publicPortRaw: raw, internalPort: 3420, publicUrl: 'https://a.example', users: [{ username: 'a', disabled: 0, totp_enabled: 1 }] })
+      expect([raw, d.start, (d as { reason?: string }).reason]).toEqual([raw, false, 'bad-port'])
+      expect((d as { detail?: string }).detail).toContain('WEB_PUBLIC_PORT')
+    }
   })
   it('refused with a reason: the same port, a non-https public URL, no login, a login without TOTP', () => {
     const ok = [{ username: 'a', disabled: 0, totp_enabled: 1 }]
@@ -206,7 +213,10 @@ describe('the listener itself (real sockets)', () => {
 describe('web.ts wiring (source pins)', () => {
   const WEB = readFileSync(join(__dirname, '..', 'web.ts'), 'utf-8')
   it('the listener opens only on a start decision, only where the services run, via openPublicListener', () => {
-    expect(WEB).toContain('const decision = publicListenerDecision({ publicPortRaw: WEB_PUBLIC_PORT_RAW, internalPort: port, publicUrl: DASHBOARD_PUBLIC_URL, users })')
+    // KISPROGI 6416 H1: the public listener's own key, never DASHBOARD_PUBLIC_URL (the agents' API address)
+    expect(WEB).toContain('const decision = publicListenerDecision({ publicPortRaw: WEB_PUBLIC_PORT_RAW, internalPort: port, publicUrl: WEB_PUBLIC_URL, users })')
+    expect(WEB).toContain("...(WEB_PUBLIC_URL ? [WEB_PUBLIC_URL.replace(/\\/$/, '')] : []),")
+    expect(WEB).not.toMatch(/publicUrl: DASHBOARD_PUBLIC_URL/)
     expect(WEB).toContain('if (decision.start && servicesOff) {')
     expect(WEB).toContain('publicServer = openPublicListener(server, decision.port, logger, http.createServer)')
     expect(WEB.match(/openPublicListener\(/g)?.length).toBe(1)

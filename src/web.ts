@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { runLsof } from './lsof.js'
-import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID, WEB_PUBLIC_PORT_RAW } from './config.js'
+import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID, WEB_PUBLIC_PORT_RAW, WEB_PUBLIC_URL } from './config.js'
 import { isPublicRequest, openPublicListener, publicListenerDecision, publicPathOpenWithoutSession } from './web/public-access.js'
 import { listDashboardUserTotpState } from './db.js'
 import { loadOrCreateDashboardToken } from './web/dashboard-auth.js'
@@ -106,6 +106,8 @@ export function startWebServer(port = 3420): http.Server {
     `http://127.0.0.1:${port}`,
     ...( WEB_HOST !== 'localhost' && WEB_HOST !== '127.0.0.1' ? [`http://${WEB_HOST}:${port}`] : []),
     ...(DASHBOARD_PUBLIC_URL ? [DASHBOARD_PUBLIC_URL.replace(/\/$/, '')] : []),
+    // KISPROGI 6416 H1: the public listener's own address (WEB_PUBLIC_URL), not DASHBOARD_PUBLIC_URL (the agents' one).
+    ...(WEB_PUBLIC_URL ? [WEB_PUBLIC_URL.replace(/\/$/, '')] : []),
     ...DASHBOARD_ALLOWED_ORIGINS.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean),
   ])
 
@@ -608,7 +610,7 @@ export function startWebServer(port = 3420): http.Server {
   }
 
   // DOCKERHTTPS1119 port (public-access.ts): the optional public listener for a local HTTPS proxy. OFF unless
-  // WEB_PUBLIC_PORT is set, and then only with an https:// DASHBOARD_PUBLIC_URL and the TOTP second factor on for
+  // WEB_PUBLIC_PORT is set, and then only with an https:// WEB_PUBLIC_URL and the TOTP second factor on for
   // every enabled login; only in the install that runs the services (never a worktree / temp clone / WEB_ONLY
   // instance); always bound to 127.0.0.1. Same handler: each of its requests is marked public first, so the gate takes
   // only a TOTP login session there. A listen error is logged and the public listener stays down; it never takes the
@@ -617,7 +619,7 @@ export function startWebServer(port = 3420): http.Server {
   {
     let users: { username: string; disabled: number; totp_enabled: number }[] = []
     try { users = listDashboardUserTotpState() } catch (err) { logger.warn({ err }, 'public listener: could not read the dashboard logins') }
-    const decision = publicListenerDecision({ publicPortRaw: WEB_PUBLIC_PORT_RAW, internalPort: port, publicUrl: DASHBOARD_PUBLIC_URL, users })
+    const decision = publicListenerDecision({ publicPortRaw: WEB_PUBLIC_PORT_RAW, internalPort: port, publicUrl: WEB_PUBLIC_URL, users })
     if (decision.start && servicesOff) {
       logger.warn({ port: decision.port }, 'public listener NOT opened: second instance / WEB_ONLY (only the install that runs the services opens it)')
     } else if (decision.start) {

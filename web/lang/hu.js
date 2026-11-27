@@ -1082,7 +1082,7 @@ window._i18n.hu = {
   'settings.desc.KANBAN_AGING_CRITICAL_COLOR': 'Az aging-badge színe a kritikus küszöbnél.',
   'settings.desc.KANBAN_SWIMLANE_DEFAULT_GROUP': 'A tábla alapértelmezett csoportosítása betöltéskor. none = lapos nézet.',
   'settings.desc.KANBAN_SWIMLANE_SEPARATOR_COLOR': 'Az swimlane-elválasztó fejléc háttérszíne.',
-  'settings.desc.DASHBOARD_PUBLIC_URL':        'A dashboard nyilvánosan elérhető URL-je (pl. https://{agentId}.example.com). Üres = nincs CORS whitelist bővítés.',
+  'settings.desc.DASHBOARD_PUBLIC_URL':        'A dashboard nyilvánosan elérhető URL-je (pl. https://{agentId}.example.com). Üres = nincs CORS whitelist bővítés. Figyelem: az ügynökök is ezen a címen érik el az API-t; a nyilvános HTTPS-figyelő címe NEM ide kerül, hanem a .env WEB_PUBLIC_URL kulcsába (docs/public-https.md).',
   'settings.desc.OLLAMA_URL':                  'Az Ollama API alap-URL-je. Memória-embedding és modell-javaslat ezt használja.',
   'settings.desc.DASHBOARD_LANG':              'A dashboard alapértelmezett megjelenítési nyelve (hu = magyar, en = angol). A böngészőben mentett preferencia (localStorage) felülírja.',
   'settings.desc.HEARTBEAT_START_HOUR':        'A heartbeat aktív időablakának kezdete (helyi idő, 0-22). Előtte nem küld értesítést.',

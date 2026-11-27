@@ -68,12 +68,14 @@ export interface PublicListenerUser { username: string; disabled: number; totp_e
 
 export type PublicListenerDecision =
   | { start: false; reason: 'not-configured' }
-  | { start: false; reason: 'same-port' | 'bad-public-url' | 'no-login' | 'totp-missing'; detail: string }
+  | { start: false; reason: 'bad-port' | 'same-port' | 'bad-public-url' | 'no-login' | 'totp-missing'; detail: string }
   | { start: true; port: number }
 
 /** Whether the public listener may open, and why not. Pure over its inputs.
- *  - not configured (no WEB_PUBLIC_PORT): no listener, and nothing to tell (the default);
- *  - the same port as the internal listener, or a DASHBOARD_PUBLIC_URL that is not https://: refused, told;
+ *  - not configured (no WEB_PUBLIC_PORT, or an empty one): no listener, and nothing to tell (the default);
+ *  - a WEB_PUBLIC_PORT that is set but not a port (':3500', '0', '70000'): refused, told (KISPROGI 6416 K2);
+ *  - the same port as the internal listener, or a WEB_PUBLIC_URL that is not https://: refused, told. (WEB_PUBLIC_URL,
+ *    not DASHBOARD_PUBLIC_URL: that one is the agents' API address and must stay local, KISPROGI 6416 H1);
  *  - no enabled dashboard login, or any enabled login without the second factor: refused, told (this fork's rule:
  *    the public address only together with TOTP). */
 export function publicListenerDecision(opts: {
@@ -83,12 +85,15 @@ export function publicListenerDecision(opts: {
   users: readonly PublicListenerUser[]
 }): PublicListenerDecision {
   const port = publicListenerPort(opts.publicPortRaw)
-  if (port === null) return { start: false, reason: 'not-configured' }
+  if (port === null) {
+    if ((opts.publicPortRaw ?? '').trim() === '') return { start: false, reason: 'not-configured' }
+    return { start: false, reason: 'bad-port', detail: `WEB_PUBLIC_PORT is set but is not a port number (1-65535): ${JSON.stringify(opts.publicPortRaw)}` }
+  }
   if (port === opts.internalPort) return { start: false, reason: 'same-port', detail: `WEB_PUBLIC_PORT (${port}) equals the internal WEB_PORT` }
   let url: URL | null = null
   try { url = new URL(opts.publicUrl) } catch { url = null }
   if (!url || url.protocol !== 'https:' || !url.hostname) {
-    return { start: false, reason: 'bad-public-url', detail: 'DASHBOARD_PUBLIC_URL must be the https:// address the proxy serves' }
+    return { start: false, reason: 'bad-public-url', detail: 'WEB_PUBLIC_URL must be the https:// address the proxy serves (DASHBOARD_PUBLIC_URL stays the agents\' local API address)' }
   }
   const enabled = opts.users.filter((u) => !u.disabled)
   if (enabled.length === 0) return { start: false, reason: 'no-login', detail: 'no enabled dashboard login exists' }
