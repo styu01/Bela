@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, lstatSync, realpathSync, rmSync, watchFile, unwatchFile } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, STORE_DIR } from '../config.js'
@@ -216,6 +216,13 @@ export function upgradeLegacyHookCommands(
  *
  * Exported for unit testing.
  */
+// LOCAL (PROGI review 6196): a matcher is only re-written FROM a value an earlier template shipped,
+// keyed by the matcher the template has now. Without this a matcher a human narrowed on purpose
+// (e.g. `compact` only) was widened back on every dashboard start.
+export const KNOWN_PREVIOUS_TEMPLATE_MATCHERS: Readonly<Record<string, readonly string[]>> = {
+  'compact|resume|clear': ['compact|resume'],
+}
+
 export function syncHookMatchers(
   existingHooks: Record<string, unknown>,
   tplHooks: Record<string, unknown>,
@@ -238,6 +245,8 @@ export function syncHookMatchers(
         if (existCommands.length === 0) continue
         if (!existCommands.every((c) => tplCommands.has(c))) continue
         if (existEntry.matcher === tplEntry.matcher) continue
+        const upgradable = KNOWN_PREVIOUS_TEMPLATE_MATCHERS[tplEntry.matcher] ?? []
+        if (typeof existEntry.matcher !== 'string' || !upgradable.includes(existEntry.matcher)) continue
         existEntry.matcher = tplEntry.matcher
         changed = true
       }
@@ -266,7 +275,14 @@ export function ensureAgentHooks(name: string): boolean {
   if (!tpl.hooks) return false
   let existing: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
-    try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
+    try {
+      existing = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    } catch (err) {
+      // PROGI review 6196: an unparsable settings.json is NOT replaced by a hooks-only file (that
+      // silently dropped every other key the agent had). Logged and left for a human.
+      logger.warn({ err, settingsPath, agent: name }, 'ensureAgentHooks: settings.json is not valid JSON -- left untouched')
+      return false
+    }
   }
   const tplHooks = tpl.hooks as Record<string, unknown>
   // TOOLLOG906 (2026-09-08): MAIN_AGENT_ID already carries its own,
@@ -282,6 +298,23 @@ export function ensureAgentHooks(name: string): boolean {
   // TOOLLOGVAKSIKER921: the same holds for PostToolUseFailure, which the repo-root
   // file now also carries for the main agent (upstream avoids this with a
   // main-agent hook-write refusal that this fork does not have).
+  // CLEARCONT-MAIN (PROGI review 6196 HIBA 1, BELA 6197): the main agent's settings file is the
+  // GLOBAL ~/.claude/settings.json (agentSettingsPath), which also fires for the owner's own sessions
+  // and is the source the sub-agents' .claude-config copies are made from. The /clear continuity is
+  // for sub-agents: the main agent has ledger-replay and taskstate-replay of its own. So for the main
+  // agent the template's clear-capture / clear-replay hooks are stripped and its taskstate-replay
+  // matcher stays at the old compact|resume -- nothing of the /clear part is written globally.
+  if (name === MAIN_AGENT_ID) {
+    for (const [event, entries] of Object.entries(tplHooks)) {
+      if (!Array.isArray(entries)) continue
+      const kept = (entries as HookEntry[])
+        .map((entry) => ({ ...entry, hooks: (entry.hooks ?? []).filter((h) => !/clear-(capture|replay)\.py/.test(h.command ?? '')) }))
+        .filter((entry) => (entry.hooks?.length ?? 0) > 0)
+        .map((entry) => (entry.matcher === 'compact|resume|clear' ? { ...entry, matcher: 'compact|resume' } : entry))
+      if (kept.length > 0) tplHooks[event] = kept
+      else delete tplHooks[event]
+    }
+  }
   if (name === MAIN_AGENT_ID) {
     for (const event of ['PostToolUse', 'PostToolUseFailure'] as const) {
       if (!Array.isArray(tplHooks[event])) continue
@@ -307,7 +340,7 @@ export function ensureAgentHooks(name: string): boolean {
     let changed = upgradeLegacyHookCommands(existingHooks, tplHooks)
     // Matcher pass: a widened template matcher (e.g. SessionStart gaining
     // `clear`) must reach agents whose command string is unchanged.
-    if (syncHookMatchers(existingHooks, tplHooks)) changed = true
+    if (name !== MAIN_AGENT_ID && syncHookMatchers(existingHooks, tplHooks)) changed = true
     for (const [event, handlers] of Object.entries(tplHooks)) {
       if (!existingHooks[event]) {
         existingHooks[event] = handlers
@@ -358,7 +391,11 @@ export function ensureAgentHooks(name: string): boolean {
   }
   // For the main agent, ~/.claude already exists; sub-agents need the dir created.
   if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
-  atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
+  // PROGI review 6196: a symlinked settings.json is written THROUGH to its target, not replaced by a
+  // plain file (the atomic write renames over the path).
+  let writePath = settingsPath
+  try { if (lstatSync(settingsPath).isSymbolicLink()) writePath = realpathSync(settingsPath) } catch { /* missing: plain path */ }
+  atomicWriteFileSync(writePath, JSON.stringify(existing, null, 2))
   return true
 }
 
