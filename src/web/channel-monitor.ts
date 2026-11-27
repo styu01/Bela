@@ -699,6 +699,23 @@ export function readExtraChannelPluginIds(projectRoot: string = PROJECT_ROOT): s
 // NOTE: inbound from `--channels` also goes through the allowlist at
 // /etc/claude-code/managed-settings.json (allowedChannelPlugins); a plugin not
 // listed there has its MCP notifications silently dropped. See channels.sh.
+// PURE: --resume <sid> or --continue for the main-session respawn (STUCKOWNSID1127 follow-up).
+// resume = the proven own session; exists = a file-existence probe (existsSync in production). The
+// re-check matters: --resume on a sid without a transcript makes claude exit 1, a dead pane.
+export function chooseMainRespawnResume(
+  resume: { sessionId: string; transcriptPath: string } | null,
+  exists: (path: string) => boolean,
+): { resumeSessionId: string | undefined; respawnMode: 'resume' | 'continue'; continueReason: string | null } {
+  if (!resume) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'no-proven-session' }
+  if (!SESSION_UUID_RX.test(resume.sessionId)) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'bad-session-id' }
+  if (!exists(resume.transcriptPath)) return { resumeSessionId: undefined, respawnMode: 'continue', continueReason: 'transcript-missing-at-respawn' }
+  return { resumeSessionId: resume.sessionId, respawnMode: 'resume', continueReason: null }
+}
+
+// A Claude Code session id: exactly a UUID, so the value can go into the respawn shell command as one
+// inert word (no quoting needed, nothing to inject) and names exactly one transcript file.
+const SESSION_UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export function buildMainSessionRespawnCmd(opts: {
   claudePath: string
   pluginId: string
@@ -710,6 +727,15 @@ export function buildMainSessionRespawnCmd(opts: {
    */
   effort?: string
   continueSession: boolean
+  /**
+   * STUCKOWNSID1127 follow-up (PROGI review msg 6169): resume THIS session id with
+   * `--resume <sid>` instead of `--continue`. Only meaningful with continueSession.
+   * `--continue` opens the NEWEST interactive session of the project dir -- measured on
+   * CC 2.1.326 it takes a LIVE foreign interactive session too (a second process on the
+   * owner's own transcript) -- so a caller that has proven the main session's own sid
+   * passes it here. Must be a UUID; anything else is ignored (falls back to --continue).
+   */
+  resumeSessionId?: string
   /**
    * When set (macOS main-agent isolation on), the respawn exports this isolated
    * CLAUDE_CONFIG_DIR plus the fleet setup-token -- parity with channels.sh CFG_ENV.
@@ -754,7 +780,11 @@ export function buildMainSessionRespawnCmd(opts: {
         ? [`&& export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`]
         : []),
     '&&', opts.claudePath,
-    ...(opts.continueSession ? ['--continue'] : []),
+    ...(opts.continueSession
+      ? (opts.resumeSessionId && SESSION_UUID_RX.test(opts.resumeSessionId)
+          ? ['--resume', opts.resumeSessionId]
+          : ['--continue'])
+      : []),
     '--dangerously-skip-permissions',
     // Escape the model id so a value like `claude-opus-4-8[1m]` is not
     // glob-expanded -- and so a hostile value cannot break out of the quote and
@@ -837,7 +867,22 @@ export function respawnMainSessionFresh(): void {
 // kicked ([exited]) -- the #248 user-visible crash. It also runs the
 // pane-attribution detached-claude reap first, breaking the orphan->409->freeze
 // doom-loop that the launchctl path (channels.sh env-grep reap) never cleaned.
-export async function resumeMarveenSession(): Promise<boolean> {
+//
+// STUCKOWNSID1127 follow-up (PROGI review msg 6169): `opts.resume` = the main session's OWN session
+// id and transcript path, as proven by readOwnSessionTranscript() BEFORE the kill. When it is given
+// and the transcript still exists at respawn time, the respawn uses `--resume <sid>`; otherwise
+// `--continue`, as before. Why: `--continue` opens the project dir's newest INTERACTIVE session,
+// and measured on CC 2.1.326 (isolated scratch config, 2026-11-27) it took a LIVE foreign
+// interactive session -- two processes then write the owner's transcript. `--resume <sid>` was
+// measured to behave like `--continue` everywhere this path relies on: the --channels plugin
+// loads (bun server.ts under the claude, the "Channels (experimental)" banner), the record names
+// the given sid, the conversation and the session name come back, and a 21 MB session shows no
+// resume-from-summary modal with either flag (the dismiss below stays a harmless no-op). The one
+// difference: a sid with no transcript makes claude exit 1 ("No conversation found"), hence the
+// existsSync re-check right before the respawn. The other callers pass nothing: --continue.
+export async function resumeMarveenSession(
+  opts: { resume?: { sessionId: string; transcriptPath: string } | null } = {},
+): Promise<boolean> {
   const provider = getProvider(getMainAgentProvider())
   try {
     // Reap any orphan bun/node poller BEFORE we respawn. tmux respawn-pane -k
@@ -870,6 +915,8 @@ export async function resumeMarveenSession(): Promise<boolean> {
     // bootcamp mass-"/login"); idempotent re-seed before every respawn.
     ensureSharedClaudeOnboarded()
 
+    const { resumeSessionId, respawnMode, continueReason } = chooseMainRespawnResume(opts.resume ?? null, existsSync)
+
     const claudeCmd = buildMainSessionRespawnCmd({
       claudePath: CLAUDE,
       pluginId: provider.pluginId,
@@ -877,6 +924,7 @@ export async function resumeMarveenSession(): Promise<boolean> {
       model: readConfiguredMainModel(),
       effort: readConfiguredMainEffort(),
       continueSession: true,
+      resumeSessionId,
       // Parity with channels.sh: a recovery respawn must also land on the
       // isolated CLAUDE_CONFIG_DIR (macOS), else it re-authenticates from the
       // rotating Keychain and 401s. Returns null when isolation is off/no token,
@@ -911,7 +959,11 @@ export async function resumeMarveenSession(): Promise<boolean> {
       logger.warn({ err }, 'resumeMarveenSession: post-respawn modal dismiss failed (continuing)')
     }
 
-    logger.warn({ provider: provider.type }, 'Marveen session respawned with --continue')
+    if (respawnMode === 'resume') {
+      logger.warn({ provider: provider.type, respawnMode, sessionId: resumeSessionId }, 'Marveen session respawned with --resume <own session id>')
+    } else {
+      logger.warn({ provider: provider.type, respawnMode, continueReason }, 'Marveen session respawned with --continue')
+    }
     // Re-establish /name on the brand-new claude process (the prior session's
     // identity is gone after respawn-pane; channels.sh sets it on a normal
     // start). /remote-control was dropped (the operator no longer uses it).

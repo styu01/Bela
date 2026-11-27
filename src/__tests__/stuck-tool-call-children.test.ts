@@ -328,7 +328,8 @@ describe('wiring: the tool child guard', () => {
     const guardIdx = code.indexOf('if (toolChildRecentlyActive(toolChildState.get(session), Date.now())) {')
     const capIdx = code.indexOf('if (!childDeferExpired(next.stagnantSince, Date.now())) {')
     const gateIdx = code.indexOf('if (verdictStaleByTranscript(transcriptMtime, Date.now())) {')
-    const killIdx = code.indexOf('resumeMarveenSession()')
+    // STUCKOWNSID1127 follow-up: the kill now passes the proven own session ({ resume: gate.own }).
+    const killIdx = code.indexOf('await resumeMarveenSession({ resume: gate.own })')
     expect(cpuIdx).toBeGreaterThanOrEqual(0)
     expect(guardIdx).toBeGreaterThan(cpuIdx)
     expect(capIdx).toBeGreaterThan(guardIdx)

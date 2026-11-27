@@ -527,7 +527,8 @@ describe('wiring: the stale-verdict gate sits at the KILL boundary, not in verdi
     const code = body.split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
     const cpuIdx = code.indexOf('confirmsWedgeProfile(')
     const gateIdx = code.indexOf('if (verdictStaleByTranscript(transcriptMtime, Date.now())) {')
-    const killIdx = code.indexOf('resumeMarveenSession()')
+    // STUCKOWNSID1127 follow-up: the kill now passes the proven own session ({ resume: gate.own }).
+    const killIdx = code.indexOf('await resumeMarveenSession({ resume: gate.own })')
     expect(cpuIdx).toBeGreaterThanOrEqual(0)
     expect(gateIdx).toBeGreaterThan(cpuIdx)
     expect(killIdx).toBeGreaterThan(gateIdx)

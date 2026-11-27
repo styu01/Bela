@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   // test on the directory-level path they were written against.
   own: { ok: false, reason: 'test-default' } as { ok: true; sessionId: string; path: string; mtimeMs: number } | { ok: false; reason: string },
   ownPids: [] as number[],
+  listPanesFails: false,             // tmux list-panes throws (no pane pid): the gate must fall back, never kill more
   t0: 0,
   times: [] as number[],
   resume: vi.fn(async () => { h.times.push(Date.now() - h.t0); return true }),
@@ -27,7 +28,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock('node:child_process', () => ({
   execFileSync: (file: string, args: string[]) => {
-    if (args[0] === 'list-panes') return '100\n'
+    if (args[0] === 'list-panes') { if (h.listPanesFails) throw new Error('tmux: no server running'); return '100\n' }
     if (args.includes('%cpu=')) return h.cpu.shift() ?? '1.8\n'
     if (args.includes('pid=,ppid=,stat=,cputime=,comm=')) {
       return '100 1 S+ 5:00.00 /opt/homebrew/bin/claude\n150 100 S 0:30.00 /opt/homebrew/bin/bun\n'
@@ -90,6 +91,7 @@ beforeEach(async () => {
   h.mtime = null
   h.own = { ok: false, reason: 'test-default' }
   h.ownPids.length = 0
+  h.listPanesFails = false
   h.times.length = 0
   h.resume.mockClear()
   h.info.mockClear()
@@ -182,6 +184,9 @@ describe("STUCKOWNSID1127: the kill gate reads the main session's OWN transcript
     expect(gateWarns()).toHaveLength(0)
     expect(h.ownPids).toContain(100)                 // the pane pid from list-panes
     expect(recoveryWarn()?.[0]).toMatchObject({ transcriptSource: 'own', transcriptFallback: null })
+    // PROGI 6169: the respawn resumes the PROVEN own session by id (--resume <sid>), not --continue
+    expect(h.resume).toHaveBeenCalledTimes(1)
+    expect(h.resume.mock.calls[0]).toEqual([{ resume: { sessionId: '10c0fe6a-2ea2-4dec-85ef-a4462cc76b85', transcriptPath: '/x/10c0fe6a-2ea2-4dec-85ef-a4462cc76b85.jsonl' } }])
   })
 
   it("the session's OWN fresh write still aborts (STUCKFREEZE819), and a write since the freeze still holds (STUCKATTEMPTS1018)", async () => {
@@ -204,6 +209,27 @@ describe("STUCKOWNSID1127: the kill gate reads the main session's OWN transcript
     await drive(30, () => { h.own = { ok: false, reason: 'no-session-record' }; h.mtime = h.t0 + 20_000 })
     expect(h.times).toEqual([FIRST_VERDICT_MS])
     expect(recoveryWarn()?.[0]).toMatchObject({ transcriptSource: 'dir', transcriptFallback: 'no-session-record' })
+    expect(h.resume.mock.calls[0]).toEqual([{ resume: null }])   // not proven -> --continue, as before
+  })
+
+  // PROGI 6169 item 2: the "no-pane-pid -> fallback null" mutant survived. tmux list-panes failing
+  // must leave the old directory-level read in charge: never more kills than before.
+  it('tmux list-panes fails -> no own read, the directory read decides: a fresh dir write still aborts', async () => {
+    await drive(30, i => {
+      h.listPanesFails = true
+      h.own = own(h.t0 + 20_000)                              // would say "quiet" if it were (wrongly) consulted
+      if (i >= 7) h.mtime = h.t0 + pollT(7) - 1_000
+    })
+    expect(h.ownPids).toEqual([])
+    expect(h.resume).not.toHaveBeenCalled()
+    expect(gateWarns()[0]![0]).toMatchObject({ transcriptSource: 'dir', transcriptFallback: 'no-pane-pid' })
+  })
+
+  it('tmux list-panes fails and the directory is quiet -> recovery as before, with --continue', async () => {
+    await drive(30, () => { h.listPanesFails = true; h.mtime = h.t0 + 20_000 })
+    expect(h.times).toEqual([FIRST_VERDICT_MS])
+    expect(h.resume.mock.calls[0]).toEqual([{ resume: null }])
+    expect(recoveryWarn()?.[0]).toMatchObject({ transcriptSource: 'dir', transcriptFallback: 'no-pane-pid', respawnResume: null })
   })
 })
 

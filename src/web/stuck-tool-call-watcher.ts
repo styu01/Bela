@@ -395,16 +395,22 @@ const transcriptAbortLogged = new Map<string, number | null>()
 // sessions/<pid>.json record for the pane's claude proves it; otherwise the old directory-level
 // newest jsonl (the pre-STUCKOWNSID1127 read), so a failed proof can only hold, never kill. The
 // source and the fallback reason go into the abort and recovery logs for the audit trail.
-export interface KillGateTranscript { mtime: number | null; source: 'own' | 'dir'; fallbackReason: string | null }
+export interface KillGateTranscript {
+  mtime: number | null
+  source: 'own' | 'dir'
+  fallbackReason: string | null
+  /** The proven own session (source 'own' only): handed to the respawn as `--resume <sid>`. */
+  own: { sessionId: string; transcriptPath: string } | null
+}
 
 function killGateTranscript(session: string): KillGateTranscript {
   const pid = mainPanePid(session)
   if (pid !== null) {
     const own = readOwnSessionTranscript(pid, PROJECT_ROOT)
-    if (own.ok) return { mtime: own.mtimeMs, source: 'own', fallbackReason: null }
-    return { mtime: readTranscriptMtimeFromProjectDir(PROJECT_ROOT), source: 'dir', fallbackReason: own.reason }
+    if (own.ok) return { mtime: own.mtimeMs, source: 'own', fallbackReason: null, own: { sessionId: own.sessionId, transcriptPath: own.path } }
+    return { mtime: readTranscriptMtimeFromProjectDir(PROJECT_ROOT), source: 'dir', fallbackReason: own.reason, own: null }
   }
-  return { mtime: readTranscriptMtimeFromProjectDir(PROJECT_ROOT), source: 'dir', fallbackReason: 'no-pane-pid' }
+  return { mtime: readTranscriptMtimeFromProjectDir(PROJECT_ROOT), source: 'dir', fallbackReason: 'no-pane-pid', own: null }
 }
 
 function logTranscriptAbort(session: string, stagnantSince: number | null, fields: Record<string, unknown>, msg: string): void {
@@ -580,6 +586,7 @@ async function checkSession(label: string, session: string): Promise<void> {
         transcriptSource: gate.source,
         transcriptFallback: gate.fallbackReason,
         transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null,
+        respawnResume: gate.own ? gate.own.sessionId : null,
       },
       'stuck-tool-call-watcher: TUI counter stagnant past freeze threshold + idle wedge profile -- recovering main channels session (respawn-pane, no client-kick)',
     )
@@ -590,7 +597,11 @@ async function checkSession(label: string, session: string): Promise<void> {
     // pane-attribution detached-claude reap FIRST, breaking the
     // orphan->409->freeze doom-loop that the launchctl/channels.sh env-grep reap
     // never cleaned (the loop's launchctl path never reaped the main orphans).
-    const ok = await resumeMarveenSession()
+    // STUCKOWNSID1127 follow-up (PROGI 6169): resume the PROVEN own session by id. Once the gate
+    // reads the main session's own file, a kill can happen exactly when the dir's newest file is a
+    // foreign one -- and a plain --continue would open THAT session (measured: also a live one).
+    // Not proven -> null -> --continue, as before.
+    const ok = await resumeMarveenSession({ resume: gate.own })
     if (!ok) {
       logger.error({ label, session }, 'stuck-tool-call-watcher: respawn-pane recovery failed')
     }
