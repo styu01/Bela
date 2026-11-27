@@ -66,8 +66,18 @@ export function hookCommand(scriptPath: string, args: readonly string[] = [], ho
   // stated way out is worse than a loud error.
   const miss = `governance-kapu: a hook interpretere nem talalhato (${HOOK_NODE_BIN}). A kapu ezert BLOKKOL. Javitas: inditsd ujra a dashboardot, az ujrairja a hook-utakat.`
   const invocation = gateInvocation(`"${HOOK_NODE_BIN}"`, scriptPath, args)
-  return `test -x "${HOOK_NODE_BIN}" || { echo "${miss}" >&2; exit 2; }; ${failClosedGateRun(invocation, basename(scriptPath), hookTimeoutSec)}`
+  return `${GATE_ENV_SANITIZE}test -x "${HOOK_NODE_BIN}" || { echo "${miss}" >&2; exit 2; }; ${failClosedGateRun(invocation, basename(scriptPath), hookTimeoutSec)}`
 }
+
+// PROGI 6318 (D), BELA 6319: the gate's interpreter must not load code from the environment. Claude Code
+// hands a settings.json "env" block (an agent's own, git-ignored settings.local.json included) to every hook
+// process (measured 2026-11-27 with CC 2.1.326: NODE_OPTIONS, PYTHONPATH and even PATH from "env" arrive in
+// the hook shell), so NODE_OPTIONS=--import=<file> would run code in front of every node gate and could exit
+// 0 before the gate decides. The node gates are ES modules: NODE_PATH does not reach their imports, and
+// NODE_OPTIONS is the code-loading variable. It is dropped with the shell BUILTIN `unset`, not `env -u`:
+// a builtin is not looked up on PATH, which the same "env" block can point at a directory of its own.
+// (The Python gate gets the same through `python3 -I` in the main agent's project settings.)
+export const GATE_ENV_SANITIZE = 'unset NODE_OPTIONS; '
 
 // Card 723bbb70 (upstream 0e681c83, ported): the gate command's exit status is made FAIL-CLOSED here, in
 // one place for every gate hookCommand() assembles. Claude Code blocks a tool call only on exit 2 (or a

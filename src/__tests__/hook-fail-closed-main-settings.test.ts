@@ -14,7 +14,9 @@ import { PROJECT_ROOT } from '../config.js'
 // Every entry is run here exactly as written, with CLAUDE_PROJECT_DIR pointing at a disposable copy.
 
 const GATE = 'scripts/hooks/outgoing-copy-gate.py'
-const RAW = 'python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py"'
+// PROGI 6318 (D): -I (isolated), so PYTHONPATH / PYTHONHOME / user site from a settings "env" block cannot
+// shadow the gate's stdlib imports (src/__tests__/gate-env-sanitize.test.ts).
+const RAW = 'python3 -I "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py"'
 const TG = /telegram/
 const TG_GUARD = '[ -f "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py" ] || exit 0; '
 

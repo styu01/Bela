@@ -48,7 +48,7 @@ describe('hookCommand builder', () => {
   // this guard the gate goes silent again on a different route.
   it('blocks with a message when the interpreter is gone, instead of exiting 127', () => {
     const cmd = hookCommand('/some/dir/gate.mjs')
-    expect(cmd).toMatch(/^test -x /)
+    expect(cmd).toMatch(/^unset NODE_OPTIONS; test -x /)
     expect(cmd).toContain('exit 2')
     // the three things the operator needs: what is missing, that this blocks,
     // and the way out

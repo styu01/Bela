@@ -29,6 +29,20 @@ fájlnál 2-vel lép ki, és a 2 TILTÁS lenne (a Telegram-válaszok blokkolódn
 ellenőrzés nélkül mennek ki; az önteszt ezt külön jelzi („a kapu nem fut, a hívások ellenőrzés NÉLKÜL
 mennek ki”), mert a bekötött kapu-fájl meglétét is vizsgálja.
 
+## A kapu interpretere nem tölt kódot a környezetből
+
+A Claude Code a settings.json `"env"` blokkját (egy ágens saját, git által figyelmen kívül hagyott
+settings.local.json-jáét is) minden hook-folyamatnak átadja (mérve 2026-11-27, CC 2.1.326: a NODE_OPTIONS,
+a PYTHONPATH és a PATH is megérkezik a hook-shellbe). Ezért:
+- a node-os kapuk parancsa `unset NODE_OPTIONS; ` előtaggal indul (`GATE_ENV_SANITIZE`, `hookCommand`),
+  így egy `NODE_OPTIONS=--import=<fájl>` nem futtat kódot a kapu előtt. Shell-beépített, nem `env -u`:
+  a beépített parancsot nem a PATH-on keresi a shell, a PATH-ot pedig ugyanaz az `"env"` blokk átírhatja;
+- az outgoing-copy-gate.py minden ága `python3 -I` (izolált mód): a PYTHONPATH / PYTHONHOME / user site
+  nem hat, és a szkript könyvtára sincs a sys.path-on, így a kapu mellé tett `json.py` sem árnyékolja
+  a standard könyvtárat.
+Nyitott (külön döntés): a `timeout`, a `python3` és a shell maga is a PATH-on keresett program, egy
+`"env"` blokkbeli PATH ezeket lecserélheti.
+
 ## Önteszt (`src/web/gate-self-test.ts`)
 
 Bootkor (+90 mp) és 15 percenként minden bekötött kapu-parancs pontosan úgy fut, ahogy a settings-ben

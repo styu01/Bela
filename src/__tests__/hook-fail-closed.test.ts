@@ -151,7 +151,7 @@ describe('the fail-closed tail, on stand-in gates', () => {
 describe('the builder', () => {
   it('the interpreter probe comes first and still blocks on its own; the run-and-map tail follows', () => {
     const cmd = hookCommand('/some/dir/gate.mjs')
-    expect(cmd).toMatch(/^test -x /)
+    expect(cmd).toMatch(/^unset NODE_OPTIONS; test -x /)
     expect(cmd).toContain(`"${HOOK_NODE_BIN}" "/some/dir/gate.mjs"`)
     expect(cmd.endsWith(failClosedGateRun(`"${HOOK_NODE_BIN}" "/some/dir/gate.mjs"`, 'gate.mjs', 10))).toBe(true)
   })
