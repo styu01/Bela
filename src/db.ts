@@ -239,36 +239,8 @@ export function initDatabase(dbPathOverride?: string): void {
   }
   // Migration (upstream 5b404c44): row version for the PUT's lost-update check (see
   // writeKanbanCard). AFTER the rebuild above on purpose: that rebuild copies an explicit
-  // column list, so a column added before it would be lost. Not updated_at (seconds-granular:
-  // two writers inside one second read the same value). NOT NULL DEFAULT 0: every existing row
-  // has a defined version.
-  try {
-    db.exec('ALTER TABLE kanban_cards ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
-  } catch {
-    // column already exists
-  }
-  // The version moves whenever a column the whole-card PUT writes back changes, whoever the
-  // writer is: the PUT, /move, the archive sweep, or a script writing the table directly (a bump
-  // only in the TypeScript paths would miss those). LOCAL: the column list is what OUR
-  // updateKanbanCard writes back (no test_steps/start_date here; is_recurring_template yes).
-  // Comments, dispatch stamps and updated_at do not move it -- a PUT body cannot overwrite them.
-  // Dropped and recreated in ONE immediate transaction on every start, so a column added to the
-  // list later reaches existing databases and no other process ever writes without the trigger.
-  // No recursion: the inner UPDATE sets only `version`, which is not in the OF list.
-  {
-    const versionedCols = [...KANBAN_VERSIONED_FIELDS]
-    db.transaction(() => {
-      db.exec('DROP TRIGGER IF EXISTS kanban_cards_version_bump')
-      db.exec(`
-        CREATE TRIGGER kanban_cards_version_bump
-        AFTER UPDATE OF ${versionedCols.join(', ')} ON kanban_cards
-        FOR EACH ROW WHEN ${versionedCols.map((c) => `NEW.${c} IS NOT OLD.${c}`).join(' OR ')}
-        BEGIN
-          UPDATE kanban_cards SET version = version + 1 WHERE id = NEW.id;
-        END
-      `)
-    }).immediate()
-  }
+  // column list, so a column added before it would be lost.
+  ensureKanbanVersionColumnAndTrigger(db)
   // Kanban project summaries: a small, separate table for the one thing that
   // cannot be derived from kanban_cards -- the human-written project
   // description. Everything else the project-overview page needs (card
@@ -2125,6 +2097,44 @@ export const KANBAN_VERSIONED_FIELDS = [
   'title', 'description', 'status', 'assignee', 'priority', 'project', 'parent_id', 'due_date',
   'sort_order', 'archived_at', 'is_recurring_template',
 ] as const
+
+// The kanban row version: column + trigger, never one without the other (PROGI review msg 6192,
+// KOCKAZAT 3). The first version of this migration swallowed EVERY ALTER error -- "database is
+// locked" included -- and then created the trigger in a separate transaction; measured by PROGI on a
+// migration-less copy with another connection holding the write lock for 8 s: init "succeeded" in
+// 6.7 s with the trigger present and the column absent, after which every PUT / move / archive /
+// sweep failed with "no such column: version" until the next restart. Now:
+//   - the column is checked with PRAGMA table_info, ALTER runs only when it is missing, and only a
+//     "duplicate column name" error (a concurrent process added it first) is tolerated;
+//   - if the column is still not there, this THROWS -- the dashboard does not start half-migrated;
+//   - the trigger is (re)created only after the column is confirmed.
+// The trigger watches the columns a whole-card PUT writes back (KANBAN_VERSIONED_FIELDS); comments,
+// dispatch stamps and updated_at do not move it. Dropped and recreated in one immediate transaction
+// on every start, so a column added to the list later reaches existing databases and no other process
+// ever writes without it. No recursion: the inner UPDATE sets only `version`.
+export function ensureKanbanVersionColumnAndTrigger(dbh: Database.Database): void {
+  const hasVersion = () => (dbh.prepare('PRAGMA table_info(kanban_cards)').all() as Array<{ name: string }>).some((c) => c.name === 'version')
+  if (!hasVersion()) {
+    try {
+      dbh.exec('ALTER TABLE kanban_cards ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
+    } catch (err) {
+      if (!/duplicate column name/i.test(String((err as Error)?.message ?? err))) throw err
+    }
+  }
+  if (!hasVersion()) throw new Error('kanban_cards.version migration did not add the column -- refusing to create the version trigger')
+  const versionedCols = [...KANBAN_VERSIONED_FIELDS]
+  dbh.transaction(() => {
+    dbh.exec('DROP TRIGGER IF EXISTS kanban_cards_version_bump')
+    dbh.exec(`
+      CREATE TRIGGER kanban_cards_version_bump
+      AFTER UPDATE OF ${versionedCols.join(', ')} ON kanban_cards
+      FOR EACH ROW WHEN ${versionedCols.map((c) => `NEW.${c} IS NOT OLD.${c}`).join(' OR ')}
+      BEGIN
+        UPDATE kanban_cards SET version = version + 1 WHERE id = NEW.id;
+      END
+    `)
+  }).immediate()
+}
 
 export type KanbanCardWriteResult =
   | { ok: true; version: number }
