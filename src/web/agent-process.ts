@@ -1858,22 +1858,48 @@ export type ResumeDialogOutcome = 'absent' | 'answered' | 'dismissed' | 'blocked
 // immediate 'skipped' was taken as "handled" by sendPromptToSession, and a forceSend scheduled task
 // (waitForIdle false) then typed its prompt + Enter while the first run was still in its settle or its move,
 // so that Enter landed on whatever row had the focus, possibly "Start a new conversation".
-const resumeDialogInFlight = new Map<string, Promise<ResumeDialogOutcome>>()
+// BELA 6297 / PROGI 6294 (A): the model-consent handler runs under the SAME per-session lock. Two different
+// dialog handlers interleaved on one pane are as unsafe as two runs of one: the consent handler's Down could
+// land while the resume handler sits between its re-check and its Enter (or the other way round), so that
+// Enter would confirm a row nobody chose. The rule per session:
+//   - the same kind is running: wait for it and take its outcome, sending no key (the PROGI 6284 contract);
+//   - the other kind is running: wait for it to finish, then run (its own fresh capture decides);
+//   - nothing running: run.
+// Every handler run is bounded (each step has a timeout, every exception is swallowed inside the handler) and
+// the entry is removed in a finally, so a waiter cannot hang on it.
+type DialogHandlerKind = 'resume' | 'model-consent'
+const dialogHandlerInFlight = new Map<string, { kind: DialogHandlerKind; run: Promise<unknown> }>()
+
+async function runDialogHandlerExclusive<T>(
+  session: string,
+  host: string | null,
+  kind: DialogHandlerKind,
+  handler: () => Promise<T>,
+): Promise<T> {
+  const lockKey = `${host ?? ''}\u0000${session}`
+  for (;;) {
+    const running = dialogHandlerInFlight.get(lockKey)
+    if (!running) break
+    if (running.kind === kind) {
+      logger.info({ session, kind }, 'Dialog handler of this kind already running for this session: waiting for its outcome (no keys)')
+      return running.run as Promise<T>
+    }
+    logger.info({ session, kind, running: running.kind }, 'Another dialog handler is running for this session: waiting for it before probing')
+    await running.run.catch(() => undefined)
+  }
+  const run: Promise<T> = handler().finally(() => {
+    if (dialogHandlerInFlight.get(lockKey)?.run === run) dialogHandlerInFlight.delete(lockKey)
+  })
+  dialogHandlerInFlight.set(lockKey, { kind, run })
+  return run
+}
 
 export async function dismissResumeSummaryModalIfPresent(
   session: string,
   host: string | null = null,
   io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
 ): Promise<ResumeDialogOutcome> {
-  const lockKey = `${host ?? ''}\u0000${session}`
-  const running = resumeDialogInFlight.get(lockKey)
-  if (running) {
-    logger.info({ session }, 'Resume dialog handler already running for this session: waiting for it (no keys)')
-    return running
-  }
-  const run = dismissResumeDialogLocked(session, host, io).finally(() => { resumeDialogInFlight.delete(lockKey) })
-  resumeDialogInFlight.set(lockKey, run)
-  return run
+  return runDialogHandlerExclusive(session, host, 'resume', () => dismissResumeDialogLocked(session, host, io))
 }
 
 async function dismissResumeDialogLocked(
@@ -1988,6 +2014,15 @@ async function dismissResumeDialogLocked(
 // dialog is left as it is, NO key is sent, and the owner is asked (BELA first). The result tells the caller
 // whether a bare Enter that follows would land on the dialog: on 'blocked' it must not be sent (the default
 // focus is the switch row, so that Enter would switch the model).
+// BELA 6297 / PROGI 6294 (A), PoC 6287: the binary refuses an Enter that comes too soon after the dialog
+// mounts and remounts it with the focus back on the switch row. The old handler reported 'answered' 300 ms
+// after its Enter without looking, so the channel-monitor stuck path then sent its bare Enter onto "Switch to
+// ... and continue": a model switch. Now: no key before the dialog has been up for MODEL_CONSENT_SETTLE_MS,
+// and after the Enter the pane is captured again; a dialog still up (or a pane that cannot be read) is
+// 'blocked' (the callers send no Enter) and escalated. No retry and no Escape: Escape on this dialog is
+// recorded as a refusal and the CLI continues on the fallback model (FABLEFALL1).
+// The handler runs under the shared per-session dialog lock (runDialogHandlerExclusive).
+export const MODEL_CONSENT_SETTLE_MS = RESUME_DIALOG_SETTLE_MS
 const modelConsentBlocked = new Set<string>()
 
 export async function dismissModelConsentDialogIfPresent(
@@ -1995,24 +2030,58 @@ export async function dismissModelConsentDialogIfPresent(
   host: string | null = null,
   io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
 ): Promise<'absent' | 'answered' | 'blocked'> {
+  return runDialogHandlerExclusive(session, host, 'model-consent', () => dismissModelConsentDialogLocked(session, host, io))
+}
+
+async function dismissModelConsentDialogLocked(
+  session: string,
+  host: string | null,
+  io: FirstRunPaneIo,
+): Promise<'absent' | 'answered' | 'blocked'> {
+  const escKey = `model-consent-blocked:${session}`
+  const clearBlocked = () => { if (modelConsentBlocked.delete(session)) clearOwnerEscalation(escKey) }
   try {
-    const pane = io.capture(session, host)
+    let pane = io.capture(session, host)
     if (pane == null || !detectsModelConsentDialog(pane)) {
-      if (pane != null && modelConsentBlocked.delete(session)) clearOwnerEscalation(`model-consent-blocked:${session}`)
+      if (pane != null) clearBlocked()
       return 'absent'
     }
+    // (A1) no key while the dialog may still refuse it.
+    await io.wait(MODEL_CONSENT_SETTLE_MS)
+    pane = io.capture(session, host)
+    if (pane == null) {
+      // Seen a moment ago, unreadable now: no key on a pane that cannot be read, and no alarm for a capture
+      // hiccup; 'blocked' keeps the caller's Enter back, the next probe looks again.
+      logger.warn({ session }, 'Model consent dialog seen, then the pane could not be read: no key this round')
+      return 'blocked'
+    }
+    if (!detectsModelConsentDialog(pane)) { clearBlocked(); return 'absent' }
+    let reason: 'no-row' | 'refused' | 'unseen' = 'no-row'
     const res = await answerDialogFromPane(session, host, pane, modelConsentKeys, io)
     if (res === 'answered') {
-      await io.wait(300)
-      logger.info({ session }, 'Answered the model usage-credit consent dialog: "Continue with" (the configured model kept), never a purchase or the switch row')
-      return 'answered'
+      // (A2) judge the result: a refused Enter leaves the dialog up with the focus on the switch row.
+      await io.wait(MODEL_CONSENT_SETTLE_MS)
+      const after = io.capture(session, host)
+      if (after != null && !detectsModelConsentDialog(after)) {
+        logger.info({ session }, 'Answered the model usage-credit consent dialog: "Continue with" (the configured model kept), never a purchase or the switch row')
+        clearBlocked()
+        return 'answered'
+      }
+      reason = after == null ? 'unseen' : 'refused'
+      logger.warn({ session, reason }, 'Model consent dialog still up (or unreadable) after the Enter on "Continue with": no further key, escalating')
+    } else {
+      logger.warn({ session }, 'Model usage-credit consent dialog without a single "Continue with" row (or the move did not land): NO key sent, escalating')
     }
-    logger.warn({ session }, 'Model usage-credit consent dialog without a single "Continue with" row (or the move did not land): NO key sent, escalating')
     if (!modelConsentBlocked.has(session)) {
       modelConsentBlocked.add(session)
-      const text = `A(z) ${session} session a modell-hasznalati (usage credits) dialoguson all, es nincs rajta biztonsagosan valaszthato "Continue with" sor (vasarlas / bekapcsolas / admin-kerelem vagy modellvaltas lenne), ezert NEM nyomtam semmit. Dontes kell: tmux attach -t ${session}, a nyilakkal valassz, majd Enter. Addig a session nem kap uzenetet.`
+      const what = reason === 'no-row'
+        ? 'nincs rajta biztonsagosan valaszthato "Continue with" sor (vasarlas / bekapcsolas / admin-kerelem vagy modellvaltas lenne), ezert NEM nyomtam semmit'
+        : reason === 'refused'
+          ? 'a "Continue with" sorra Entert kuldtem, de a dialogus fent maradt (a Claude Code elutasitotta, a fokusz a modellvalto soron lehet), ezert tobb billentyut NEM kuldtem'
+          : 'a "Continue with" sorra Entert kuldtem, de utana a kepernyot nem tudtam kiolvasni, ezert nem tudom, hogy hatott-e, es tobb billentyut NEM kuldtem'
+      const text = `A(z) ${session} session a modell-hasznalati (usage credits) dialoguson all, es ${what}. Dontes kell: tmux attach -t ${session}, a nyilakkal valassz, majd Enter. Addig a session nem kap uzenetet.`
       escalateToOwner({
-        key: `model-consent-blocked:${session}`,
+        key: escKey,
         belaText: `[model-consent] ${text}`,
         ownerText: `⚠️ ${text} BÉLA mar ertesitve volt errol, de nem oldodott meg.`,
       })
