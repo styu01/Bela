@@ -227,3 +227,33 @@ describe('dismissResumeSummaryModalIfPresent (tmux layer injected; PROGI 6252 A-
     expect(f.sent).toEqual([])
   })
 })
+
+describe('PROGI 6273 follow-ups (b, c)', () => {
+  beforeEach(() => { esc.escalated.length = 0; esc.cleared.length = 0 })
+  const IDLE = '──────\n❯ \n──────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  const FOCUS_RESUME_NO_SUMMARY = pane(['❯ Resume', '  Start a new conversation'])
+
+  it('(b) a quoted bullet list with the title over a live idle footer is not the dialog (no alert)', async () => {
+    const quoted = [
+      'Resume this conversation?',
+      '- Resume',
+      '- Start a new conversation',
+      '* Resume from summary',
+      '',
+      '─'.repeat(40), '❯ ', '─'.repeat(40), '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    const f = { capture: () => quoted, send: () => { throw new Error('no key expected') }, wait: async () => {} }
+    expect(await dismissResumeSummaryModalIfPresent('agent-quote', null, f)).toBe('absent')
+    expect(esc.escalated).toEqual([])
+  })
+
+  it('(c) the pane unreadable after the Enter: no blind Esc, only the escalation', async () => {
+    const sent: string[] = []
+    let n = 0
+    const frames: (string | null)[] = [FOCUS_RESUME_NO_SUMMARY, FOCUS_RESUME_NO_SUMMARY, null]
+    const f = { capture: () => frames[Math.min(n++, frames.length - 1)], send: (_s: string, _h: string | null, k: string) => { sent.push(k) }, wait: async () => {} }
+    expect(await dismissResumeSummaryModalIfPresent('agent-null', null, f)).toBe('blocked')
+    expect(sent).toEqual(['Enter'])
+    expect(esc.escalated.map((e) => e.key)).toEqual(['resume-dialog-blocked:agent-null'])
+  })
+})

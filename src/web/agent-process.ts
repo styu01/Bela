@@ -1855,6 +1855,7 @@ export async function dismissResumeSummaryModalIfPresent(
   io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
 ): Promise<ResumeDialogOutcome> {
   const escKey = `resume-dialog-blocked:${session}`
+  let unseenAfterEnter = false
   try {
     let pane = io.capture(session, host)
     let kind = pane != null ? detectsResumeDialog(pane) : null
@@ -1908,12 +1909,15 @@ export async function dismissResumeSummaryModalIfPresent(
         return 'answered'
       }
       res = 'blocked'
-      logger.warn({ session, kind }, 'Resume dialog still up after the Enter (swallowed or refused)')
+      // PROGI 6273 (c): an unreadable pane after the Enter is not evidence the Enter failed; if it did take
+      // (e.g. the summary /compact is running), an Esc would interrupt it. No Esc then, only the escalation.
+      unseenAfterEnter = after == null
+      logger.warn({ session, kind, unseenAfterEnter }, 'Resume dialog still up (or unreadable) after the Enter')
     }
     // (D) uncertain shape, a move that did not land, or an Enter that did not take: Esc first (on the
     // "Resume this conversation?" dialog Esc is dismiss / resume, never a new conversation), then look again.
     // The old numbered dialog gets no Esc (its Esc is not read from the source): straight to escalation.
-    if (kind === 'resume-conversation') {
+    if (kind === 'resume-conversation' && !unseenAfterEnter) {
       io.send(session, host, 'Escape')
       await io.wait(RESUME_DIALOG_SETTLE_MS)
       const afterEsc = io.capture(session, host)

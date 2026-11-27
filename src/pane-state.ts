@@ -1036,7 +1036,11 @@ export function resumeDialogUnderIdleFooter(pane: string): boolean {
   if (!hasIdleFooter(lines)) return false
   const live = lines.slice(-RESUME_LIVE_REGION_LINES)
   const titleRow = live.some((l) => l.replace(/[\u2502|]/g, '').trim() === 'Resume this conversation?')
-  const kinds = live.map(resumeRowKind)
+  // PROGI 6273 (b): a QUOTED list in a reply ("- Resume", "* Start a new conversation", "• ...") is not the
+  // dialog: its real rows start with spaces or the cursor glyph, never with a list bullet.
+  const kinds = live
+    .filter((l) => !/^\s*[-*\u2022]/.test(l.replace(/[\u2502|]/g, '')))
+    .map(resumeRowKind)
   return titleRow && kinds.includes('resume') && kinds.includes('new')
 }
 
