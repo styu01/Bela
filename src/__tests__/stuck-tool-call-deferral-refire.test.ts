@@ -12,7 +12,11 @@ const h = vi.hoisted(() => ({
   pane: '',
   cpu: [] as string[],               // per CPU sample, shifted; empty -> the idle wedge profile
   respawnAt: 0,                      // lastMainRespawnAt() epoch ms, 0 = none
-  mtime: null as number | null,      // transcript mtime the kill gate reads
+  mtime: null as number | null,      // transcript mtime the kill gate reads (directory-level fallback)
+  // STUCKOWNSID1127: the main session's own-file read; the default (not provable) keeps every older
+  // test on the directory-level path they were written against.
+  own: { ok: false, reason: 'test-default' } as { ok: true; sessionId: string; path: string; mtimeMs: number } | { ok: false; reason: string },
+  ownPids: [] as number[],
   t0: 0,
   times: [] as number[],
   resume: vi.fn(async () => { h.times.push(Date.now() - h.t0); return true }),
@@ -38,6 +42,9 @@ vi.mock('../web/agent-process.js', () => ({ capturePane: () => h.pane }))
 // LOCAL ADAPTATION: our kill gate reads the main transcript with readTranscriptMtimeFromProjectDir (single root).
 vi.mock('../web/active-model.js', () => ({ readTranscriptMtimeAcrossConfigDirs: () => h.mtime, readTranscriptMtimeFromProjectDir: () => h.mtime }))
 vi.mock('../web/inbound-probe.js', () => ({ mainConfigRoots: () => [] }))
+vi.mock('../web/main-session-transcript.js', () => ({
+  readOwnSessionTranscript: (pid: number) => { h.ownPids.push(pid); return h.own },
+}))
 vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'main-test' }))
 vi.mock('../web/channel-monitor.js', () => ({
   resumeMarveenSession: h.resume,
@@ -81,6 +88,8 @@ beforeEach(async () => {
   h.cpu = []
   h.respawnAt = 0
   h.mtime = null
+  h.own = { ok: false, reason: 'test-default' }
+  h.ownPids.length = 0
   h.times.length = 0
   h.resume.mockClear()
   h.info.mockClear()
@@ -155,6 +164,46 @@ describe('the transcript gate on a re-fired verdict: written since the freeze = 
   it('a real wedge whose last write PREDATES the freeze recovers at the first verdict, unchanged', async () => {
     await drive(30, () => { h.mtime = h.t0 + 20_000 })   // written at 20 s; the first stagnant poll is at 60 s
     expect(h.times).toEqual([FIRST_VERDICT_MS])
+  })
+})
+
+describe("STUCKOWNSID1127: the kill gate reads the main session's OWN transcript (PROGI 6145 (c))", () => {
+  const own = (mtimeMs: number) => ({ ok: true as const, sessionId: '10c0fe6a-2ea2-4dec-85ef-a4462cc76b85', path: '/x/10c0fe6a-2ea2-4dec-85ef-a4462cc76b85.jsonl', mtimeMs })
+  const gateWarns = () => h.warn.mock.calls.filter(c => /ABORTING recovery/.test(String(c[1])))
+  const recoveryWarn = () => h.warn.mock.calls.find(c => String(c[1]).includes('recovering main channels session'))
+
+  it('a FOREIGN session writing after the freeze does not hold a real wedge: own file predates the freeze -> recovery at the first verdict', async () => {
+    // the directory's newest jsonl is a foreign writer, fresh at every poll (it would trip BOTH gates)
+    await drive(30, i => {
+      h.own = own(h.t0 + 20_000)
+      h.mtime = h.t0 + pollT(i) - 1_000
+    })
+    expect(h.times).toEqual([FIRST_VERDICT_MS])
+    expect(gateWarns()).toHaveLength(0)
+    expect(h.ownPids).toContain(100)                 // the pane pid from list-panes
+    expect(recoveryWarn()?.[0]).toMatchObject({ transcriptSource: 'own', transcriptFallback: null })
+  })
+
+  it("the session's OWN fresh write still aborts (STUCKFREEZE819), and a write since the freeze still holds (STUCKATTEMPTS1018)", async () => {
+    await drive(30, i => { h.own = own(i >= 7 ? h.t0 + pollT(7) - 1_000 : h.t0 + 20_000) })
+    expect(h.resume).not.toHaveBeenCalled()
+    expect(gateWarns()).toHaveLength(1)
+    expect(gateWarns()[0]![0]).toMatchObject({ transcriptSource: 'own', transcriptFallback: null })
+  })
+
+  it('own file not provable -> the old directory-level read decides, with the reason logged (no extra kill)', async () => {
+    await drive(30, i => {
+      h.own = { ok: false, reason: 'record-procstart-mismatch' }
+      if (i >= 7) h.mtime = h.t0 + pollT(7) - 1_000
+    })
+    expect(h.resume).not.toHaveBeenCalled()
+    expect(gateWarns()[0]![0]).toMatchObject({ transcriptSource: 'dir', transcriptFallback: 'record-procstart-mismatch' })
+  })
+
+  it('own file not provable and the directory is quiet -> recovery as before, logged as dir', async () => {
+    await drive(30, () => { h.own = { ok: false, reason: 'no-session-record' }; h.mtime = h.t0 + 20_000 })
+    expect(h.times).toEqual([FIRST_VERDICT_MS])
+    expect(recoveryWarn()?.[0]).toMatchObject({ transcriptSource: 'dir', transcriptFallback: 'no-session-record' })
   })
 })
 

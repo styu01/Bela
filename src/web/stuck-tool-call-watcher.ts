@@ -43,6 +43,7 @@ import { resolveFromPath } from '../platform.js'
 import { PROJECT_ROOT } from '../config.js'
 import { capturePane } from './agent-process.js'
 import { readTranscriptMtimeFromProjectDir } from './active-model.js'
+import { readOwnSessionTranscript } from './main-session-transcript.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { resumeMarveenSession, sendAlert, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import {
@@ -91,11 +92,13 @@ export function confirmsWedgeProfile(cpuPercent: number | null, maxCpuPercent: n
 // under the floor; any value in (9s, 180s) discriminates the two measured
 // populations.
 //
-// Known limit, stated not hidden: the mtime is DIRECTORY-level (newest jsonl
-// under the main session's project dir), so a hypothetical sibling session
-// with the same cwd could mask a real wedge -- for at most one sweep at a
-// time, because an abort keeps the spell and the next poll re-fires the
-// verdict once the masking writer pauses.
+// Which transcript (STUCKOWNSID1127, local): the main session's OWN file, named by Claude Code's
+// sessions/<pid>.json record for the pane's claude (see main-session-transcript.ts). The project
+// dir is shared with other sessions whose cwd is the marveen root (sdk-cli runs, the owner's own
+// CLI work), and once the written-since-the-freeze gate below exists, one foreign write during a
+// spell would hold a real wedge for the whole spell. When the own file cannot be proven (no
+// record, identity check fails, file missing), the read falls back to the old DIRECTORY-level
+// mtime (newest jsonl in the project dir): same masking risk as before, never an extra kill.
 export const STALE_VERDICT_FRESH_MS = 30_000
 
 // Pure: is the recovery verdict stale because the session's transcript shows
@@ -129,12 +132,21 @@ export function transcriptWrittenSinceStagnation(transcriptMtimeMs: number | nul
 // the main channels session). null on any failure (fail-open). `ps -o %cpu=` is
 // a recent decaying average on macOS/Linux -- enough to tell a 0.3% IO-wait
 // wedge from a process actively burning CPU.
-function sampleMainClaudeCpuPercent(session: string): number | null {
+function mainPanePid(session: string): number | null {
   try {
     const panePid = execFileSync(TMUX, ['list-panes', '-t', session, '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8' })
       .split('\n')[0]?.trim()
-    if (!panePid || !/^\d+$/.test(panePid)) return null
-    const out = execFileSync('/bin/ps', ['-o', '%cpu=', '-p', panePid], { timeout: 3000, encoding: 'utf-8' }).trim()
+    return panePid && /^\d+$/.test(panePid) ? Number(panePid) : null
+  } catch {
+    return null
+  }
+}
+
+function sampleMainClaudeCpuPercent(session: string): number | null {
+  try {
+    const panePid = mainPanePid(session)
+    if (panePid === null) return null
+    const out = execFileSync('/bin/ps', ['-o', '%cpu=', '-p', String(panePid)], { timeout: 3000, encoding: 'utf-8' }).trim()
     const cpu = parseFloat(out)
     return Number.isFinite(cpu) ? cpu : null
   } catch {
@@ -379,6 +391,22 @@ function deferVerdict(session: string, next: StuckToolCallState): void {
 // A re-fired verdict meets the transcript gate on every poll for as long as a live session holds
 // the spell. Log the abort at warn once per spell (keyed by stagnantSince), then at debug.
 const transcriptAbortLogged = new Map<string, number | null>()
+// STUCKOWNSID1127: the kill gate's transcript read. The main session's OWN file when Claude Code's
+// sessions/<pid>.json record for the pane's claude proves it; otherwise the old directory-level
+// newest jsonl (the pre-STUCKOWNSID1127 read), so a failed proof can only hold, never kill. The
+// source and the fallback reason go into the abort and recovery logs for the audit trail.
+export interface KillGateTranscript { mtime: number | null; source: 'own' | 'dir'; fallbackReason: string | null }
+
+function killGateTranscript(session: string): KillGateTranscript {
+  const pid = mainPanePid(session)
+  if (pid !== null) {
+    const own = readOwnSessionTranscript(pid, PROJECT_ROOT)
+    if (own.ok) return { mtime: own.mtimeMs, source: 'own', fallbackReason: null }
+    return { mtime: readTranscriptMtimeFromProjectDir(PROJECT_ROOT), source: 'dir', fallbackReason: own.reason }
+  }
+  return { mtime: readTranscriptMtimeFromProjectDir(PROJECT_ROOT), source: 'dir', fallbackReason: 'no-pane-pid' }
+}
+
 function logTranscriptAbort(session: string, stagnantSince: number | null, fields: Record<string, unknown>, msg: string): void {
   if (transcriptAbortLogged.get(session) === stagnantSince) {
     logger.debug(fields, msg)
@@ -511,14 +539,17 @@ async function checkSession(label: string, session: string): Promise<void> {
     // verdict and kill). Abort keeps the spell and resets attempts (deferVerdict), so the verdict is
     // asked again on the next poll; the written-since-the-freeze gate below keeps a live session safe
     // on those later polls (STUCKATTEMPTS1018).
-    // LOCAL: one config root is correct here -- the main session runs with CLAUDE_CONFIG_DIR=.channels-config, whose
-    // projects/ is a symlink to ~/.claude/projects (measured 2026-11-27), so upstream's multi-root
-    // killGateTranscriptMtime (STUCKROOT923, for installs where the roots diverge) is not needed.
-    const transcriptMtime = readTranscriptMtimeFromProjectDir(PROJECT_ROOT)
+    // LOCAL: one config root is correct for the directory-level fallback -- the main session runs with
+    // CLAUDE_CONFIG_DIR=.channels-config, whose projects/ is a symlink to ~/.claude/projects (measured
+    // 2026-11-27), so upstream's multi-root killGateTranscriptMtime (STUCKROOT923, for installs where the
+    // roots diverge) is not needed. The own-file read (STUCKOWNSID1127) looks the record up under the
+    // process's own CLAUDE_CONFIG_DIR first.
+    const gate = killGateTranscript(session)
+    const transcriptMtime = gate.mtime
     if (verdictStaleByTranscript(transcriptMtime, Date.now())) {
       logTranscriptAbort(
         session, next.stagnantSince,
-        { label, session, transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null, freshMs: STALE_VERDICT_FRESH_MS, seconds: next.lastSeconds },
+        { label, session, transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null, freshMs: STALE_VERDICT_FRESH_MS, seconds: next.lastSeconds, transcriptSource: gate.source, transcriptFallback: gate.fallbackReason },
         'stuck-tool-call-watcher: verdict stale -- the session transcript was written moments ago, the session is alive; ABORTING recovery (STUCKFREEZE819)',
       )
       deferVerdict(session, next)
@@ -527,7 +558,7 @@ async function checkSession(label: string, session: string): Promise<void> {
     if (transcriptWrittenSinceStagnation(transcriptMtime, next.stagnantSince)) {
       logTranscriptAbort(
         session, next.stagnantSince,
-        { label, session, transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null, stagnantMs: next.stagnantSince ? Date.now() - next.stagnantSince : null, seconds: next.lastSeconds },
+        { label, session, transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null, stagnantMs: next.stagnantSince ? Date.now() - next.stagnantSince : null, seconds: next.lastSeconds, transcriptSource: gate.source, transcriptFallback: gate.fallbackReason },
         'stuck-tool-call-watcher: the session transcript was written after the counter froze, the session is alive; ABORTING recovery (STUCKATTEMPTS1018)',
       )
       deferVerdict(session, next)
@@ -546,6 +577,9 @@ async function checkSession(label: string, session: string): Promise<void> {
         stagnantPolls: next.stagnantPolls,
         cpuPercent,
         thresholds: THRESHOLDS,
+        transcriptSource: gate.source,
+        transcriptFallback: gate.fallbackReason,
+        transcriptAgeMs: transcriptMtime ? Date.now() - transcriptMtime : null,
       },
       'stuck-tool-call-watcher: TUI counter stagnant past freeze threshold + idle wedge profile -- recovering main channels session (respawn-pane, no client-kick)',
     )
