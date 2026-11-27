@@ -86,7 +86,7 @@ describe('runGateSelfTest: settings integrity escalation', () => {
     writeFileSync(p, j({ env: { NODE_OPTIONS: '--import=/tmp/x.mjs' } }))
     await run(f)
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toBe(settingsHazardText(f[0], ['env.NODE_OPTIONS']))
+    expect(sent[0]).toBe(settingsHazardText([f[0]], ['env.NODE_OPTIONS']))
     expect(sent[0]).toContain('agens progi')
     expect(sent[0]).toContain(p)
     await run(f)
@@ -100,7 +100,7 @@ describe('runGateSelfTest: settings integrity escalation', () => {
     await run(f)
     expect(sent).toHaveLength(3)
     expect(sent[2]).toContain('HELYREALLT')
-    expect(sent[2]).toContain(p)
+    expect(sent[2]).toContain('env.NODE_OPTIONS, env.PATH, disableAllHooks')
     await run(f)
     expect(sent).toHaveLength(3)
   })
@@ -135,6 +135,50 @@ describe('runGateSelfTest: settings integrity escalation', () => {
     await run([])
     expect(sent).toHaveLength(2)
     expect(sent[1]).toContain('HELYREALLT')
+  })
+
+  it('PROGI 6376 (C2): the same hazard in many files is ONE escalation listing them; a file joining re-raises it, one leaving does not; HELYREALLT when none has it', async () => {
+    const paths = ['a', 'b', 'c', 'd'].map((n) => join(dir, `${n}.json`))
+    for (const p of paths.slice(0, 3)) writeFileSync(p, j({ env: { PATH: '/evil' } }))
+    writeFileSync(paths[3], j({ env: { TZ: 'UTC' } }))
+    const files = paths.map((path, i) => ({ agent: `ag${i}`, path }))
+    const ev: Array<{ kind: string; key: string; text: string }> = []
+    const alerter = { fail: (key: string, text: string) => { ev.push({ kind: 'fail', key, text }) }, recover: (key: string, text: string) => { ev.push({ kind: 'recover', key, text }) } }
+    const go = () => runGateSelfTest({ targets: [], settingsFiles: files, alerter, retryDelayMs: 0, git: null })
+    await go()
+    expect(ev).toHaveLength(1)
+    expect(ev[0].key).toBe('gate-settings-integrity:env.PATH')
+    for (const p of paths.slice(0, 3)) expect(ev[0].text).toContain(p)
+    expect(ev[0].text).toContain('(3 fajl)')
+    expect(ev[0].text).not.toContain(paths[3])
+    writeFileSync(paths[3], j({ env: { PATH: '/evil' } })) // joins
+    await go()
+    expect(ev).toHaveLength(2)
+    expect(ev[1].text).toContain('(4 fajl)')
+    writeFileSync(paths[0], j({})) // leaves: no message
+    await go()
+    expect(ev).toHaveLength(2)
+    for (const p of paths.slice(1)) writeFileSync(p, j({}))
+    await go()
+    expect(ev.map((e) => e.kind)).toEqual(['fail', 'fail', 'recover'])
+    expect(ev[2].key).toBe('gate-settings-integrity:env.PATH')
+  })
+
+  it('PROGI 6376 (C2): different hazards are different escalations; a file changing its hazard moves between them', async () => {
+    const a = join(dir, 'a.json'); const b = join(dir, 'b.json')
+    writeFileSync(a, j({ env: { PATH: '/x' } })); writeFileSync(b, j({ env: { PATH: '/x' } }))
+    const files = [{ agent: 'x', path: a }, { agent: 'y', path: b }]
+    await run(files)
+    expect(sent).toHaveLength(1)
+    writeFileSync(b, j({ env: { PATH: '/x' }, disableAllHooks: true }))
+    await run(files)
+    expect(sent).toHaveLength(2) // the new signature is raised; the old one keeps a (no message)
+    expect(sent[1]).toContain('disableAllHooks')
+    writeFileSync(a, j({}))
+    await run(files)
+    expect(sent).toHaveLength(3) // env.PATH alone is gone from every file: HELYREALLT for that one
+    expect(sent[2]).toContain('HELYREALLT')
+    expect(sent[2]).not.toContain('disableAllHooks')
   })
 
   it('one file listed twice is one escalation; two files are two', async () => {

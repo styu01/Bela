@@ -122,16 +122,26 @@ export function findSettingsHazards(raw: string): string[] {
   return out
 }
 
-export const settingsHazardRecoveryText = (path: string): string =>
-  `[kapu-onteszt] HELYREALLT: ${path} mar nem tartalmaz hook-kornyezeti vagy hook-kapcsolo kulcsot (vagy mar nincs meg).`
+// PROGI 6376 (C2): one escalation per hazard SIGNATURE (the same keys), listing the files. A key in ~/.claude
+// reaches every sub-agent's .claude-config copy at its next spawn (provisionIsolatedConfigDir): per file that was
+// ten escalations to BELA and, 20 minutes later, ten to the owner, for one cause.
+export const settingsHazardKey = (sig: string): string => `gate-settings-integrity:${sig}`
 
-export function settingsHazardText(f: SettingsFile, hazards: readonly string[]): string {
+export const settingsHazardRecoveryText = (hazards: readonly string[]): string =>
+  `[kapu-onteszt] HELYREALLT: a(z) ${hazards.join(', ')} beallitas mar egyik settings-fajlban sincs (a fajlokat javitottak, vagy mar nincsenek meg).`
+
+export function settingsHazardText(files: readonly SettingsFile[], hazards: readonly string[]): string {
   const env = hazards.filter((h) => h.startsWith('env.'))
   const sw = hazards.filter((h) => !h.startsWith('env.'))
   const effects: string[] = []
   if (env.length) effects.push(`az "env" blokk (${env.join(', ')}) minden hook-folyamatba bekerul: a CLAUDE_CODE_SHELL_PREFIX minden hook-parancsot egy tetszoleges programon at futtat (a kapu le sem fut), a CLAUDE_CODE_SHELL / SHELL a hook-shellt csereli, a PATH a kapu-parancsok programjait (timeout, python3, a shell), az LD_* / DYLD_* / BASH_ENV / ENV / BASH_FUNC_* / SHELLOPTS / BASHOPTS / PS4 / NODE_* / PYTHON* kodot tolthet be, igy a kapu atengedhet`)
   if (sw.length) effects.push(`a(z) ${sw.join(', ')} kapcsolo a hookokat kikapcsolja: annal az agensnel minden kapu NEM FUT`)
-  return `[kapu-onteszt] SETTINGS-INTEGRITAS: agens ${f.agent}, fajl ${f.path}: ${effects.join('; ')}. Ma ilyen beallitas sehol nincs, tehat ez uj. Teendo: nezd meg, ki irta be (git log / a fajl ideje), es ha nem szandekos, torold a kulcsot; a sub-agens .claude/settings.json-t a kovetkezo spawn ujrageneralja, a tobbit kezzel.`
+  const where = files.map((f) => `- agens ${f.agent}: ${f.path}`)
+  return [
+    `[kapu-onteszt] SETTINGS-INTEGRITAS (${files.length} fajl): ${effects.join('; ')}. Ma ilyen beallitas sehol nincs, tehat ez uj.`,
+    ...where,
+    `Teendo: nezd meg, ki irta be (git log / a fajl ideje), es ha nem szandekos, torold a kulcsot. Ha a ~/.claude/settings.json-ban van, a sub-agensek .claude-config masolataba a kovetkezo spawnkor kerul at: ott is torold; a sub-agens .claude/settings.json-t a kovetkezo spawn ujrageneralja, a tobbit kezzel.`,
+  ].join('\n')
 }
 
 /** The gate hooks wired in the PreToolUse section of each target's settings. Pure (reader injected). */
@@ -664,8 +674,10 @@ let openUnverifiable: UnverifiableOpen | null = null
 let unreadableStreak = new Map<string, number>()
 const unreadableEscalated = new Set<string>()
 export const UNREADABLE_SETTINGS_PASSES = 2
-// BELA 6355: settings files with a hazard, path -> the hazard signature it was raised for.
-let settingsHazardOpen = new Map<string, string>()
+// BELA 6355 / PROGI 6376 (C2): the open settings-hazard escalations: signature -> the files it was raised for;
+// and each hazardous file's last signature (kept while the file is unreadable).
+let settingsHazardOpen = new Map<string, Set<string>>()
+let settingsHazardOf = new Map<string, string>()
 
 /** A settings file that exists but cannot be read / parsed for UNREADABLE_SETTINGS_PASSES passes in a row is
  *  itself escalated (BELA first, the owner if it stays): Claude Code then either does not start or runs that
@@ -833,36 +845,52 @@ export async function runGateSelfTest(opts: {
       }
     }
     {
-      // BELA 6355: settings integrity, one escalation per file. A file that cannot be read this pass keeps its
-      // open escalation (a write caught mid-way must not tell a false all-clear); a missing file is clean.
+      // BELA 6355 / PROGI 6376 (C2): settings integrity, one escalation per hazard signature with its files. A file
+      // that cannot be read this pass keeps its last signature (a write caught mid-way must not tell a false
+      // all-clear); a missing file, or one no longer listed (its agent removed), is clean.
       const alerterS = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
       const exists = opts.exists ?? existsSync
-      const seen = new Set<string>()
+      const nowOf = new Map<string, string>()
+      const fileOf = new Map<string, SettingsFile>()
       // A test that injects its own targets scans only the settings files it injects too (never the host's).
       for (const f of opts.settingsFiles ?? (opts.targets ? [] : settingsIntegrityFiles())) {
-        if (seen.has(f.path)) continue
-        seen.add(f.path)
+        if (fileOf.has(f.path)) continue
+        fileOf.set(f.path, f)
         const raw = read(f.path)
-        if (raw == null && exists(f.path)) continue
-        const hazards = raw == null ? [] : findSettingsHazards(raw)
-        const sig = hazards.join(',')
-        const prev = settingsHazardOpen.get(f.path)
-        const key = `gate-settings-integrity:${f.path}`
-        if (hazards.length && sig !== prev) {
-          if (prev !== undefined) { try { clearOwnerEscalation(key) } catch { /* not open */ } }
-          settingsHazardOpen.set(f.path, sig)
-          logger.error({ agent: f.agent, path: f.path, hazards }, 'gate self-test: settings file carries a hook-environment / hook-switch hazard -- escalating')
-          try { alerterS.fail(key, settingsHazardText(f, hazards)) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
-        } else if (!hazards.length && prev !== undefined) {
-          settingsHazardOpen.delete(f.path)
-          logger.info({ path: f.path }, 'gate self-test: settings file clean again')
-          try { alerterS.recover(key, settingsHazardRecoveryText(f.path)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+        if (raw == null && exists(f.path)) {
+          const last = settingsHazardOf.get(f.path)
+          if (last) nowOf.set(f.path, last)
+          continue
         }
+        const hazards = raw == null ? [] : findSettingsHazards(raw)
+        if (hazards.length) nowOf.set(f.path, hazards.join(','))
       }
-      // A file no longer in the list (its agent was removed) is gone: its escalation closes.
-      for (const path of [...settingsHazardOpen.keys()].filter((p) => !seen.has(p))) {
-        settingsHazardOpen.delete(path)
-        try { alerterS.recover(`gate-settings-integrity:${path}`, settingsHazardRecoveryText(path)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+      settingsHazardOf = nowOf
+      const groups = new Map<string, SettingsFile[]>()
+      for (const [path, sig] of nowOf) groups.set(sig, [...(groups.get(sig) ?? []), fileOf.get(path) as SettingsFile])
+      for (const sig of [...settingsHazardOpen.keys()].filter((g) => !groups.has(g))) {
+        const was = settingsHazardOpen.get(sig) as Set<string>
+        settingsHazardOpen.delete(sig)
+        // Its files all still carry a hazard, under another signature (a key added or removed): that one's alert
+        // covers them, so this one closes without an all-clear that would read as "fixed".
+        if ([...was].every((p) => nowOf.has(p))) {
+          logger.info({ hazards: sig }, 'gate self-test: settings hazard signature changed; the old escalation closes silently')
+          try { clearOwnerEscalation(settingsHazardKey(sig)) } catch { /* not open */ }
+          continue
+        }
+        logger.info({ hazards: sig }, 'gate self-test: settings hazard gone from every file')
+        try { alerterS.recover(settingsHazardKey(sig), settingsHazardRecoveryText(sig.split(','))) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+      }
+      for (const [sig, files] of groups) {
+        const prev = settingsHazardOpen.get(sig)
+        const paths = new Set(files.map((f) => f.path))
+        // Raised once; again (with the full list) only when a file joins. A file that left just shrinks it.
+        if (!prev || files.some((f) => !prev.has(f.path))) {
+          if (prev) { try { clearOwnerEscalation(settingsHazardKey(sig)) } catch { /* not open */ } }
+          logger.error({ hazards: sig, files: [...paths] }, 'gate self-test: settings file(s) carry a hook-environment / hook-switch hazard -- escalating')
+          try { alerterS.fail(settingsHazardKey(sig), settingsHazardText(files, sig.split(','))) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
+        }
+        settingsHazardOpen.set(sig, paths)
       }
     }
     const rec = reconcileGateEscalations(openGates, results, unreadable)
@@ -943,6 +971,7 @@ export function resetGateSelfTestState(): void {
   unreadableStreak = new Map()
   unreadableEscalated.clear()
   settingsHazardOpen = new Map()
+  settingsHazardOf = new Map()
   openUnverifiable = null
   running = false
   runningSince = 0
