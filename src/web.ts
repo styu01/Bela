@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { runLsof } from './lsof.js'
-import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID } from './config.js'
+import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID, WEB_PUBLIC_PORT_RAW } from './config.js'
+import { isPublicRequest, openPublicListener, publicListenerDecision, publicPathOpenWithoutSession } from './web/public-access.js'
+import { listDashboardUserTotpState } from './db.js'
 import { loadOrCreateDashboardToken } from './web/dashboard-auth.js'
 import { resolveAuth, requiresAuth, isFederationWireEndpoint, type AuthResult } from './web/auth-gate.js'
 import { sweepExpiredSessions } from './web/auth-sessions.js'
@@ -147,6 +149,15 @@ export function startWebServer(port = 3420): http.Server {
     // decides whether a missing principal is a 401 (gated /api/* + fleet
     // manifest) or a public probe (auth status/login, avatars).
     const auth: AuthResult = resolveAuth(req, url, path, method, DASHBOARD_TOKEN)
+    // DOCKERHTTPS1119 port (public-access.ts, upstream Dani 81108 N1): on the public listener a request without a login
+    // session reaches only a closed list (the login, its code step, the auth status) and the static UI. A path that
+    // requiresAuth() leaves OPEN on 3420 (avatars, and any future exception) answers 404 there, so it does not reach the
+    // internet by itself; a gated path keeps its 401 below (the page's login overlay keys on it). 3420 is unchanged.
+    if (isPublicRequest(req) && auth.kind === 'none' && !requiresAuth(path, method) && !publicPathOpenWithoutSession(path, method)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found' }))
+      return
+    }
     if (requiresAuth(path, method) && auth.kind === 'none') {
       if (isFederationWireEndpoint(path, method)) {
         // 401s are otherwise silent; federation-endpoint auth failures are the
@@ -596,8 +607,29 @@ export function startWebServer(port = 3420): http.Server {
     logger.warn({ err }, 'Task-state orphan sweep skipped')
   }
 
+  // DOCKERHTTPS1119 port (public-access.ts): the optional public listener for a local HTTPS proxy. OFF unless
+  // WEB_PUBLIC_PORT is set, and then only with an https:// DASHBOARD_PUBLIC_URL and the TOTP second factor on for
+  // every enabled login; only in the install that runs the services (never a worktree / temp clone / WEB_ONLY
+  // instance); always bound to 127.0.0.1. Same handler: each of its requests is marked public first, so the gate takes
+  // only a TOTP login session there. A listen error is logged and the public listener stays down; it never takes the
+  // dashboard down (the internal listener's exit-on-not-listening watchdog does not look at it).
+  let publicServer: http.Server | null = null
+  {
+    let users: { username: string; disabled: number; totp_enabled: number }[] = []
+    try { users = listDashboardUserTotpState() } catch (err) { logger.warn({ err }, 'public listener: could not read the dashboard logins') }
+    const decision = publicListenerDecision({ publicPortRaw: WEB_PUBLIC_PORT_RAW, internalPort: port, publicUrl: DASHBOARD_PUBLIC_URL, users })
+    if (decision.start && servicesOff) {
+      logger.warn({ port: decision.port }, 'public listener NOT opened: second instance / WEB_ONLY (only the install that runs the services opens it)')
+    } else if (decision.start) {
+      publicServer = openPublicListener(server, decision.port, logger, http.createServer)
+    } else if (decision.reason !== 'not-configured') {
+      logger.error({ reason: decision.reason, detail: decision.detail }, 'public listener NOT opened (WEB_PUBLIC_PORT is set, but a condition is not met)')
+    }
+  }
+
   const origClose = server.close.bind(server)
   server.close = (cb?: (err?: Error) => void) => {
+    if (publicServer) { try { publicServer.close() } catch { /* not listening */ } }
     clearInterval(routerInterval)
     clearInterval(scheduleInterval)
     clearInterval(kanbanArchiveInterval)

@@ -253,6 +253,9 @@ function mainAgentId() {
         } else if (o.kind === 'unavailable') {
           // No password-only fallback: the server refuses it, the text says what must be repaired.
           errEl.textContent = totpOutcomeText(o)
+        } else if (data && data.code === 'public_totp_required') {
+          // DOCKERHTTPS1119 port: the public HTTPS address takes only a login with two-step sign-in on.
+          errEl.textContent = tr('auth.login.err_public_totp', 'The public address takes only a login with two-step sign-in on. Turn it on at the internal address first.')
         } else {
           errEl.textContent = tr('auth.login.err_invalid', 'Invalid credentials.')
         }

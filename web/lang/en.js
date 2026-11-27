@@ -1777,6 +1777,7 @@ window._i18n.en = {
   'auth.card.active_sessions':    'Active sessions',
   'auth.card.token_mode':         'This session signed in with the access token (the Bridge and fleet tools open with their own key, so they never ask for a password). Your password login is still active and works: use it any time on the browser sign-in page.',
   // DOCKERHTTPS1119: two-step sign-in (TOTP)
+  'auth.login.err_public_totp':   'The public address takes only a login with two-step sign-in on. Turn it on at the internal address first.',
   'auth.totp.title':               'Two-step sign-in',
   'auth.totp.desc':                'When it is on, signing in takes a 6-digit code from an authenticator app besides the password. It is off by default.',
   'auth.totp.status_off':          'Status: off.',

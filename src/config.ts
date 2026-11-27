@@ -322,6 +322,10 @@ export const KANBAN_WIP_OVER_COLOR = env['KANBAN_WIP_OVER_COLOR'] ?? '#c53030'
 // requiresRestart registry keys: read through the override layer so a value
 // saved on the Settings page takes effect on the next restart.
 export const DASHBOARD_PUBLIC_URL = cfg('DASHBOARD_PUBLIC_URL') ?? ''
+// DOCKERHTTPS1119 port (src/web/public-access.ts): the optional public listener behind a local HTTPS proxy. Read from
+// .env (upstream 3a8b912b: the listener starts from .env, there is no dotenv here) or the process environment. NO
+// default: unset means no public listener at all.
+export const WEB_PUBLIC_PORT_RAW = env['WEB_PUBLIC_PORT'] ?? process.env['WEB_PUBLIC_PORT'] ?? ''
 // Extra browser origins allowed to make state-changing dashboard requests
 // (CORS + CSRF allowlist), comma-separated, e.g. for VPN/LAN addresses that
 // aren't covered by WEB_HOST or DASHBOARD_PUBLIC_URL. Empty by default so

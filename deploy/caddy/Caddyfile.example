@@ -1,0 +1,24 @@
+# DOCKERHTTPS1119 port (BELA 6404): the OPTIONAL public HTTPS front of the dashboard on a systemd install.
+# NOT installed, NOT enabled. See docs/public-https.md before using it: it needs the owner's decision (a public host
+# name, ports 80/443 reachable from the internet) and the two-step sign-in (TOTP) on for every dashboard login.
+#
+# Replace dash.example.org with the public host name and 3999 with the WEB_PUBLIC_PORT set in the install's .env.
+# Caddy gets the certificate itself (ACME) and forwards to the dashboard's PUBLIC listener on 127.0.0.1 only; never to
+# the internal 127.0.0.1:3420, which takes the bearer token.
+{
+	log {
+		# The whole query string is dropped from the log (upstream 3a8b912b: an upstream error logged the full URI).
+		format filter {
+			wrap console
+			fields {
+				request>uri regexp "[?].*" ""
+			}
+		}
+	}
+}
+
+dash.example.org {
+	header Strict-Transport-Security "max-age=31536000"
+	header Referrer-Policy "no-referrer"
+	reverse_proxy 127.0.0.1:3999
+}

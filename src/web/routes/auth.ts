@@ -22,6 +22,7 @@ import type http from 'node:http'
 import { readBody, json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
 import { parseCookies, SESSION_COOKIE_NAME, sessionUserFromCookie } from '../auth-gate.js'
+import { isPublicRequest } from '../public-access.js'
 import {
   hashPassword,
   verifyPassword,
@@ -97,14 +98,20 @@ function isHttps(req: http.IncomingMessage): boolean {
   return typeof v === 'string' && v.split(',')[0]!.trim().toLowerCase() === 'https'
 }
 
+// DOCKERHTTPS1119 port: on the public listener (behind the local HTTPS proxy) the cookie is always Secure, whatever
+// X-Forwarded-Proto says.
+function secureCookie(req: http.IncomingMessage): boolean {
+  return isHttps(req) || isPublicRequest(req)
+}
+
 function sessionCookie(token: string, req: http.IncomingMessage): string {
   const base = `${SESSION_COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`
-  return isHttps(req) ? `${base}; Secure` : base
+  return secureCookie(req) ? `${base}; Secure` : base
 }
 
 function clearCookie(req: http.IncomingMessage): string {
   const base = `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`
-  return isHttps(req) ? `${base}; Secure` : base
+  return secureCookie(req) ? `${base}; Secure` : base
 }
 
 async function parseJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -177,6 +184,8 @@ export const TOTP_ALREADY_ENABLED = { error: 'Two-step sign-in is already on.', 
 export const TOTP_NOT_ENABLED = { error: 'Two-step sign-in is off.', code: 'totp_not_enabled' }
 export const TOTP_SETUP_MISSING = { error: 'Start the setup first (or again: it expired).', code: 'totp_setup_missing' }
 export const TOTP_CODE_REQUIRED = { error: 'A code is required.', code: 'totp_code_required' }
+// DOCKERHTTPS1119 port: the public HTTPS address takes only a login with the two-step sign-in on.
+export const PUBLIC_TOTP_REQUIRED = { error: 'The public address takes only a login with two-step sign-in on. Turn it on at the internal address first.', code: 'public_totp_required' }
 
 /** DOCKERHTTPS1119: the owner ping when the second factor is turned off on the web (password + code). */
 export function totpDisabledNotice(username: string): string {
@@ -305,6 +314,13 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
         return true
       }
       logger.warn({ err: err.message, username: user.username }, 'login: the two-step sign-in store is unreadable; the flag is off, password login allowed')
+    }
+    // DOCKERHTTPS1119 port (public-access.ts, this fork's rule): on the public address only a login with the second
+    // factor on gets a session. The right password of a login without it gets none; turn it on at the internal address.
+    if (!totp && isPublicRequest(req)) {
+      logger.warn({ username: user.username }, 'login: refused on the public address, the two-step sign-in is off for this login')
+      noStoreJson(res, PUBLIC_TOTP_REQUIRED, 403)
+      return true
     }
     if (totp) {
       const pending = createPendingLogin(user.id, user.username)

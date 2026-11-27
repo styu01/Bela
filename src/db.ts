@@ -1263,6 +1263,12 @@ export function updateDashboardUserPassword(userId: number, passwordHash: string
     .run(passwordHash, Math.floor(Date.now() / 1000), userId)
 }
 
+/** DOCKERHTTPS1119 port (BELA 6404): every dashboard login with its disabled flag and second-factor flag, for the
+ *  public listener's start decision (public-access.ts). Usernames and flags only, never a hash. */
+export function listDashboardUserTotpState(): { username: string; disabled: number; totp_enabled: number }[] {
+  return db.prepare('SELECT username, disabled, totp_enabled FROM dashboard_users ORDER BY id ASC').all() as { username: string; disabled: number; totp_enabled: number }[]
+}
+
 /** DOCKERHTTPS1119: the record that the TOTP second factor is on for this user (see dashboard-totp.ts). */
 export function setDashboardUserTotpEnabled(userId: number, enabled: boolean): void {
   db.prepare('UPDATE dashboard_users SET totp_enabled = ?, updated_at = ? WHERE id = ?')

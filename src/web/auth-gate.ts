@@ -24,6 +24,8 @@ import type http from 'node:http'
 import { checkBearerToken } from './dashboard-auth.js'
 import { identifyFederationCaller } from './federation/config.js'
 import { resolveSession } from './auth-sessions.js'
+import { isPublicRequest } from './public-access.js'
+import { getDashboardUser } from '../db.js'
 import { resolveDeviceKey } from './auth-device-keys.js'
 
 export type AuthResult =
@@ -93,6 +95,18 @@ export function resolveAuth(
   method: string,
   dashboardToken: string,
 ): AuthResult {
+  // DOCKERHTTPS1119 port (public-access.ts): on the public listener ONLY a browser login session counts, and only while
+  // its user has the TOTP second factor on (this fork's rule: the public address only together with TOTP). The bearer
+  // token, a device key, the SSE ?token= and federation tokens are never looked at there.
+  if (isPublicRequest(req)) {
+    const cookieValue = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
+    const session = cookieValue ? resolveSession(cookieValue) : null
+    if (!session) return { kind: 'none' }
+    const user = getDashboardUser(session.username)
+    if (!user || user.disabled || user.totp_enabled !== 1) return { kind: 'none' }
+    return { kind: 'session', user: session.username }
+  }
+
   // 1. Bearer header -- unchanged, highest precedence.
   if (checkBearerToken(req.headers.authorization, dashboardToken)) return { kind: 'token' }
 

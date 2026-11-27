@@ -1779,6 +1779,7 @@ window._i18n.hu = {
   'auth.card.active_sessions':    'Aktív munkamenetek',
   'auth.card.token_mode':         'Ez a munkamenet a hozzáférési tokennel lépett be (a Bridge és a flotta-eszközök saját kulccsal nyitnak, ezért sosem kérnek jelszót). A jelszavas belépésed ettől függetlenül él és működik: böngészőből a bejelentkező oldalon bármikor használhatod.',
   // DOCKERHTTPS1119: two-step sign-in (TOTP)
+  'auth.login.err_public_totp':   'A nyilvános címen csak bekapcsolt kétlépcsős belépéssel lehet belépni. Előbb kapcsold be a belső címen.',
   'auth.totp.title':               'Kétlépcsős belépés',
   'auth.totp.desc':                'Bekapcsolva a jelszó mellé egy hitelesítő alkalmazás 6 jegyű kódja is kell a belépéshez. Alapból ki van kapcsolva.',
   'auth.totp.status_off':          'Állapot: kikapcsolva.',
