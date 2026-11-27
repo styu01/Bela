@@ -51,6 +51,13 @@ function normalise(s: string): string {
   return s.replace(/\s+/g, ' ').trim()
 }
 
+// PROGI 6263 / BELA 6264 (b): a substring match needs a minimum length. A short human draft in the main
+// agent's box ("igen", a single word) that happens to occur verbatim in a scheduled prompt sent within the
+// TTL was read as machine-origin / a scheduled-task block: the stuck-input recovery then pressed Enter on it
+// (sent it) or, multi-row, cleared it. Below this many (normalised) characters the registry says nothing,
+// which leaves the primary prefix checks and the old "possibly a human draft" defer in charge.
+export const SENT_TEXT_MIN_FRAGMENT_CHARS = 24
+
 /** Record that `text` was just sent (or is about to be sent) to `session`. */
 export function recordSentText(session: string, text: string, now: number = Date.now()): void {
   registry.set(session, { text: normalise(text), sentAt: now })
@@ -72,7 +79,7 @@ export function isKnownRecentInjection(session: string, visibleFragment: string,
   if (entry == null) return false
   if (now - entry.sentAt > SENT_TEXT_TTL_MS) return false
   const flat = normalise(visibleFragment)
-  if (flat.length === 0) return false
+  if (flat.length < SENT_TEXT_MIN_FRAGMENT_CHARS) return false
   return entry.text.includes(flat)
 }
 
@@ -103,7 +110,7 @@ export function isKnownRecentScheduledTaskInjection(session: string, visibleFrag
   if (entry == null) return false
   if (now - entry.sentAt > SENT_TEXT_TTL_MS) return false
   const flat = normalise(visibleFragment)
-  if (flat.length === 0) return false
+  if (flat.length < SENT_TEXT_MIN_FRAGMENT_CHARS) return false
   if (!entry.text.includes(flat)) return false
   return SCHEDULED_TASK_ORIGIN_PREFIXES.some((rx) => rx.test(entry.text))
 }

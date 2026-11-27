@@ -4,6 +4,7 @@ import {
   isKnownRecentInjection,
   isKnownRecentScheduledTaskInjection,
   SENT_TEXT_TTL_MS,
+  SENT_TEXT_MIN_FRAGMENT_CHARS,
   _resetSentTextRegistryForTests,
 } from '../web/sent-text-registry.js'
 
@@ -31,8 +32,8 @@ describe('sent-text-registry', () => {
   })
 
   it('collapses whitespace on both sides before comparing (terminal soft-wrap)', () => {
-    recordSentText('bela-channels', 'SCHEDULED   TASK\nNOTICE -- the next  <scheduled-task')
-    expect(isKnownRecentInjection('bela-channels', '  TASK\n\nNOTICE  -- the   next')).toBe(true)
+    recordSentText('bela-channels', 'SCHEDULED   TASK\nNOTICE -- the next  <scheduled-task source="x">')
+    expect(isKnownRecentInjection('bela-channels', '  TASK\n\nNOTICE  -- the   next   <scheduled-task')).toBe(true)
   })
 
   it('does not match unrelated text', () => {
@@ -47,24 +48,24 @@ describe('sent-text-registry', () => {
 
   it('expires after SENT_TEXT_TTL_MS', () => {
     const t0 = 1_000_000
-    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next', t0)
-    expect(isKnownRecentInjection('bela-channels', 'the next', t0 + SENT_TEXT_TTL_MS - 1)).toBe(true)
-    expect(isKnownRecentInjection('bela-channels', 'the next', t0 + SENT_TEXT_TTL_MS + 1)).toBe(false)
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next scheduled block', t0)
+    expect(isKnownRecentInjection('bela-channels', 'the next scheduled block here'.slice(0, 24), t0 + SENT_TEXT_TTL_MS - 1)).toBe(true)
+    expect(isKnownRecentInjection('bela-channels', 'the next scheduled block here'.slice(0, 24), t0 + SENT_TEXT_TTL_MS + 1)).toBe(false)
   })
 
   it('keeps per-session state separate', () => {
-    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE for main')
-    recordSentText('agent-progi', 'TEAM MEMBER NOTICE for progi')
-    expect(isKnownRecentInjection('bela-channels', 'for progi')).toBe(false)
-    expect(isKnownRecentInjection('agent-progi', 'for progi')).toBe(true)
-    expect(isKnownRecentInjection('agent-progi', 'for main')).toBe(false)
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE for the main agent session')
+    recordSentText('agent-progi', 'TEAM MEMBER NOTICE for the progi agent session')
+    expect(isKnownRecentInjection('bela-channels', 'for the progi agent session')).toBe(false)
+    expect(isKnownRecentInjection('agent-progi', 'for the progi agent session')).toBe(true)
+    expect(isKnownRecentInjection('agent-progi', 'for the main agent session')).toBe(false)
   })
 
   it('a later send for the same session overwrites the earlier one', () => {
-    recordSentText('bela-channels', 'first message body')
-    recordSentText('bela-channels', 'second message body')
-    expect(isKnownRecentInjection('bela-channels', 'first message body')).toBe(false)
-    expect(isKnownRecentInjection('bela-channels', 'second message body')).toBe(true)
+    recordSentText('bela-channels', 'first message body, long enough to count')
+    recordSentText('bela-channels', 'second message body, long enough to count')
+    expect(isKnownRecentInjection('bela-channels', 'first message body, long enough to count')).toBe(false)
+    expect(isKnownRecentInjection('bela-channels', 'second message body, long enough to count')).toBe(true)
   })
 })
 
@@ -111,8 +112,23 @@ describe('isKnownRecentScheduledTaskInjection', () => {
 
   it('expires after SENT_TEXT_TTL_MS, same as isKnownRecentInjection', () => {
     const t0 = 1_000_000
-    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next fragment', t0)
-    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'the next fragment', t0 + SENT_TEXT_TTL_MS - 1)).toBe(true)
-    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'the next fragment', t0 + SENT_TEXT_TTL_MS + 1)).toBe(false)
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- the next fragment of the block', t0)
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'the next fragment of the block', t0 + SENT_TEXT_TTL_MS - 1)).toBe(true)
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'the next fragment of the block', t0 + SENT_TEXT_TTL_MS + 1)).toBe(false)
+  })
+})
+
+// PROGI 6263 / BELA 6264 (b): a short human draft that happens to occur in a recent scheduled prompt is not
+// taken for that prompt (it was then sent with Enter or cleared by the stuck-input recovery).
+describe('minimum fragment length', () => {
+  it('below SENT_TEXT_MIN_FRAGMENT_CHARS the registry says nothing; at the limit it matches', () => {
+    recordSentText('bela-channels', 'SCHEDULED TASK NOTICE -- igen, a reggeli osszefoglalot kerem most')
+    expect(SENT_TEXT_MIN_FRAGMENT_CHARS).toBe(24)
+    expect(isKnownRecentInjection('bela-channels', 'igen')).toBe(false)
+    expect(isKnownRecentScheduledTaskInjection('bela-channels', 'igen')).toBe(false)
+    const atLimit = 'reggeli osszefoglalot ke'
+    expect(atLimit.length).toBe(24)
+    expect(isKnownRecentInjection('bela-channels', atLimit)).toBe(true)
+    expect(isKnownRecentInjection('bela-channels', atLimit.slice(0, 23))).toBe(false)
   })
 })
