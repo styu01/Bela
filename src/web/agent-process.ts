@@ -24,6 +24,8 @@ import {
   inputBoxText,
   stuckInputSignature,
   firstRunAcceptKeys,
+  detectsResumeDialog,
+  resumeDialogKeys,
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { beginRestart, endRestart } from './restart-lock.js'
@@ -1825,27 +1827,50 @@ async function dismissSurveyModalIfPresent(session: string, host: string | null 
   }
 }
 
-// When a session approaches its context limit Claude Code shows a "Resume from
-// summary" modal with three numbered options and footer "Enter to confirm".
-// detectPaneState() reads that footer as 'unknown' (not the usual "bypass
-// permissions" string), so isSessionReadyForPrompt() refuses to deliver and
-// every scheduled task / inter-agent message piles up behind it. Pre-flight
-// pick option 1 (Resume from summary, recommended) and Enter to confirm.
-const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
+// Resume dialogs (BELA 6227 item 4, PROGI 6226 (3b)). Until a resume dialog is answered, detectPaneState
+// reads 'unknown' and every scheduled task / inter-agent message piles up behind it, so it is answered before
+// a prompt is sent and after a (re)start. Claude Code 2.1.326 shows "Resume this conversation?" (Resume /
+// Start a new conversation / Resume from summary); on the idle trigger the options have NO numbers and the
+// focus can sit on "Start a new conversation", so the old "1" + Enter could start a NEW conversation: the main
+// agent would lose its context. The old numbered "This session is <age> old" dialog still exists on another
+// path. The old trigger was any "Resume from summary" text anywhere on screen, quoted text included.
+// Now (pane-state detectsResumeDialog / resumeDialogKeys): only a dialog in the live region, answered from the
+// pane: "Resume from summary" when offered, otherwise "Resume", never "Start a new conversation", re-checked
+// after the move before Enter (answerDialogFromPane). An uncertain shape gets NO key and is escalated (BELA
+// first, the owner if it stays).
+const resumeDialogBlocked = new Set<string>()
 
-export async function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): Promise<void> {
+export async function dismissResumeSummaryModalIfPresent(
+  session: string,
+  host: string | null = null,
+  io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
+): Promise<void> {
   try {
-    const pane = captureTmux(host, ['capture-pane', '-t', exactTmuxTarget(session), '-p'])
-    if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
-    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '1'], { timeout: 5000 })
-    await delay(100)
-    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
-    // /compact starts immediately and can run for minutes; we only need to
-    // unblock the modal so detectPaneState can transition off 'unknown'.
-    await delay(300)
-    logger.info({ session }, 'Dismissed Claude Code resume-from-summary modal before sending prompt')
+    const pane = io.capture(session, host)
+    const kind = pane != null ? detectsResumeDialog(pane) : null
+    if (kind == null) {
+      if (pane != null && resumeDialogBlocked.delete(session)) clearOwnerEscalation(`resume-dialog-blocked:${session}`)
+      return
+    }
+    const res = await answerDialogFromPane(session, host, pane as string, resumeDialogKeys, io)
+    if (res === 'answered') {
+      // /compact (Resume from summary) starts immediately and can run for minutes; the dialog is gone.
+      await io.wait(300)
+      logger.info({ session, kind }, 'Answered the Claude Code resume dialog from the pane (summary when offered, else resume; never a new conversation)')
+      return
+    }
+    logger.warn({ session, kind }, 'Resume dialog in a shape not understood (or the move did not land): NO Enter sent, escalating')
+    if (!resumeDialogBlocked.has(session)) {
+      resumeDialogBlocked.add(session)
+      const text = `A(z) ${session} session egy "Resume this conversation?" (folytatas) dialoguson all, de az alakjat nem ismerem fel biztosan, ezert NEM nyomtam Entert (a rossz valasz uj beszelgetest inditana, kontextusvesztessel). Valaszd ki kezzel: tmux attach -t ${session}, a nyilakkal a "Resume from summary" (vagy ha nincs, a "Resume") sort, majd Enter. Addig a session nem kap uzenetet.`
+      escalateToOwner({
+        key: `resume-dialog-blocked:${session}`,
+        belaText: `[resume-dialog] ${text}`,
+        ownerText: `⚠️ ${text} BÉLA mar ertesitve volt errol, de nem oldodott meg.`,
+      })
+    }
   } catch (err) {
-    logger.warn({ err, session }, 'Failed to probe/dismiss resume-from-summary modal')
+    logger.warn({ err, session }, 'Failed to probe/answer the resume dialog')
   }
 }
 
@@ -1927,7 +1952,19 @@ export async function answerAcceptDialog(
   pane: string,
   io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
 ): Promise<'answered' | 'blocked'> {
-  const keys = firstRunAcceptKeys(pane)
+  return answerDialogFromPane(session, host, pane, firstRunAcceptKeys, io)
+}
+
+// The general form (BELA 6227 item 4): the keys come from `keysFor(pane)`, and after any move the pane is
+// captured again and Enter goes only if `keysFor(again)` is exactly ['Enter'] (the cursor sits on the target).
+export async function answerDialogFromPane(
+  session: string,
+  host: string | null,
+  pane: string,
+  keysFor: (pane: string) => string[] | null,
+  io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
+): Promise<'answered' | 'blocked'> {
+  const keys = keysFor(pane)
   if (keys == null) return 'blocked'
   const moves = keys.slice(0, -1)
   if (moves.length > 0) {
@@ -1937,7 +1974,7 @@ export async function answerAcceptDialog(
     }
     await io.wait(ACCEPT_DIALOG_VERIFY_MS)
     const again = io.capture(session, host)
-    const next = again != null ? firstRunAcceptKeys(again) : null
+    const next = again != null ? keysFor(again) : null
     if (next == null || next.length !== 1 || next[0] !== 'Enter') return 'blocked'
   }
   io.send(session, host, 'Enter')

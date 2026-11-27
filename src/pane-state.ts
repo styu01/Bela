@@ -892,6 +892,106 @@ export function firstRunAcceptKeys(pane: string): string[] | null {
   return [...move, 'Enter']
 }
 
+// Resume dialogs (BELA 6227 item 4, PROGI 6226 (3b)). Claude Code 2.1.326 shows, after a long pause or on
+// resuming an old session, "Resume this conversation?" with the options (read from the 2.1.326 binary):
+//   Resume
+//   Start a new conversation      (+ optional description row "Claude can look this one up if you refer to it later")
+//   Resume from summary           (only when offered; + description row "Claude writes a summary now, and you continue from it")
+// On the "idle" trigger the options carry NO numbers (hideIndexes) and the default focus can be
+// "Start a new conversation", so the old "1" + Enter typed the digit into the box (typeAhead) and the Enter
+// confirmed a NEW conversation: the main agent would lose its context. The older numbered dialog ("This session
+// is <age> old and <n> tokens.", "Resume from summary (recommended)" / "Resume full session as-is") is still in
+// the binary on another path. The answer is read from the pane: "Resume from summary" when offered, otherwise
+// "Resume", NEVER "Start a new conversation"; an uncertain shape gets no key at all.
+const RESUME_CONVERSATION_TITLE_RX = /Resume this conversation\?/
+const RESUME_OLD_TITLE_RX = /This session is .{1,40} old and/
+const RESUME_LIVE_REGION_LINES = 40
+
+export type ResumeDialogKind = 'resume-conversation' | 'resume-old'
+
+type ResumeRow = 'summary' | 'resume' | 'resume-full' | 'new' | 'dont-ask' | 'desc' | null
+
+function resumeRowKind(line: string): ResumeRow {
+  const label = line
+    .replace(/[\u2502|]/g, '')
+    .replace(CURSOR_GLYPH, '')
+    .trim()
+    .replace(/^\d+\.\s*/, '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .trim()
+  if (!label) return null
+  if (/^resume from summary\b/i.test(label)) return 'summary'
+  if (/^resume full session\b/i.test(label)) return 'resume-full'
+  if (/^start a new conversation\b/i.test(label)) return 'new'
+  if (/^resume(?:\s{2,}|$)/i.test(label)) return 'resume'
+  if (/^don'?t ask again\b/i.test(label)) return 'dont-ask'
+  if (/^claude can look this one up\b/i.test(label) || /^claude writes a summary now\b/i.test(label)) return 'desc'
+  return null
+}
+
+/** Which resume dialog the pane shows, or null. Same guards as detectsFirstRunGate (busy pane or a live idle
+ *  footer is never a dialog), and the title must be in the live bottom region, so a reply that merely quotes
+ *  the dialog text cannot trigger a keystroke. */
+export function detectsResumeDialog(pane: string): ResumeDialogKind | null {
+  if (!pane || !pane.trim()) return null
+  const lines = pane.split('\n')
+  const busyRegion = lines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
+  for (const rx of BUSY_INDICATORS) {
+    if (rx.test(busyRegion)) return null
+  }
+  const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
+  if (hasIdleFooter(lines)) return null
+  const live = lines.slice(-RESUME_LIVE_REGION_LINES)
+  const liveText = live.join('\n')
+  if (RESUME_CONVERSATION_TITLE_RX.test(liveText)) return 'resume-conversation'
+  const kinds = live.map(resumeRowKind)
+  if (RESUME_OLD_TITLE_RX.test(liveText) && kinds.includes('summary')) return 'resume-old'
+  // The numbered dialog without its title line on screen: both of its resume rows must be there.
+  if (kinds.includes('summary') && kinds.includes('resume-full')) return 'resume-old'
+  return null
+}
+
+/**
+ * The keys that answer a resume dialog from wherever the cursor sits: "Resume from summary" when offered,
+ * otherwise "Resume" (or the older "Resume full session"), NEVER "Start a new conversation". Arrow keys move
+ * between OPTIONS, and the 2.1.326 dialog can draw a description row under an option, so the moves are
+ * counted in option rows, not screen rows. The option list is the run of recognised option / description
+ * rows around the LAST cursor row; any other row inside it, an ambiguous target or no cursor -> null (send
+ * nothing, alert). Pure.
+ */
+export function resumeDialogKeys(pane: string): string[] | null {
+  if (!pane || !pane.trim()) return null
+  const lines = pane.split('\n')
+  let cursorIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(CURSOR_GLYPH)) { cursorIdx = i; break }
+  }
+  if (cursorIdx < 0) return null
+  const kinds = lines.map(resumeRowKind)
+  const isOption = (k: ResumeRow) => k != null && k !== 'desc'
+  if (!isOption(kinds[cursorIdx])) return null
+  let first = cursorIdx
+  while (first > 0 && kinds[first - 1] != null) first--
+  let last = cursorIdx
+  while (last < lines.length - 1 && kinds[last + 1] != null) last++
+  const optionRows: number[] = []
+  for (let i = first; i <= last; i++) if (isOption(kinds[i])) optionRows.push(i)
+  const pick = (k: ResumeRow) => optionRows.filter((i) => kinds[i] === k)
+  const summary = pick('summary')
+  const resume = pick('resume').concat(pick('resume-full'))
+  let target: number
+  if (summary.length === 1) target = summary[0]
+  else if (summary.length === 0 && resume.length === 1) target = resume[0]
+  else return null
+  if (kinds[target] === 'new') return null
+  const from = optionRows.indexOf(cursorIdx)
+  const to = optionRows.indexOf(target)
+  const delta = to - from
+  const move = delta === 0 ? [] : Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? 'Down' : 'Up'))
+  return [...move, 'Enter']
+}
+
 /**
  * Classify the pane as a Claude Code first-run gate, or null when it is a
  * normal (busy / idle / typing) surface. Pure + dependency-free.
