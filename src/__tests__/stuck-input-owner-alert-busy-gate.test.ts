@@ -90,6 +90,14 @@ describe('wiring: the owner alert goes through the gate, recovery does not', () 
     expect(fnBody).toMatch(/detectPaneState\(pane\)/)
   })
 
+  it('the busy verdict is box-height-proof (paneTurnInFlight before detectPaneState)', () => {
+    // A tall parked box pushes the live spinner out of detectPaneState's
+    // window; without this a working pane reads 'typing' and alerts.
+    const proofIdx = fnBody.indexOf('paneTurnInFlight(pane)')
+    expect(proofIdx).toBeGreaterThanOrEqual(0)
+    expect(fnBody.indexOf('detectPaneState(pane)')).toBeGreaterThan(proofIdx)
+  })
+
   it('a spell that ends clears the one-alert-per-spell marker AND the owner-escalation timers', () => {
     // Spell end is the parkedSig === null branch; both the log-dedup marker
     // and the two-stage escalation state must clear there, or a session

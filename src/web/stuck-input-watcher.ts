@@ -11,6 +11,7 @@ import {
   parkedPasteSignature,
   decideStuckInputRecovery,
   detectPaneState,
+  paneTurnInFlight,
   type PaneState,
   type StuckInputState,
   type StuckInputThresholds,
@@ -254,7 +255,9 @@ async function checkLocalSession(label: string, session: string, alertOnGiveUp: 
       // exactly this (the agent's own outbound messages bracketed every
       // alert). Recovery attempts above are untouched; only the alert gates.
       const pane = capturePane(session)
-      const paneState = pane != null ? detectPaneState(pane) : null
+      // paneTurnInFlight first (upstream f890dbcc): a tall parked box pushes the
+      // live spinner out of detectPaneState's window, and a working pane reads 'typing'.
+      const paneState: PaneState | null = pane == null ? null : paneTurnInFlight(pane) ? 'busy' : detectPaneState(pane)
       // alreadyAlerted is always false here now (kanban cf12a93a): the
       // one-alert-per-spell dedup this used to gate on moved into
       // escalateToOwner's own per-key state (BÉLA-first, then Istvan only if

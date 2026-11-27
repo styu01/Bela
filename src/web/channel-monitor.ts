@@ -42,7 +42,7 @@ import {
   stuckInputSignature, decideStuckInputRecovery, parkedChannelInput,
   parkedInputText, shouldClearTruncatedPreamble,
   parkedInputRowCount, submitLanded, decideStuckInputAction,
-  parkedScheduledTaskInput, parkedMachineOriginInput, parkedMainInputHasRemedy,
+  parkedScheduledTaskInput, parkedMachineOriginInput, parkedMainInputHasRemedy, paneTurnInFlight,
   type StuckInputState, type StuckInputThresholds, type StuckInputAction,
   type StuckInputActionFacts,
 } from '../pane-state.js'
@@ -409,7 +409,11 @@ export async function recoverStuckInputForSession(
   // (phantom prompt-injection). See captureParkedInputView / stripGhostSuggestion.
   const pane = captureParkedInputView(session)
   const sig = pane != null ? stuckInputSignature(pane) : null
-  const decision = decideStuckInputRecovery(sig, prev, Date.now(), thresholds)
+  // A parked box tall enough to push the live spinner out of detectPaneState's
+  // window reads 'typing' on a WORKING pane. Hold instead of typing into a live
+  // turn, and spend no attempt -- see paneTurnInFlight (upstream f890dbcc).
+  const turnInFlight = sig != null && pane != null && paneTurnInFlight(pane)
+  const decision = decideStuckInputRecovery(sig, prev, Date.now(), thresholds, { turnInFlight })
   if (decision.recover && pane != null) {
     const attempt = decision.next.attempts
     const block = parkedChannelInput(pane)
@@ -1400,6 +1404,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // STUCKFRAGMENT915: the empty box is reported BEFORE the early return, so it is
   // seen on every tick (the record's only forget point).
   onParkedState(MAIN_CHANNELS_SESSION, state.parkedSig)
+  if (state.parkedSig === null) mainBusyCapAlertedSig = null
   if (!parked) { stuckRestartCount = 0; return }
   // Busy-guard: never hard-restart while the main pane is actively generating --
   // a parked <channel> block then is a busy session, not a wedge. See
@@ -1407,7 +1412,22 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // unreadable pane and the guard fails-open on that, so a broken capture never
   // blocks a genuine recovery.
   const paneContent = capturePane(MAIN_CHANNELS_SESSION)
-  const paneState = paneContent != null ? detectPaneState(paneContent) : null
+  // PROGI 6238 (2a): the busy verdict is box-height-proof here too (paneTurnInFlight, as in the
+  // stuck-input watcher): a tall parked box pushes the spinner out of detectPaneState's window, and with
+  // the attempts already spent in an earlier idle stretch a WORKING main pane would read 'typing' and be
+  // respawned.
+  const turnInFlight = paneContent != null && paneTurnInFlight(paneContent)
+  const paneState: PaneState | null = paneContent == null ? null : turnInFlight ? 'busy' : detectPaneState(paneContent)
+  // PROGI 6238 (2): the main session's upper bound. While a turn is in flight the stuck-input recovery
+  // spends no attempt, so neither the hard restart nor its alert is ever reached; a frozen TUI with a
+  // drawn spinner would hold the parked text forever. Same 30 minutes as the sub-agent overdue cap, one
+  // alert per parked text.
+  if (shouldAlertMainBusyCap(state, turnInFlight, Date.now(), mainBusyCapAlertedSig)) {
+    mainBusyCapAlertedSig = state.parkedSig
+    const minutes = Math.round((Date.now() - (state.firstSeenAt ?? Date.now())) / 60_000)
+    logger.error({ session: MAIN_CHANNELS_SESSION, minutes }, 'Main input parked behind a live turn past the busy cap -- alerting (no restart)')
+    sendAlert(`⚠️ A fő ágens (${MAIN_CHANNELS_SESSION}) bemenetén kb. ${minutes} perce vár egy be nem küldött üzenet, miközben a pane dolgozónak látszik. Lehet egy nagyon hosszú feladat, egy megakadt eszközhívás vagy egy lefagyott kijelzés. Nézd meg: tmux attach -t ${MAIN_CHANNELS_SESSION} (kilépés: Ctrl-b d). Ha a spinner ideje nő, dolgozik, hagyd; ha áll, a ${SERVICE_ID}-channels szolgáltatás újraindítása a kíméletes út.`)
+  }
   // Deadlock carve-out facts: read from the ghost-stripped parked view (same
   // view the soft recovery uses) so a dim autocomplete hint never counts.
   const parkedView = paneState === 'typing' ? captureParkedInputView(MAIN_CHANNELS_SESSION) : null
@@ -1487,6 +1507,22 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
 // discarding real work. The alert gives a human (or a future, explicitly
 // approved level-2 change) the chance to decide per incident.
 export const SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS = 15 * 60 * 1000
+// Parked text waiting behind a live turn is not alerted, until the wait passes
+// this cap (upstream f890dbcc): the same 30 minutes the message router gives a
+// busy target before it escalates. No stuck-tool-call watcher covers a frozen
+// tool call on a sub-agent, so a wait that long deserves eyes.
+export const SUBAGENT_OVERDUE_BUSY_CAP_MS = 30 * 60 * 1000
+
+// PROGI 6238 (2): the main session's busy cap (see maybeRestartWedgedMainChannel). Pure.
+let mainBusyCapAlertedSig: string | null = null
+export function shouldAlertMainBusyCap(
+  state: StuckInputState, turnInFlight: boolean, nowMs: number, alertedSig: string | null,
+  capMs = SUBAGENT_OVERDUE_BUSY_CAP_MS,
+): boolean {
+  if (!turnInFlight || state.parkedSig === null || state.firstSeenAt === null) return false
+  if (alertedSig === state.parkedSig) return false
+  return nowMs - state.firstSeenAt >= capMs
+}
 const subAgentOverdueAlertedAt: Map<string, number> = new Map()
 
 /**
@@ -1500,13 +1536,43 @@ const subAgentOverdueAlertedAt: Map<string, number> = new Map()
  * @param lastAlertedAt Epoch ms of the last alert for this session, or 0 if never.
  * @param nowMs       Current time (injected so tests don't depend on the clock).
  * @param minIntervalMs Minimum gap between alerts for the same session.
+ * @param turnInFlight  The pane is working (paneTurnInFlight): suppress unless the wait passed busyCapMs.
+ * @param busyCapMs     How long parked text may wait behind a live turn before it is alerted anyway.
  */
 export function shouldAlertStuckSubAgent(
   state: StuckInputState, maxAttempts: number, lastAlertedAt: number, nowMs: number, minIntervalMs: number,
+  turnInFlight = false, busyCapMs = SUBAGENT_OVERDUE_BUSY_CAP_MS,
 ): boolean {
   if (state.parkedSig === null) return false
-  if (state.attempts < maxAttempts) return false
-  return nowMs - lastAlertedAt >= minIntervalMs
+  if (nowMs - lastAlertedAt < minIntervalMs) return false
+  // Parked behind a live turn: waiting, not wedged (decideStuckInputRecovery
+  // holds, the budget is not even being spent). Only a wait past the cap is
+  // worth a human's attention.
+  if (turnInFlight) return state.firstSeenAt !== null && nowMs - state.firstSeenAt >= busyCapMs
+  return state.attempts >= maxAttempts
+}
+
+/**
+ * The overdue-guard alert base text (upstream f890dbcc, ported). Pure, exported for unit testing.
+ *
+ * It states what is known (how long the text has been parked, and whether the agent is working), not a
+ * count of "automatic attempts": a spell whose every tick was a 'hold' spends its budget without a single
+ * keystroke. It sends the reader to LOOK first, and names the managed restart rather than
+ * `tmux respawn-pane -k`, which discards the delegated task in progress.
+ * LOCAL: the text goes through escalateToOwner (BELA first, the owner only if unresolved).
+ */
+export function subAgentOverdueAlertText(o: {
+  label: string; session: string; agentName: string | null; parkedMs: number; turnInFlight: boolean
+}): string {
+  const minutes = Math.max(1, Math.round(o.parkedMs / 60_000))
+  const look = `\`tmux attach -t ${o.session}\` (kilépés: Ctrl-b d)`
+  const restart = o.agentName != null
+    ? `a dashboardos újraindítás (\`POST /api/agents/${o.agentName}/restart\`)`
+    : 'a dashboardos újraindítás'
+  if (o.turnInFlight) {
+    return `A(z) ${o.label} bemenetén kb. ${minutes} perce vár egy üzenet, miközben az ügynök egyfolytában dolgozik: lehet egy nagyon hosszú feladat, vagy egy megakadt eszközhívás. Nézd meg: ${look}. Ha a spinner ideje nő, dolgozik, hagyd; ha áll, ${restart} a kíméletes út.`
+  }
+  return `A(z) ${o.label} bemenetén kb. ${minutes} perce parkol egy be nem küldött üzenet, és az automatikus helyreállítás nem tudta beküldeni. Előbb nézd meg, dolgozik-e az ügynök: ${look}. Ha dolgozik, várj; ha tényleg áll, ${restart} a kíméletes út. A \`tmux respawn-pane -k\` kerülendő: eldobja a folyamatban lévő delegált feladatot.`
 }
 
 // Stable escalation identity for this alert, namespaced from stuck-input-
@@ -1544,10 +1610,23 @@ function permissionDialogEscalationKey(session: string): string {
 function maybeAlertStuckSubAgent(session: string, agentName: string | null, state: StuckInputState): void {
   const last = subAgentOverdueAlertedAt.get(session) ?? 0
   const now = Date.now()
-  if (!shouldAlertStuckSubAgent(state, MAIN_STUCK_THRESHOLDS.maxAttempts, last, now, SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS)) return
+  // Cheap checks first: an unparked or rate-limited session costs no capture.
+  if (state.parkedSig === null || now - last < SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS) return
+  // Read fresh at alert time, with the box-height-proof busy check (a tall
+  // parked box hides the spinner from detectPaneState, see paneTurnInFlight).
+  const pane = capturePane(session)
+  const turnInFlight = pane != null && paneTurnInFlight(pane)
+  if (!shouldAlertStuckSubAgent(state, MAIN_STUCK_THRESHOLDS.maxAttempts, last, now, SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS, turnInFlight)) return
   subAgentOverdueAlertedAt.set(session, now)
   const label = agentName ?? session
-  logger.error({ session, agentName, attempts: state.attempts }, 'Sub-agent stuck input survived soft recovery -- overdue-guard escalation (no auto-restart)')
+  const parkedMs = state.firstSeenAt !== null ? now - state.firstSeenAt : 0
+  logger.error(
+    { session, agentName, attempts: state.attempts, turnInFlight, parkedMs },
+    turnInFlight
+      ? 'Sub-agent input parked behind a live turn past the busy cap -- overdue-guard escalation (no auto-restart)'
+      : 'Sub-agent stuck input survived soft recovery -- overdue-guard escalation (no auto-restart)',
+  )
+  const base = subAgentOverdueAlertText({ label, session, agentName, parkedMs, turnInFlight })
   // Kanban cf12a93a (2026-09-02): BÉLA first, Istvan only if unresolved.
   // This check re-runs every SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS (15 min)
   // while the wedge persists; escalateToOwner's own per-key state makes that
@@ -1558,8 +1637,8 @@ function maybeAlertStuckSubAgent(session: string, agentName: string | null, stat
   // 15 minutes for a problem BÉLA already knows about.
   escalateToOwner({
     key: stuckSubAgentEscalationKey(session),
-    belaText: `[stuck-input] A(z) ${label} session (${session}) bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki. Ha tudsz, nezd meg (tmux attach -t ${session}), kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
-    ownerText: `⚠️ A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki. BÉLA mar ertesitve volt errol, de nem oldodott meg. Kézi ellenőrzés javasolt: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`,
+    belaText: `[stuck-input] ${base} Ha tudsz, nezd meg, kulonben Istvan direkt Telegram-ertesitest kap ha ez tovabb tart.`,
+    ownerText: `⚠️ ${base} BÉLA mar ertesitve volt errol, de nem oldodott meg.`,
   })
 }
 
