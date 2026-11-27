@@ -1063,6 +1063,7 @@ window._i18n.en = {
   'agents.settings.ar_hourly':            'Hourly',
   'agents.settings.ar_time_label':        'Time',
   'agents.settings.auth_mode_label':      'Authentication mode',
+  'agents.plan_login.provider_note': 'This agent runs on the {provider} provider, with that provider\'s key. It needs no Claude login, so the Claude login choices are not shown. To run it on Claude, switch its model first.',
   'agents.settings.auth_shared':          'Shared',
   'agents.settings.auth_shared_desc':     'Uses the host OAuth authentication (default)',
   'agents.settings.auth_own_team':        'Own Team login',

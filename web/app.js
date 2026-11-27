@@ -3363,8 +3363,17 @@ function applyMarveenReadonlyMode(readOnly) {
     const btn = document.getElementById(id)
     if (btn) { btn.hidden = false; btn.disabled = readOnly }
   }
+  // HOSTINGERRETEST1125 (upstream c40e1549, the provider part only; BELA 6404): a sub-agent on a custom provider runs on
+  // that provider's key, so the Claude login choices (auth mode, Claude subscription) do not apply and are not offered;
+  // a note says why. The subscription-login relay of that commit is not in this fork.
+  const agent = typeof currentAgent === 'undefined' ? null : currentAgent
+  const onProvider = !readOnly && !!(agent && agent.role !== 'main' && agent.customProvider)
+  const providerNote = document.getElementById('agentProviderAuthNote')
+  if (providerNote) providerNote.hidden = !onProvider
+  const providerNoteText = document.getElementById('agentProviderAuthNoteText')
+  if (onProvider && providerNoteText) providerNoteText.textContent = t('agents.plan_login.provider_note', { provider: agent.customProvider })
   const authModeGroup = document.getElementById('authModeGroup')
-  if (authModeGroup) authModeGroup.hidden = readOnly
+  if (authModeGroup) authModeGroup.hidden = readOnly || onProvider
   const memoryIsolationGroup = document.getElementById('memoryIsolationGroup')
   if (memoryIsolationGroup) memoryIsolationGroup.hidden = readOnly
   const note = document.getElementById('marveenReadonlyNote')
@@ -3738,7 +3747,8 @@ async function openAgentDetail(agentName) {
   // The main agent's Claude login is managed via channels.sh, not the per-agent
   // config path, so plan selection does not apply to it. Hide the whole group.
   const planGroup = document.getElementById('claudePlanGroup')
-  if (planGroup) planGroup.hidden = currentAgent.role === 'main'
+  // The Claude subscription does not apply to a custom-provider sub-agent either (see applyMarveenReadonlyMode).
+  if (planGroup) planGroup.hidden = currentAgent.role === 'main' || !!currentAgent.customProvider
   populatePlanSelect(
     document.getElementById('editAgentPlan'),
     document.getElementById('editAgentPlanDesc'),

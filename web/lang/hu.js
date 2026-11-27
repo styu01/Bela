@@ -440,6 +440,7 @@ window._i18n.hu = {
   'agents.settings.ar_hourly':            'Óránként',
   'agents.settings.ar_time_label':        'Időpont',
   'agents.settings.auth_mode_label':      'Hitelesítési mód',
+  'agents.plan_login.provider_note': 'Ez az ügynök a(z) {provider} szolgáltatón fut, annak a kulcsával. Claude-belépés nem kell hozzá, ezért a Claude-belépési lehetőségek nem látszanak. Ha Claude-on futtatnád, előbb a modelljét állítsd át.',
   'agents.settings.auth_shared':          'Megosztott',
   'agents.settings.auth_shared_desc':     'A host OAuth hitelesítését használja (alapértelmezett)',
   'agents.settings.auth_own_team':        'Saját Team login',
