@@ -153,7 +153,9 @@ describe('channels.sh tmux auth wiring (source pin)', () => {
     }
     expect(SH).not.toContain('TMUX_AUTH_ENV')
     expect(SH).toContain('$TMUX set-environment -g -u "$STATE_ENV_VAR"')
-    const paneCommands = SH.split('\n').filter((line) => line.includes('${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE'))
+    // The main agent's custom provider env (upstream 51b18820, BELA 6404) sits between CFG_ENV and claude: its prefix
+    // starts with `unset CLAUDE_CODE_OAUTH_TOKEN`, so it must come after the CFG_ENV token export.
+    const paneCommands = SH.split('\n').filter((line) => line.includes('${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE'))
     expect(paneCommands).toHaveLength(2)
     for (const command of paneCommands) expect(command.trim().startsWith('"${AUTH_PANE_ENV}${MCP_BATCH_ENV}')).toBe(true)
   })
