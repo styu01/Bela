@@ -250,7 +250,11 @@ export const CONTEXT_LIMIT_TIERS = [200_000, 500_000, CONTROL_DENOMINATOR_1M] as
  * proactive tiers (the 2026-07-26 failure mode), while under-estimating is
  * loud and self-correcting.
  */
-const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/, /^claude-sonnet-5(-5)?$/]
+// Sonnet 5 / 5.5 also in the DATED form (claude-sonnet-5-5-YYYYMMDD; PROGI review 6196, BELA 6197): the
+// anchored pattern took only the bare ids, so a dated id fell back to 200k and the guard would hand
+// off a 1M-window session at ~180k. Measured 2026-11-27: no dated id is configured or in a transcript
+// today (all "claude-sonnet-5-5"), so this is ahead of the Saturday switch back to sonnet 5.5.
+const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/, /^claude-sonnet-5(-5)?(-\d{8})?$/]
 
 export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
