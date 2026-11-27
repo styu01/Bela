@@ -31,6 +31,11 @@ describe('findSettingsHazards', () => {
     } }))).toEqual(['env.BASHOPTS', 'env.BASH_FUNC_timeout%%', 'env.CLAUDE_CODE_SHELL', 'env.CLAUDE_CODE_SHELL_PREFIX', 'env.PS4', 'env.SHELL', 'env.SHELLOPTS'])
     expect(findSettingsHazards(j({ env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1', CLAUDE_CODE_SHELL_X: '1', BASH_FUNCX: '1' } }))).toEqual([])
   })
+  it('PROGI 6376 (C3): the harmless keys inside the prefixes are allowed; their neighbours are not', () => {
+    expect(findSettingsHazards(j({ env: { NODE_ENV: 'production', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1' } }))).toEqual([])
+    expect(findSettingsHazards(j({ env: { NODE_ENV: 'production', NODE_OPTIONS: '--import=/x', PYTHONUTF8: '1', PYTHONPATH: '/x' } }))).toEqual(['env.NODE_OPTIONS', 'env.PYTHONPATH'])
+    expect(findSettingsHazards(j({ env: { NODE_ENVX: '1', PYTHONUNBUFFEREDX: '1' } }))).toEqual(['env.NODE_ENVX', 'env.PYTHONUNBUFFEREDX'])
+  })
   it('ordinary env keys are not hazards (case-sensitive like the environment itself)', () => {
     expect(findSettingsHazards(j({ env: { TZ: 'Europe/Budapest', ANTHROPIC_MODEL: 'x', DISABLE_AUTOUPDATER: '1', path: '/x', NODEJS: '1', MYPATH: '/x', ENVIRONMENT: 'prod' } }))).toEqual([])
   })

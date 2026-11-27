@@ -48,9 +48,12 @@ Nyitott (külön döntés): a `timeout`, a `python3` és a shell maga is a PATH-
 Ugyanez az önteszt (boot +90 mp, majd 15 percenként) végignézi a Claude Code által betöltött összes settings
 fájlt: a fő ágensnél a `~/.claude/settings.json`, a `.channels-config/settings.json`, a `.claude/settings.json`
 és a `.claude/settings.local.json`; minden sub-ágensnél a `.claude/settings.json`, a `.claude/settings.local.json`
-és a `.claude-config/settings.json`. Fájlonként egy eszkaláció indul (előbb BÉLA, ha megmarad, a tulajdonos), ha
+és a `.claude-config/settings.json`. Azonos veszély-halmazonként EGY eszkaláció indul a fájlok listájával (előbb BÉLA, ha megmarad, a tulajdonos), ha
 - az `"env"` blokkban `PATH`, `BASH_ENV`, `ENV`, vagy `LD_*`, `DYLD_*`, `NODE_*`, `PYTHON*` kulcs áll (ez minden
-  hook-folyamatba bekerül: a kapu programjait lecserélheti, kódot tölthet be), vagy
+  hook-folyamatba bekerül: a kapu programjait lecserélheti, kódot tölthet be), vagy a hook-futtatót érintő
+  `CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_CODE_SHELL`, `SHELL`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `BASH_FUNC_*` (a prefix minden
+  hook-parancsot egy tetszőleges programon át futtat, mérve); ártalmatlan, ezért kivétel: `NODE_ENV`, `PYTHONUNBUFFERED`,
+  `PYTHONIOENCODING`, `PYTHONDONTWRITEBYTECODE`, `PYTHONUTF8`; vagy
 - a `disableAllHooks` / `allowManagedHooksOnly` kapcsoló be van állítva (bármi, ami nem `false`).
 Változáskor újra jelez, tiszta (vagy eltűnt) fájlnál `HELYREALLT`. Egy épp olvashatatlan fájl nyitva tartja a
 jelzést. 2026-11-27-én egyik fájlban sincs ilyen kulcs.

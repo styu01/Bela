@@ -101,6 +101,8 @@ export function settingsIntegrityFiles(): SettingsFile[] {
 // xtrace in bash.
 const HAZARD_ENV_EXACT = new Set(['PATH', 'BASH_ENV', 'ENV', 'CLAUDE_CODE_SHELL_PREFIX', 'CLAUDE_CODE_SHELL', 'SHELL', 'SHELLOPTS', 'BASHOPTS', 'PS4'])
 const HAZARD_ENV_PREFIXES = ['LD_', 'DYLD_', 'NODE_', 'PYTHON', 'BASH_FUNC_']
+// PROGI 6376 (C3), BELA 6377: inside the prefixes, the keys that only tune output or a mode and load nothing.
+const HAZARD_ENV_SAFE = new Set(['NODE_ENV', 'PYTHONUNBUFFERED', 'PYTHONIOENCODING', 'PYTHONDONTWRITEBYTECODE', 'PYTHONUTF8'])
 export const HOOK_SWITCH_KEYS = ['disableAllHooks', 'allowManagedHooksOnly'] as const
 
 /** The hazards in one settings file's text: env keys that redirect the programs a hook runs or load code
@@ -115,6 +117,7 @@ export function findSettingsHazards(raw: string): string[] {
   const env = obj.env
   if (env && typeof env === 'object' && !Array.isArray(env)) {
     for (const k of Object.keys(env as Record<string, unknown>).sort()) {
+      if (HAZARD_ENV_SAFE.has(k)) continue
       if (HAZARD_ENV_EXACT.has(k) || HAZARD_ENV_PREFIXES.some((p) => k.startsWith(p))) out.push(`env.${k}`)
     }
   }
