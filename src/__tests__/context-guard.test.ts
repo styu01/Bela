@@ -140,6 +140,24 @@ describe('contextLimitForModel / calibrateLimit', () => {
     expect(contextLimitForModel(null)).toBe(200_000)
   })
 
+  it('trusts minimax-m3 for the real 1M window -- but ONLY because agent-process.ts forces CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 to work around a vendor-side compat-layer bug', () => {
+    // MiniMax's own /anthropic compat endpoint misreports 200K in its model
+    // metadata instead of M3's real 1M (MiniMax-AI/MiniMax-M2.7#46). Measured
+    // live 2026-08-19 BEFORE the workaround, on two independently running
+    // fleet agents (mag 108992/54%=201.8k, rendezo 62810/31%=202.6k) -- both
+    // converged on ~200k, matching the vendor bug exactly. AFTER
+    // resolveProviderEnv started forcing CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000,
+    // a live restart confirmed the CLI itself now reports a ~1M window (pane
+    // showed "999k left" / "937k left" post-restart, up from "199k left" /
+    // "137k left"). This constant and that env var override are a PAIR: if the
+    // override in agent-process.ts is ever removed, this must revert to
+    // 200_000 (like deepseek-v4-pro above), or the guard will under-restart
+    // against a window the CLI no longer actually has.
+    // BELA 6404 port: this fork controls every 1M window against CONTROL_DENOMINATOR_1M (967_000, see the note on
+    // the 1M families above), not a literal 1_000_000; minimax-m3 joins them.
+    expect(contextLimitForModel('minimax-m3')).toBe(CONTROL_DENOMINATOR_1M)
+  })
+
   it('defaults the handoff timeout to 20 minutes (6 was shorter than a working turn)', () => {
     expect(DEFAULT_CONTEXT_GUARD.handoffTimeoutMinutes).toBe(20)
   })
