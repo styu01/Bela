@@ -15,11 +15,16 @@ function epermWatcherBody(): string {
 describe('EPERM fallback dialog scope', () => {
   it('answers startup dialogs only after the /tmp relaunch', () => {
     const body = epermWatcherBody()
-    const guard = body.indexOf('if (epermRestarted) {')
-    const bypass = body.indexOf('Bypass Permissions mode')
+    // TRUSTGATE901: the dialogs are classified by detectsFirstRunGate and answered by answerAcceptDialog
+    // (from the pane, re-checked before Enter), both strictly AFTER the relaunch guard.
+    const guard = body.indexOf('if (epermRestarted && !answering) {')
+    const classify = body.indexOf('detectsFirstRunGate(pane)')
+    const answer = body.indexOf('answerAcceptDialog(')
     expect(guard).toBeGreaterThan(-1)
-    expect(bypass).toBeGreaterThan(guard)
+    expect(classify).toBeGreaterThan(guard)
+    expect(answer).toBeGreaterThan(guard)
     expect(body.slice(0, guard)).not.toContain("'send-keys'")
+    expect(body.slice(0, guard)).not.toContain('answerAcceptDialog(')
   })
 
   it('uses a one-shot /tmp launch with the real agent CLAUDE.md linked in', () => {

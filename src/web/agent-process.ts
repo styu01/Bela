@@ -22,6 +22,7 @@ import {
   detectsFirstRunGate,
   detectsModelConsentDialog,
   stuckInputSignature,
+  firstRunAcceptKeys,
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { beginRestart, endRestart } from './restart-lock.js'
@@ -1615,6 +1616,8 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     if (hasChannel && name !== MAIN_AGENT_ID) {
       const epermDeadline = Date.now() + 14_000
       let epermRestarted = false
+      let answering = false
+      let blockedLogged = false
       const checkEperm = () => {
         if (Date.now() > epermDeadline) return
         let pane = ''
@@ -1636,12 +1639,28 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
           setTimeout(checkEperm, 1000)
           return
         }
-        if (epermRestarted) {
-          if (/Do you trust the files in this folder\?/.test(pane)) {
-            try { runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), '1', 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
-          } else if (/Bypass Permissions mode/.test(pane) && /Yes, I accept/.test(pane)) {
-            try { runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), '2', 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
-          } else if (/Welcome to Claude Code/.test(pane)) {
+        if (epermRestarted && !answering) {
+          // TRUSTGATE901 (LOCAL, same rule as answerFirstRunGates): the fresh /tmp
+          // cwd is exactly where the trust dialog appears, and on 2.1.326 the old
+          // "1"/"2" + Enter here chose "No, exit" (measured). The accepting row is
+          // read from the pane and re-verified after the move; an unknown shape
+          // sends nothing (the channel-monitor alerts on the parked pane).
+          // The welcome branch goes through detectsFirstRunGate too, so a pane
+          // whose input box is already drawn (❯ prompt) gets no stray Enter.
+          const gate = detectsFirstRunGate(pane)
+          if (gate === 'trust' || gate === 'bypass-permissions') {
+            answering = true
+            void answerAcceptDialog(session, null, pane)
+              .then((res) => {
+                if (res === 'blocked' && !blockedLogged) {
+                  blockedLogged = true
+                  logger.warn({ name, session, gate }, 'EPERM fallback: first-run dialog without an unambiguous accept row under the cursor -- NO Enter sent')
+                }
+              })
+              .catch((err) => { logger.warn({ err, name, session, gate }, 'EPERM fallback: first-run dialog answer failed') })
+              .finally(() => { answering = false; setTimeout(checkEperm, 1000) })
+            return
+          } else if (gate === 'welcome') {
             try { runTmux(null, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 4000 }) } catch { /* ignore */ }
           }
         }
@@ -1856,11 +1875,13 @@ export async function dismissModelConsentDialogIfPresent(session: string, host: 
 
 // Walk a session out of the Claude Code FIRST-RUN dialog chain (folder-trust,
 // bypass-permissions acceptance, theme picker, welcome screen), answering each
-// dialog exactly the way scripts/channels.sh's startup guard does for the main
-// session: trust -> "1" Enter (Yes, proceed), bypass -> "2" Enter (Yes, I
-// accept), theme/welcome -> Enter (accept default / continue). The login
-// picker is NEVER answered -- nobody can authenticate on the operator's
-// behalf -- so it is returned for the caller to alert on.
+// dialog the way scripts/channels.sh's startup guard does for the main
+// session: trust / bypass -> the accepting row read from the pane
+// (answerAcceptDialog, TRUSTGATE901: never by number), theme/welcome -> Enter
+// (accept default / continue). The login picker is NEVER answered -- nobody
+// can authenticate on the operator's behalf -- so it is returned for the
+// caller to alert on, and an unrecognised trust / bypass shape is returned as
+// 'blocked' (nothing sent) for the caller to alert on.
 //
 // Escape is deliberately NOT used anywhere here: on the trust/bypass dialogs
 // Escape selects "No, exit" and quits the TUI, which is exactly the
@@ -1873,29 +1894,82 @@ export async function dismissModelConsentDialogIfPresent(session: string, host: 
 // picker is (or becomes) the blocker, 'unchanged' when no gate was present.
 const FIRST_RUN_ANSWER_MAX_STEPS = 6
 const FIRST_RUN_ANSWER_SETTLE_MS = 1500
+const ACCEPT_DIALOG_KEY_GAP_MS = 150
+const ACCEPT_DIALOG_VERIFY_MS = 700
+
+// TRUSTGATE901 (upstream ef83f266, ported, with the re-check the main session's
+// guard in scripts/channels.sh does): answer a folder-trust or bypass-permissions
+// dialog from the pane it is showing. Measured on Claude Code 2.1.326: both
+// dialogs open on a highlighted, unnumbered "No, exit"; Enter, "1"+Enter and
+// "2"+Enter all EXIT the session, Down+Enter accepts. So:
+//   - the keys come from firstRunAcceptKeys(pane); null -> 'blocked', NOTHING sent;
+//   - when the selection has to move, the moves are sent, the pane is captured
+//     again, and Enter goes ONLY if the cursor now sits on the accepting row
+//     (firstRunAcceptKeys(again) is exactly ['Enter']). A move that did not land
+//     (lag, a redraw, a different layout) ends in 'blocked' with the dialog
+//     still open, never in a confirmed "No, exit".
+// Exported for unit tests (the tmux layer is injectable).
+export interface FirstRunPaneIo {
+  capture: (session: string, host: string | null) => string | null
+  send: (session: string, host: string | null, key: string) => void
+  wait: (ms: number) => Promise<void>
+}
+const TMUX_FIRST_RUN_IO: FirstRunPaneIo = {
+  capture: (s, h) => capturePane(s, h),
+  send: (s, h, key) => { runTmux(h, ['send-keys', '-t', exactTmuxTarget(s), key], { timeout: 5000 }) },
+  wait: delay,
+}
+
+export async function answerAcceptDialog(
+  session: string,
+  host: string | null,
+  pane: string,
+  io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
+): Promise<'answered' | 'blocked'> {
+  const keys = firstRunAcceptKeys(pane)
+  if (keys == null) return 'blocked'
+  const moves = keys.slice(0, -1)
+  if (moves.length > 0) {
+    for (const k of moves) {
+      io.send(session, host, k)
+      await io.wait(ACCEPT_DIALOG_KEY_GAP_MS)
+    }
+    await io.wait(ACCEPT_DIALOG_VERIFY_MS)
+    const again = io.capture(session, host)
+    const next = again != null ? firstRunAcceptKeys(again) : null
+    if (next == null || next.length !== 1 || next[0] !== 'Enter') return 'blocked'
+  }
+  io.send(session, host, 'Enter')
+  return 'answered'
+}
 
 export async function answerFirstRunGates(
   session: string,
   host: string | null = null,
-): Promise<'cleared' | 'login' | 'unchanged'> {
+  io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
+): Promise<'cleared' | 'login' | 'unchanged' | 'blocked'> {
   let acted = false
   for (let i = 0; i < FIRST_RUN_ANSWER_MAX_STEPS; i++) {
-    const pane = capturePane(session, host)
+    const pane = io.capture(session, host)
     const gate: FirstRunGateKind | null = pane != null ? detectsFirstRunGate(pane) : null
     if (gate == null) return acted ? 'cleared' : 'unchanged'
     if (gate === 'login') return 'login'
     try {
-      if (gate === 'trust') {
-        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '1'], { timeout: 5000 })
-        await delay(150)
-        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
-      } else if (gate === 'bypass-permissions') {
-        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), '2'], { timeout: 5000 })
-        await delay(150)
-        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
+      if (gate === 'trust' || gate === 'bypass-permissions') {
+        // TRUSTGATE901: never by number, never by default (see answerAcceptDialog).
+        // `pane` is non-null here (gate came from it).
+        const res = await answerAcceptDialog(session, host, pane as string, io)
+        if (res === 'blocked') {
+          // Unrecognised layout, or the move did not land on the accepting row.
+          // Enter confirms whatever is highlighted and Escape is "No, exit", so
+          // there is no safe key to send: park and let the caller alert a human.
+          logger.warn({ session, gate },
+            'first-run dialog: no unambiguous accept option under the cursor -- parking, NO Enter sent')
+          return 'blocked'
+        }
       } else {
         // theme / welcome: Enter accepts the highlighted default and moves on.
-        runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
+        io.send(session, host, 'Enter')
       }
     } catch (err) {
       logger.warn({ err, session, gate }, 'first-run gate: answer keystroke failed')
@@ -1903,7 +1977,7 @@ export async function answerFirstRunGates(
     }
     acted = true
     logger.info({ session, gate, step: i }, 'first-run gate: answered dialog')
-    await delay(FIRST_RUN_ANSWER_SETTLE_MS)
+    await io.wait(FIRST_RUN_ANSWER_SETTLE_MS)
   }
   return acted ? 'cleared' : 'unchanged'
 }

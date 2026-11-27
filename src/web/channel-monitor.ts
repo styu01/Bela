@@ -2061,6 +2061,14 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           const res = await answerFirstRunGates(t.session)
           if (res === 'login') {
             alertOwnerOrBela(t, 'login-needed', `🔑 A(z) ${label} agent első-indítási dialogjait továbbléptettem, de Claude-belépés kell ("Select login method"). Lépj be: tmux attach -t ${t.session}. Utána minden várakozó feladat magától kézbesítődik.`)
+          } else if (res === 'blocked') {
+            // TRUSTGATE901 (upstream ef83f266): the trust / bypass dialog is in a
+            // shape we do not model, or the cursor did not land on the accepting
+            // row, so NO Enter was sent, deliberately. Neither Enter nor Escape is
+            // neutral there (Escape is "No, exit"; Enter confirms whatever is
+            // highlighted, which on 2.1.326 is the exit). A human picks.
+            logger.warn({ session: t.session, agent: label, gate: firstRunGate }, 'first-run dialog in an unrecognised shape -- parked, NO Enter sent')
+            alertOwnerOrBela(t, 'first-run-blocked', `🛑 A(z) ${label} session egy indítási dialóguson (${firstRunGate}) parkol, de a panel alakját nem ismerem fel biztosan, ezért NEM nyomtam Entert. Se az Enter, se az Escape nem semleges rajta (az Escape a "No, exit"). Válassz kézzel: tmux attach -t ${t.session}, a nyilakkal jelöld ki a "Yes" sort, majd Enter.`)
           } else {
             alertOwnerOrBela(t, 'first-run-advanced', `🧭 A(z) ${label} session a Claude Code első-indítási képernyőjén parkolt (${firstRunGate}); automatikusan továbbléptettem. A várakozó ütemezett feladatok a következő körben kézbesítődnek.`)
           }

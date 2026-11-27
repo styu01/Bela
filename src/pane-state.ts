@@ -780,25 +780,91 @@ export function detectsBlockingMenu(pane: string): boolean {
 // Escape, but on the trust/bypass dialogs Escape means "No, exit" -- it QUITS
 // the TUI and the session respawns straight back into the same dialog. The
 // monitor must answer them the way scripts/channels.sh's startup guard does
-// (trust -> "1" Enter, bypass -> "2" Enter) and must only ALERT on the login
-// picker (nobody can log in on the operator's behalf).
+// (the accepting row read from the pane, see firstRunAcceptKeys; NEVER by
+// number) and must only ALERT on the login picker (nobody can log in on the
+// operator's behalf).
 //
 // Guards against a healthy session that merely quotes the dialog text follow
 // detectsBlockingMenu's discipline: a busy pane is never a gate, and a visible
 // idle footer means the real prompt is live (capture-pane -p sees only the
 // visible screen, so a quoted phrase always coexists with the live footer).
+// The tmux-visible selection marker Claude Code draws on the active option.
+const CURSOR_GLYPH = '\u276f'
+
 export type FirstRunGateKind = 'trust' | 'bypass-permissions' | 'login' | 'theme' | 'welcome'
 
 // Ordered: the login picker and theme screen render UNDER the "Welcome to
 // Claude Code" banner, so the more specific matches must win before the
 // generic welcome fallback.
 const FIRST_RUN_GATES: Array<{ kind: FirstRunGateKind; rx: RegExp }> = [
-  { kind: 'trust', rx: /Do you trust the files in this folder\?/ },
+  // TRUSTGATE901 (upstream ef83f266, ported): ALTERNATION, not a replacement. Claude Code rewrote this
+  // dialog: the old question is gone and the panel opens with "Quick safety check: ...". The anchor is the
+  // OPTION TEXT, the functional element the dialog cannot drop. Measured here on 2.1.326 (real capture in
+  // a private tmux server, src/__tests__/fixtures/pane-2.1.326/first-run-trust-*.txt): the question
+  // string is absent, "Yes, I trust this folder" is the second, unnumbered row under a highlighted
+  // "No, exit". Before this, the trust dialog was not detected at all on 2.1.326, so the pane fell to the
+  // generic blocking-menu recovery, whose Escape IS "No, exit".
+  { kind: 'trust', rx: /Do you trust the files in this folder\?|Yes, I trust this folder/ },
   { kind: 'bypass-permissions', rx: /Bypass Permissions mode/ },
   { kind: 'login', rx: /Select login method/ },
   { kind: 'theme', rx: /Choose the text style/ },
   { kind: 'welcome', rx: /Welcome to Claude Code/ },
 ]
+
+/**
+ * Which keys select the ACCEPTING option on a first-run consent dialog
+ * (folder-trust, bypass-permissions), from wherever the cursor currently
+ * sits, or null when the pane does not say clearly enough to act.
+ *
+ * TRUSTGATE901 (upstream ef83f266, ported). Answering these dialogs by NUMBER
+ * or by DEFAULT is not safe. Measured here on Claude Code 2.1.326 in a private
+ * pty with a throwaway HOME (docs/projects/upstream-w3/dialog-results.txt):
+ * both dialogs render an unnumbered "❯ No, exit" first and highlighted, the
+ * accept row second; Enter, Tab+Enter, "1"+Enter and "2"+Enter all EXIT the
+ * session, Down+Enter (and Up+Enter, wrapping) accept. The old code typed
+ * "1"/"2" and then Enter, so it chose "No, exit".
+ *
+ * So the answer is derived from the pane: find the cursor, find the single
+ * accepting row in the contiguous option block around it, move the selection
+ * onto it, then Enter. The caller must re-verify after the move (see
+ * agent-process answerAcceptDialog): Enter confirms whatever is highlighted.
+ *
+ * Returns null (PARK AND ALERT, send nothing) when the layout is not
+ * understood. Neither Enter nor Escape is a safe default here.
+ */
+export function firstRunAcceptKeys(pane: string): string[] | null {
+  if (!pane || !pane.trim()) return null
+  const lines = pane.split('\n')
+  const cursorIdx = lines.findIndex(l => l.includes(CURSOR_GLYPH))
+  if (cursorIdx < 0) return null
+
+  // The options are the contiguous run of non-blank lines around the cursor.
+  // Anchoring on the run (rather than on line numbers or on a fixed distance)
+  // is what survives a layout change: boxed or unboxed, numbered or not.
+  // A boxed dialog draws its border on every row (`│ ... │`), so a row whose
+  // content inside the border is empty counts as blank too.
+  const blank = (l: string) => l.replace(/[│|]/g, '').trim() === ''
+  let first = cursorIdx
+  while (first > 0 && !blank(lines[first - 1])) first--
+  let last = cursorIdx
+  while (last < lines.length - 1 && !blank(lines[last + 1])) last++
+  const block = lines.slice(first, last + 1)
+
+  // The target is the option that accepts. Match on "yes" and exclude the
+  // refusal explicitly, so a future "Yes, exit"-shaped wording cannot be
+  // mistaken for consent. Two "yes"-looking rows mean the layout is not what
+  // this function models: stop, do not guess.
+  const isYes = (l: string) => /\byes\b/i.test(l) && !/\bno,\s*exit\b/i.test(l) && !/\bexit\b/i.test(l.replace(/.*\byes\b/i, ''))
+  const yesRows = block.map((l, i) => (isYes(l) ? i : -1)).filter(i => i >= 0)
+  if (yesRows.length !== 1) return null
+  // The refusal row must be there too: a "yes" with no "No, exit" beside it is
+  // not one of the two consent dialogs this models.
+  if (!block.some(l => /\bno,\s*exit\b/i.test(l))) return null
+
+  const delta = yesRows[0] - (cursorIdx - first)
+  const move = delta === 0 ? [] : Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? 'Down' : 'Up'))
+  return [...move, 'Enter']
+}
 
 /**
  * Classify the pane as a Claude Code first-run gate, or null when it is a
