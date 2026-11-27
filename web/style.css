@@ -237,6 +237,9 @@ body {
   font-weight: 500;
   transition: all var(--transition);
 }
+/* The [hidden] nav entries (the agent catalog without a publishing origin, upstream 83e24a95): the unconditional
+   display above would otherwise win over the UA [hidden] rule and show them. */
+.sb-link[hidden] { display: none; }
 .sb-link svg { flex-shrink: 0; color: currentColor; }
 /* min-width:0 lets a long label wrap inside the column instead of forcing the
  * link wider than the nav (which is what produced the landscape overflow);
