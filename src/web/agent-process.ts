@@ -21,6 +21,7 @@ import {
   idleConsideringDimGhost,
   detectsFirstRunGate,
   detectsModelConsentDialog,
+  inputBoxText,
   stuckInputSignature,
   firstRunAcceptKeys,
   type FirstRunGateKind,
@@ -2153,6 +2154,27 @@ export async function clearInputBuffer(session: string, host: string | null = nu
 const PLACEHOLDER_DISCARD_MAX = 3
 // Settle window after a Ctrl-C so the next capture reflects the cleared box.
 const PLACEHOLDER_DISCARD_SETTLE_MS = 450
+// How long a press waits for the input box to be REDRAWN before the clear stops
+// pressing (upstream fc014409, ported). Upstream measured on a loaded host that
+// the box still showed the stub 450 ms after each press, so presses 2 and 3 went
+// onto a box the TUI had already emptied, and Ctrl-C on an empty box QUITS the
+// session. A frame identical to the pressed one proves nothing.
+const PLACEHOLDER_REDRAW_WAIT_MS = 3000
+// LOCAL: the wait is counted in settle polls (7 x 450 ms = 3.15 s) rather than
+// against the wall clock, so it is the same bound and deterministic under test.
+const PLACEHOLDER_REDRAW_POLLS = Math.ceil(PLACEHOLDER_REDRAW_WAIT_MS / PLACEHOLDER_DISCARD_SETTLE_MS)
+
+// The tmux seam of discardPlaceholderBuffer (injectable for unit tests).
+export interface PlaceholderDiscardIo {
+  capture: (session: string, host: string | null) => string | null
+  send: (session: string, host: string | null, key: string) => void
+  wait: (ms: number) => Promise<void>
+}
+const TMUX_PLACEHOLDER_IO: PlaceholderDiscardIo = {
+  capture: (s, h) => capturePane(s, h),
+  send: (s, h, key) => { runTmux(h, ['send-keys', '-t', exactTmuxTarget(s), key], { timeout: 5000 }) },
+  wait: delay,
+}
 
 // Discard a `[Pasted text #N]` placeholder (or the verbatim text it expands
 // into) from the input box with Ctrl-C, then confirm the box no longer holds
@@ -2163,25 +2185,48 @@ const PLACEHOLDER_DISCARD_SETTLE_MS = 450
 // SAFETY: Ctrl-C on an EMPTY Claude Code box quits the TUI, and on a BUSY pane
 // it interrupts the live turn. This helper must therefore only ever be called
 // when a placeholder is CONFIRMED present (box non-empty, not busy) -- which
-// detectsPastePlaceholder guarantees at the call site. We re-check before each
-// press and stop the instant the placeholder is gone, so we never press Ctrl-C
-// into an already-empty box. Returns true if the placeholder was cleared.
-async function discardPlaceholderBuffer(session: string, host: string | null = null): Promise<boolean> {
+// detectsPastePlaceholder guarantees at the call site. Before each press the
+// pane is re-checked, and (fc014409) after each press the box must be seen
+// REDRAWN (its text differs from the pressed frame) before another press is
+// even considered; a box that is not redrawn within PLACEHOLDER_REDRAW_WAIT_MS
+// ends the clear with false and no further Ctrl-C. LOCAL: a failed capture also
+// stops the clear (no blind press on an unseen box). Returns true if the
+// placeholder was cleared. Exported for unit tests.
+export async function discardPlaceholderBuffer(
+  session: string,
+  host: string | null = null,
+  io: PlaceholderDiscardIo = TMUX_PLACEHOLDER_IO,
+): Promise<boolean> {
+  let pane = io.capture(session, host)
   for (let i = 0; i < PLACEHOLDER_DISCARD_MAX; i++) {
-    const pane = capturePane(session, host)
+    if (pane == null) {
+      logger.warn({ session, presses: i }, 'discardPlaceholderBuffer: pane capture failed; stopping (no blind Ctrl-C)')
+      return false
+    }
     // Stop pressing once the stub is gone -- a further Ctrl-C on an empty box
     // would quit the TUI.
-    if (pane != null && !detectsPastePlaceholder(pane)) return true
+    if (!detectsPastePlaceholder(pane)) return true
     try {
-      runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'C-c'], { timeout: 5000 })
+      io.send(session, host, 'C-c')
     } catch (err) {
       logger.warn({ err, session }, 'discardPlaceholderBuffer: Ctrl-C send failed')
       return false
     }
-    await delay(PLACEHOLDER_DISCARD_SETTLE_MS)
+    // Another press only on a box redrawn SINCE this press that still holds the
+    // stub (checked at the loop top).
+    const pressedBox = inputBoxText(pane)
+    let polls = 0
+    do {
+      await io.wait(PLACEHOLDER_DISCARD_SETTLE_MS)
+      pane = io.capture(session, host)
+      polls++
+    } while (pane != null && inputBoxText(pane) === pressedBox && polls < PLACEHOLDER_REDRAW_POLLS)
+    if (pane != null && inputBoxText(pane) === pressedBox) {
+      logger.warn({ session, presses: i + 1, waitedMs: polls * PLACEHOLDER_DISCARD_SETTLE_MS }, 'discardPlaceholderBuffer: input box not redrawn since the press; no further Ctrl-C')
+      return false
+    }
   }
-  const finalPane = capturePane(session, host)
-  return finalPane != null && !detectsPastePlaceholder(finalPane)
+  return pane != null && !detectsPastePlaceholder(pane)
 }
 
 // Cap on how many extra characters a single chunk boundary may absorb while

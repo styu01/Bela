@@ -390,6 +390,26 @@ function pastePlaceholderRegion(pane: string): string {
   return lines.slice(-PASTE_REGION_FALLBACK_LINES).join('\n')
 }
 
+// The live input box's text (between the two most recent separators, found from the
+// bottom), or null when two separators are not on screen. Unlike
+// pastePlaceholderRegion there is no last-lines fallback: this is used to tell
+// whether the box was REDRAWN, and a fallback region would compare scrollback.
+// (upstream fc014409, ported)
+export function inputBoxText(pane: string | null): string | null {
+  if (!pane) return null
+  const lines = pane.split('\n')
+  let bottomSep = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  }
+  if (bottomSep <= 0) return null
+  let topSep = -1
+  for (let i = bottomSep - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
+  }
+  return topSep >= 0 ? lines.slice(topSep + 1, bottomSep).join('\n') : null
+}
+
 // A placeholder pane is identified by the `[Pasted text #N]` stub IN THE LIVE
 // INPUT BOX. The accompanying `paste again to expand` footer hint is
 // deliberately NOT used: it is version-dependent (the current build keeps the
