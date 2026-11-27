@@ -22,6 +22,7 @@ import {
   GATE_NOTICE_ORIGIN_NOTE,
 } from '../db.js'
 import { archiveTranscriptBeforeContextRestart } from './context-restart-transcript-archive.js'
+import { forgetRememberedMainSession, provenMainSession } from './main-session-transcript.js'
 import {
   decideGate,
   decideWake,
@@ -70,6 +71,39 @@ export function gateWakePrompt(): string {
     'Ne kezdd elolrol ami mar kesz, es ne delegald ujra amit mar atadtal. ' +
     'Ha nem volt futo munkad, az is teljes erteku allapot -- olyankor ne talalj ki magadnak feladatot, es ne kuldj errol uzenetet.'
   )
+}
+
+/**
+ * How long after the gate's own /clear of the MAIN agent its session is proven again. Measured 2026-11-27: Claude
+ * Code rewrites sessions/<pid>.json with the new sessionId on /clear, and the new transcript's first entry lands
+ * ~0.3 s after the /clear (okoska 07:35:23.812 -> 06:35:24.131Z, progi 11:09:59.211 -> 10:09:59.445Z), so 10 s is
+ * ample; a proof that still fails only leaves the memory empty (-> the old --continue).
+ */
+export const MAIN_SESSION_REPROVE_DELAY_MS = 10_000
+
+/**
+ * PROGI review 6206 item 2 (5ed34743 residual risk): after the gate clears the main agent, the remembered
+ * last-proven session (channel-monitor's fallback for a respawn after the claude died) is the PRE-clear sid until
+ * the next proof, up to a guard tick (5 min) later. A death inside that window plus an unprovable record would
+ * --resume the large pre-clear context and undo the restart. Both halves, because each alone has a gap:
+ * - forget at once: from this moment the pre-clear sid can never be chosen (fallback: --continue, which after a
+ *   clear takes the newest file, the post-clear one);
+ * - re-prove after MAIN_SESSION_REPROVE_DELAY_MS: the memory holds the post-clear sid again, so a later death does
+ *   not lose the --resume protection against a foreign interactive session.
+ * Exported for the regression test.
+ */
+export function settleMainSessionMemoryAfterClear(): void {
+  forgetRememberedMainSession(PROJECT_ROOT)
+  const timer = setTimeout(() => {
+    try {
+      const r = provenMainSession(MAIN_CHANNELS_SESSION, PROJECT_ROOT)
+      logger.info({ sessionId: r.resume?.sessionId ?? null, reason: r.reason },
+        'context-restart-gate: main session re-proven after /clear (remembered session refreshed unless reason is set)')
+    } catch (err) {
+      logger.warn({ err }, 'context-restart-gate: main session re-proof after /clear failed (memory stays empty)')
+    }
+  }, MAIN_SESSION_REPROVE_DELAY_MS)
+  timer.unref?.()
 }
 
 // One delivery attempt per agent at a time: the fast-path timer and a sweep must not both read the same debt and
@@ -652,6 +686,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
           execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
         })
         logger.info({ agent: name, contextTokens }, 'context-restart-gate: /clear sent')
+        if (name === MAIN_AGENT_ID) settleMainSessionMemoryAfterClear()
         writeGateRunState(name, {
           ...effectiveState,
           firstBlockedAt: null,

@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { provenMainSession, rememberMainSession, rememberedMainSession, REMEMBER_MAX_AGE_MS, _forgetRememberedMainSessions } from '../web/main-session-transcript.js'
+import { provenMainSession, rememberMainSession, rememberedMainSession, REMEMBER_MAX_AGE_MS, _forgetRememberedMainSessions, forgetRememberedMainSession } from '../web/main-session-transcript.js'
 
 const SID = '10c0fe6a-2ea2-4dec-85ef-a4462cc76b85'
 const PATH = '/x/10c0fe6a-2ea2-4dec-85ef-a4462cc76b85.jsonl'
@@ -25,6 +25,15 @@ describe('remembered main session', () => {
     expect(rememberedMainSession('/root', 2_000, () => false)).toBeNull()
     expect(rememberedMainSession('/other', 2_000, () => true)).toBeNull()
   })
+  it('forgetRememberedMainSession drops one root only (PROGI 6206 item 2)', () => {
+    const t = '/proc/self/stat' // any existing file stands in for a transcript
+    rememberMainSession('/root/a', { sessionId: '11111111-1111-4111-8111-111111111111', transcriptPath: t })
+    rememberMainSession('/root/b', { sessionId: '22222222-2222-4222-8222-222222222222', transcriptPath: t })
+    forgetRememberedMainSession('/root/a')
+    expect(rememberedMainSession('/root/a')).toBeNull()
+    expect(rememberedMainSession('/root/b')?.sessionId).toBe('22222222-2222-4222-8222-222222222222')
+  })
+
   it('nothing remembered -> null (then --continue, as before)', () => {
     expect(rememberedMainSession('/root', Date.now(), () => true)).toBeNull()
   })

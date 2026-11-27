@@ -213,6 +213,13 @@ export function rememberedMainSession(
   if (!r || now - r.at > REMEMBER_MAX_AGE_MS || !exists(r.transcriptPath)) return null
   return { sessionId: r.sessionId, transcriptPath: r.transcriptPath }
 }
+/**
+ * Drop the remembered session of one project root. The context-restart gate calls this right after its own /clear
+ * of the main agent (PROGI review 6206 item 2): the remembered sid is then the PRE-clear session, and a respawn
+ * that had to fall back to it would --resume the large context the clear just shed. With nothing remembered the
+ * fallback is the old --continue, which after a clear takes the newest file -- the post-clear one.
+ */
+export function forgetRememberedMainSession(projectRoot: string): void { rememberedMain.delete(projectRoot) }
 /** Test seam. */
 export function _forgetRememberedMainSessions(): void { rememberedMain.clear() }
 
