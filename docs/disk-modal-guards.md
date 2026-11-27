@@ -39,6 +39,25 @@ classified busy/idle and is never disturbed (locked by the contract test).
 > best-effort (`… 2>/dev/null || true`) so an ENOSPC write under disk-full cannot
 > crash a watchdog or emit a false signal.
 
+### Two readers of the footer, two jobs (PROGI 6026, BELA 6054, 2026-11-27)
+
+- `stuck-modal-guard.sh` (no argument, `stuck-modal-guard.timer`) is the PRIMARY reader for recovery: it watches
+  the main channels session and is the only one that presses Escape / respawns. Its `classify_pane` step 3
+  reads the live footer through `live_footer_line` (a port of `liveFooterLine`, pinned by
+  `src/__tests__/pane-footer-port-parity.test.ts`). Step 3b (guard-only) also takes the live mode footer
+  WITHOUT its "(shift+tab to cycle)" hint, which Claude Code 2.1.326 drops when the row is short of room
+  (PR status, a footer indicator, a background count; the fleet's panes are 80 columns): without it the
+  guard would respawn an idle session. For this guard "idle" is the safe answer; the TypeScript reader keeps
+  answering "unknown" for those shapes (no delivery is its safe answer), so step 3b stays out of the port.
+- `stuck-modal-guard.sh fleet` (`stuck-menu-scan.timer`, `stuck-modal-guard-fleet.py`) is NOT a second
+  recovery guard: it scans the `agent-*` sessions for the session-limit menu and presses at most the one
+  "Stop and wait" digit of an exactly recognized menu (shadow mode by default: no keys, no notifications).
+  Its "healthy footer" set only ever blocks keys, so it follows the bash guard's shapes (the measured live
+  footer with the "· install gh for PR status" tail, every permission mode, a turn past one minute, the
+  clipped "esc to inte…") instead of keeping a parity of its own.
+- On this install (2026-11-27) only `stuck-menu-scan.timer` is enabled, in shadow mode; the no-argument
+  guard's timer is not installed.
+
 ## Activation
 
 The unit files carry `/path/to/marveen` and `/home/USER` placeholders -- replace

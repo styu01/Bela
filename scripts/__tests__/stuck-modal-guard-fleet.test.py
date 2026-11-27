@@ -339,6 +339,39 @@ class StressTests(unittest.TestCase):
         self.assertEqual(observed["class"], "unknown_menu")
         self.assertTrue(observed["menu_markers_with_healthy_footer"])
 
+    def test_live_2_1_326_footers_are_healthy(self):
+        # PROGI 6026 (55288137 c) / BELA 6054: the fleet's measured 80-column footers, and the hint-less mode
+        # footer Claude Code draws when the row is short of room. Each was missed by the old pattern.
+        rule = "─" * 80
+        box = lambda foot: "\n".join(["⏺ Done.", rule, "❯ ", rule, foot])
+        cases = {
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · install gh for PR status": "bypass_permissions_on",
+            "  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell": "bypass_permissions_on",
+            "  ⏵⏵ bypass permissions on": "bypass_permissions_on",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)": "auto_mode_on",
+            "  ⏵⏵ don't ask on": "dont_ask_on",
+            "  ⏸ manual mode on · ? for shortcuts": "manual_mode_on",
+            "  ⏵⏵ bypass permissions on · install gh for PR status · 1 shell · esc to inte…": "busy",
+        }
+        for foot, kind in cases.items():
+            observed = guard.classify(box(foot))
+            self.assertIn(kind, observed["fingerprint"]["healthy_footer_types"], foot)
+            self.assertEqual((observed["class"], observed["key"]), ("none", None), foot)
+        long_turn = "\n".join(["✢ Warping… (2m 39s · ↓ 11.2k tokens)", "", "⏺ x", "✻ Baking… (1h 2m 5s · ↓ 1k tokens)"])
+        self.assertIn("busy", guard.classify(long_turn)["fingerprint"]["healthy_footer_types"])
+
+    def test_wider_healthy_set_never_turns_a_menu_or_prose_into_keys(self):
+        # A live footer under the stop menu: never keys (it is not part of the menu, the recognizer refuses).
+        observed = guard.classify(menu() + "\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · install gh for PR status")
+        self.assertIsNone(observed["key"])
+        self.assertTrue(observed["menu_markers_with_healthy_footer"])
+        # Prose that merely contains the words is not a footer.
+        for line in ("the log said: bypass permissions on · fine", "  ⎿  run it with auto mode on · later",
+                     "we turned don't ask on yesterday and it broke"):
+            self.assertEqual(guard.classify("⏺ Done.\n" + line)["fingerprint"]["healthy_footer_types"], [], line)
+        # The known stop menu alone is still recognized.
+        self.assertEqual(guard.classify(menu())["class"], "known_session_limit")
+
     def test_bordered_unknown_and_yes_no_prompt_are_alertable(self):
         for text in ("│ Select a model: │\n│ 1. One │\n│ 2. Two │",
                      "Proceed with action? [y/N]", "Upgrade your plan"):

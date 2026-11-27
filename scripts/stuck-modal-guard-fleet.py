@@ -41,12 +41,20 @@ FOOTER = re.compile(r"(?:Enter to (?:select|confirm)|Esc to (?:cancel|go back)|"
                     r"Use (?:the )?arrow keys|[↑↓↵/ ]+to (?:navigate|select|move))", re.I)
 CURSOR_OPTION = re.compile(r"^\s*[❯›]\s*[0-9]+[.)]\s+")
 LIMIT_HEADER = re.compile(r"\bsession limit\b|\bhit your\b", re.I)
+# PROGI 6026 (55288137 c) / BELA 6054: the healthy shapes follow the bash guard's classify_pane (the primary
+# reader of a live footer for recovery). Measured 2026-11-27 on the fleet's 80-column 2.1.326 panes: the live
+# idle footer is "⏵⏵ bypass permissions on (shift+tab to cycle) · install gh for PR status", which the old
+# end-anchored mode pattern did not take, nor a turn past one minute "(2m 39s ·" or the clipped "· esc to inte…".
+# Healthy here only ever means: no keys (the strict stop-menu recognizer below needs a pane with no live footer
+# anyway), so a wider healthy set is the safe direction.
 HEALTHY = {
-    "busy": re.compile(r"esc to interrupt|\([0-9]+s [·.]", re.I),
+    "busy": re.compile(r"esc to interrupt|\((?:[0-9]+h ?)?(?:[0-9]+m ?)?[0-9]+s [·.]|"
+                       r"· e(?:s(?:c(?: (?:t(?:o(?: (?:i[a-z]*)?)?)?)?)?)?)?…", re.I),
     "shortcuts": re.compile(r"^\s*\? for shortcuts(?:\s+.*)?$", re.I),
-    **{mode.replace(" ", "_"): re.compile(
-        r"^\s*[⏵⏸▶»]*\s*" + re.escape(mode) + r"(?:\s+\([^\r\n)]*\))?\s*$", re.I)
-       for mode in ("bypass permissions on", "accept edits on", "plan mode on")},
+    **{mode.replace(" ", "_").replace("'", ""): re.compile(
+        r"^\s*[⏵⏸▶»]*\s*" + re.escape(mode) + r"(?:\s+\([^\r\n)]*\))?(?:\s+·\s+[^\r\n]*)?\s*$", re.I)
+       for mode in ("bypass permissions on", "accept edits on", "plan mode on", "auto mode on",
+                    "don't ask on", "manual mode on")},
 }
 
 
