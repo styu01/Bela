@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const esc = vi.hoisted(() => ({ escalated: [] as { key: string; belaText: string }[], cleared: [] as string[] }))
 vi.mock('../web/owner-escalation.js', async (orig) => ({
@@ -255,5 +257,68 @@ describe('PROGI 6273 follow-ups (b, c)', () => {
     expect(await dismissResumeSummaryModalIfPresent('agent-null', null, f)).toBe('blocked')
     expect(sent).toEqual(['Enter'])
     expect(esc.escalated.map((e) => e.key)).toEqual(['resume-dialog-blocked:agent-null'])
+  })
+})
+
+describe('PROGI 6273 (a), rewritten after PROGI 6284: one handler run per session, a second caller waits', () => {
+  beforeEach(() => { esc.escalated.length = 0; esc.cleared.length = 0 })
+  const IDLE = '──────\n❯ \n──────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  const FOCUS_RESUME_NO_SUMMARY = pane(['❯ Resume', '  Start a new conversation'])
+
+  it('(a) a second caller during a run WAITS for it and gets the same outcome, sending no key; the lock is released after', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const sent1: string[] = []
+    let n = 0
+    const frames = [FOCUS_RESUME_NO_SUMMARY, FOCUS_RESUME_NO_SUMMARY, IDLE]
+    const io1 = {
+      capture: () => frames[Math.min(n++, frames.length - 1)],
+      send: (_s: string, _h: string | null, k: string) => { sent1.push(k) },
+      wait: async () => { await gate },
+    }
+    const first = dismissResumeSummaryModalIfPresent('agent-lock', null, io1)
+    const sent2: string[] = []
+    const io2 = { capture: () => FOCUS_RESUME_NO_SUMMARY, send: (_s: string, _h: string | null, k: string) => { sent2.push(k) }, wait: async () => {} }
+    let secondDone = false
+    const second = dismissResumeSummaryModalIfPresent('agent-lock', null, io2).then((r) => { secondDone = true; return r })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(secondDone).toBe(false) // still waiting for the first run
+    release()
+    expect(await first).toBe('answered')
+    expect(await second).toBe('answered')
+    expect(sent1).toEqual(['Enter'])
+    expect(sent2).toEqual([])
+    // released: the same session runs again
+    expect(await dismissResumeSummaryModalIfPresent('agent-lock', null, { capture: () => IDLE, send: () => {}, wait: async () => {} })).toBe('absent')
+  })
+
+  it('(a) caller side (PROGI 6284, the forceSend path): a prompt sent after awaiting the handler goes only after the running dialog answer finished', async () => {
+    // sendPromptToSession awaits dismissResumeSummaryModalIfPresent before it types (both lock modes); a
+    // forceSend task skips the idle wait, so this await is the only thing between its Enter and the dialog.
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const timeline: string[] = []
+    let n = 0
+    const landedOnSummary = moveTo(IDLE_FOCUS_NEW_WITH_DESC, /❯ Start a new/, /^ {2}Resume from summary/)
+    const frames = [IDLE_FOCUS_NEW_WITH_DESC, IDLE_FOCUS_NEW_WITH_DESC, landedOnSummary, IDLE]
+    const io1 = {
+      capture: () => frames[Math.min(n++, frames.length - 1)],
+      send: (_s: string, _h: string | null, k: string) => { timeline.push(`handler:${k}`) },
+      wait: async () => { await gate },
+    }
+    const first = dismissResumeSummaryModalIfPresent('agent-force', null, io1) // e.g. scheduleIdentitySetup
+    const forceSend = (async () => {           // the scheduled task's sendPromptToSession
+      await dismissResumeSummaryModalIfPresent('agent-force', null, { capture: () => IDLE_FOCUS_NEW_WITH_DESC, send: (_s, _h, k) => { timeline.push(`second-handler:${k}`) }, wait: async () => {} })
+      timeline.push('prompt+Enter')
+    })()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(timeline).toEqual([])
+    release()
+    await first
+    await forceSend
+    expect(timeline).toEqual(['handler:Down', 'handler:Enter', 'prompt+Enter'])
+    const AP = readFileSync(join(__dirname, '..', 'web', 'agent-process.ts'), 'utf-8')
+    const fn = AP.slice(AP.indexOf('export async function sendPromptToSession('))
+    expect(fn.indexOf('await dismissResumeSummaryModalIfPresent(session, host)')).toBeGreaterThan(0)
   })
 })

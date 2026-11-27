@@ -1849,10 +1849,36 @@ export const RESUME_DIALOG_SETTLE_MS = 1200
 
 export type ResumeDialogOutcome = 'absent' | 'answered' | 'dismissed' | 'blocked' | 'alerted'
 
+// PROGI 6273 (a): one handler run per session at a time. sendPromptToSession calls it under the pane's send
+// lane, but scheduleIdentitySetup (+8 s) and the channel-monitor resume path (+2 s) call it without that lock;
+// two interleaved runs could slip one's move (or nudge) between the other's re-check and Enter, and on the
+// resume trigger the Enter could then land on "Start a new conversation".
+// A second caller WAITS for the running handler and gets its outcome, sending no key itself (PROGI 6284): an
+// immediate 'skipped' was taken as "handled" by sendPromptToSession, and a forceSend scheduled task
+// (waitForIdle false) then typed its prompt + Enter while the first run was still in its settle or its move,
+// so that Enter landed on whatever row had the focus, possibly "Start a new conversation".
+const resumeDialogInFlight = new Map<string, Promise<ResumeDialogOutcome>>()
+
 export async function dismissResumeSummaryModalIfPresent(
   session: string,
   host: string | null = null,
   io: FirstRunPaneIo = TMUX_FIRST_RUN_IO,
+): Promise<ResumeDialogOutcome> {
+  const lockKey = `${host ?? ''}\u0000${session}`
+  const running = resumeDialogInFlight.get(lockKey)
+  if (running) {
+    logger.info({ session }, 'Resume dialog handler already running for this session: waiting for it (no keys)')
+    return running
+  }
+  const run = dismissResumeDialogLocked(session, host, io).finally(() => { resumeDialogInFlight.delete(lockKey) })
+  resumeDialogInFlight.set(lockKey, run)
+  return run
+}
+
+async function dismissResumeDialogLocked(
+  session: string,
+  host: string | null,
+  io: FirstRunPaneIo,
 ): Promise<ResumeDialogOutcome> {
   const escKey = `resume-dialog-blocked:${session}`
   let unseenAfterEnter = false
