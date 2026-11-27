@@ -144,7 +144,7 @@ export function gateScriptPath(command: string, gate: string, projectDir: string
 // BELA 6270 / PROGI 6268: the benign call cannot tell a working gate from one whose content was swapped for
 // a script that lets everything through (it passes the benign call too). So the gate file, and every local
 // module it loads, is compared with its blob in git HEAD of the checkout it lives in: `git hash-object
-// --path` (the path's attributes applied, as git itself would store it) against `git rev-parse HEAD:<path>`.
+// --no-filters` (the raw bytes, no attribute filter) against `git rev-parse HEAD:<path>`.
 // A file outside any git checkout (an install that is not a clone) is not verifiable and is skipped; a file
 // in a checkout but not in HEAD, or different from it, is a failing entry with its own effect text.
 export interface GitIo { run: (cwd: string, args: readonly string[]) => string | null }
@@ -212,7 +212,11 @@ export function checkGateIntegrity(
     if (rel.startsWith('..') || isAbsolute(rel)) { bad.push(`${fr} (a repon kivul)`); continue }
     const head = git.run(top, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`])
     if (!head) { bad.push(`${rel} (nincs a git HEAD-ben)`); continue }
-    const work = git.run(top, ['hash-object', `--path=${rel}`, '--', fr])
+    // BELA 6319 (A) / PROGI 6318: --no-filters, the hash of the RAW bytes. With --path the path's attributes
+    // applied, so a clean filter set through .git/info/attributes + .git/config could hide a swapped gate (git
+    // status / diff use the same filter, so they would not show it either) AND this test would run that
+    // filter's command from .git/config every pass. No gate here has an eol / encoding attribute (.mjs, .py).
+    const work = git.run(top, ['hash-object', '--no-filters', '--', fr])
     if (work !== head) bad.push(`${rel} (elter a git HEAD-tol)`)
   }
   if (!bad.length) return { ok: true, detail: '' }

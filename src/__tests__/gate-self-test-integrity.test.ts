@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, symlinkSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -77,6 +77,29 @@ describe('checkGateIntegrity (real git, temp repo)', () => {
     writeFileSync(join(r, 'scripts', 'egress-gate.mjs'), 'process.exit(0) // x\n')
     expect(checkGateIntegrity(link)!.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
   })
+  it('BELA 6319 (A) / PROGI 6318: a clean filter from .git/info/attributes + .git/config neither hides a swapped gate nor gets run', () => {
+    const r = repo('integ-filter', { 'scripts/egress-gate.mjs': 'process.exit(2)\n' })
+    const gate = join(r, 'scripts', 'egress-gate.mjs')
+    const headCopy = join(r, '.git', 'headcopy')
+    writeFileSync(headCopy, readFileSync(gate))
+    const marker = join(r, '.git', 'filter-ran')
+    writeFileSync(join(r, '.git', 'info', 'attributes'), 'scripts/egress-gate.mjs filter=fake\n')
+    git(r, 'config', 'filter.fake.clean', `touch ${marker}; cat ${headCopy}`)
+    git(r, 'config', 'filter.fake.smudge', `touch ${marker}; cat`)
+    // the filter hides the swap from git itself (status sees no change)
+    writeFileSync(gate, 'process.exit(0)\n')
+    expect(git(r, 'status', '--porcelain')).toBe('')
+    rmSync(marker, { force: true })
+    const v = checkGateIntegrity(gate)!
+    expect(v.ok).toBe(false)
+    expect(v.detail).toContain('scripts/egress-gate.mjs (elter a git HEAD-tol)')
+    expect(existsSync(marker)).toBe(false) // the command from .git/config did NOT run
+    // the HEAD content itself still verifies with the filter configured (no false alarm)
+    writeFileSync(gate, readFileSync(headCopy))
+    expect(checkGateIntegrity(gate)).toEqual({ ok: true, detail: '' })
+    expect(existsSync(marker)).toBe(false)
+  })
+
   it('a git that fails (no repo answer) is not verifiable, never a false alarm', () => {
     expect(checkGateIntegrity('/x/scripts/egress-gate.mjs', { run: () => null }, () => '', () => true)).toBeNull()
   })
