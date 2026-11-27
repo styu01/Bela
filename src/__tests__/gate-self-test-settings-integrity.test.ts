@@ -24,6 +24,13 @@ describe('findSettingsHazards', () => {
     } }))).toEqual(['env.BASH_ENV', 'env.DYLD_INSERT_LIBRARIES', 'env.ENV', 'env.LD_LIBRARY_PATH', 'env.LD_PRELOAD',
       'env.NODE_OPTIONS', 'env.NODE_PATH', 'env.PATH', 'env.PYTHONHOME', 'env.PYTHONPATH', 'env.PYTHONSTARTUP'])
   })
+  it('PROGI 6376 (C1): the hook runner keys (measured: CLAUDE_CODE_SHELL_PREFIX wraps every hook command)', () => {
+    expect(findSettingsHazards(j({ env: {
+      CLAUDE_CODE_SHELL_PREFIX: '/x/wrap.sh', CLAUDE_CODE_SHELL: '/x/sh', SHELL: '/x/sh', SHELLOPTS: 'xtrace', BASHOPTS: 'extdebug', PS4: '$(x)',
+      'BASH_FUNC_timeout%%': '() { :; }',
+    } }))).toEqual(['env.BASHOPTS', 'env.BASH_FUNC_timeout%%', 'env.CLAUDE_CODE_SHELL', 'env.CLAUDE_CODE_SHELL_PREFIX', 'env.PS4', 'env.SHELL', 'env.SHELLOPTS'])
+    expect(findSettingsHazards(j({ env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1', CLAUDE_CODE_SHELL_X: '1', BASH_FUNCX: '1' } }))).toEqual([])
+  })
   it('ordinary env keys are not hazards (case-sensitive like the environment itself)', () => {
     expect(findSettingsHazards(j({ env: { TZ: 'Europe/Budapest', ANTHROPIC_MODEL: 'x', DISABLE_AUTOUPDATER: '1', path: '/x', NODEJS: '1', MYPATH: '/x', ENVIRONMENT: 'prod' } }))).toEqual([])
   })

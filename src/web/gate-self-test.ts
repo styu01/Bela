@@ -93,8 +93,14 @@ export function settingsIntegrityFiles(): SettingsFile[] {
   return files
 }
 
-const HAZARD_ENV_EXACT = new Set(['PATH', 'BASH_ENV', 'ENV'])
-const HAZARD_ENV_PREFIXES = ['LD_', 'DYLD_', 'NODE_', 'PYTHON']
+// PROGI 6376 (C1), BELA 6377: the hook runner itself. Measured 2026-11-27 with CC 2.1.326 (offline, a marker
+// hook): CLAUDE_CODE_SHELL_PREFIX from a settings "env" block wraps EVERY hook command (the prefix program got
+// the hook command as its argument; one that exits 0 without running it let the call through, the hook never
+// ran): the simplest full gate bypass. CLAUDE_CODE_SHELL / SHELL pick the hook shell; BASH_FUNC_* exports a bash
+// function (a 'timeout' of its own when the hook shell is bash); SHELLOPTS / BASHOPTS + PS4 run code through
+// xtrace in bash.
+const HAZARD_ENV_EXACT = new Set(['PATH', 'BASH_ENV', 'ENV', 'CLAUDE_CODE_SHELL_PREFIX', 'CLAUDE_CODE_SHELL', 'SHELL', 'SHELLOPTS', 'BASHOPTS', 'PS4'])
+const HAZARD_ENV_PREFIXES = ['LD_', 'DYLD_', 'NODE_', 'PYTHON', 'BASH_FUNC_']
 export const HOOK_SWITCH_KEYS = ['disableAllHooks', 'allowManagedHooksOnly'] as const
 
 /** The hazards in one settings file's text: env keys that redirect the programs a hook runs or load code
@@ -123,7 +129,7 @@ export function settingsHazardText(f: SettingsFile, hazards: readonly string[]):
   const env = hazards.filter((h) => h.startsWith('env.'))
   const sw = hazards.filter((h) => !h.startsWith('env.'))
   const effects: string[] = []
-  if (env.length) effects.push(`az "env" blokk (${env.join(', ')}) minden hook-folyamatba bekerul: a PATH a kapu-parancsok programjait (timeout, python3, a shell) cserelheti le, az LD_* / DYLD_* / BASH_ENV / ENV / NODE_* / PYTHON* kodot tolthet be, igy a kapu atengedhet`)
+  if (env.length) effects.push(`az "env" blokk (${env.join(', ')}) minden hook-folyamatba bekerul: a CLAUDE_CODE_SHELL_PREFIX minden hook-parancsot egy tetszoleges programon at futtat (a kapu le sem fut), a CLAUDE_CODE_SHELL / SHELL a hook-shellt csereli, a PATH a kapu-parancsok programjait (timeout, python3, a shell), az LD_* / DYLD_* / BASH_ENV / ENV / BASH_FUNC_* / SHELLOPTS / BASHOPTS / PS4 / NODE_* / PYTHON* kodot tolthet be, igy a kapu atengedhet`)
   if (sw.length) effects.push(`a(z) ${sw.join(', ')} kapcsolo a hookokat kikapcsolja: annal az agensnel minden kapu NEM FUT`)
   return `[kapu-onteszt] SETTINGS-INTEGRITAS: agens ${f.agent}, fajl ${f.path}: ${effects.join('; ')}. Ma ilyen beallitas sehol nincs, tehat ez uj. Teendo: nezd meg, ki irta be (git log / a fajl ideje), es ha nem szandekos, torold a kulcsot; a sub-agens .claude/settings.json-t a kovetkezo spawn ujrageneralja, a tobbit kezzel.`
 }
