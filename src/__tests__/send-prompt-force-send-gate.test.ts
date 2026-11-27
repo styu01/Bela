@@ -25,7 +25,8 @@ describe('sendPromptToSession waitForIdle gate', () => {
     // watcher (an OPTIONAL prompt aborts instead of best-effort-typing into a
     // busy pane); waitForIdle stays the first, default-ON member. DELIVLOCK805
     // added lockMode (per-pane delivery mutex: deliver/recover/held).
-    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode\s*\}/)
+    // BELA 6297 (B) added onDialogBlocked (the scheduler's no-typing-into-a-dialog-left-up opt-in).
+    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode;\s*onDialogBlocked\?:\s*'send'\s*\|\s*'abort'\s*\}/)
   })
 
   it('the gate defaults ON (waitForIdle !== false) so all other callers keep it', () => {
@@ -53,7 +54,7 @@ describe('sendPromptToSession waitForIdle gate', () => {
     const call = SCHEDULE_RUNNER.slice(callIdx, callIdx + 120)
     // waitForIdle is the negation of forceSend: ON for normal tasks, OFF for
     // forceSend so a long-busy session is not blocked on the 12s gate.
-    expect(call).toMatch(/\{\s*waitForIdle:\s*!task\.forceSend\s*\}/)
+    expect(call).toMatch(/\{\s*waitForIdle:\s*!task\.forceSend,\s*onDialogBlocked:\s*'abort'\s*\}/)
   })
 
   it('documents WHY forceSend skips the gate', () => {

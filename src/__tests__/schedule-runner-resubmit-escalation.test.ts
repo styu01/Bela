@@ -50,7 +50,8 @@ describe('schedule-runner: resubmit wiring uses the real clear + re-inject', () 
     // lockMode 'held' is load-bearing: the re-inject runs INSIDE the recover
     // critical section below; re-acquiring the promise-chain mutex would
     // deadlock the lane.
-    expect(SRC).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, lockMode: 'held' \}\)/)
+    // BELA 6297 (B): plus onDialogBlocked 'abort' (a dialog left up stops the re-type; a retry is queued).
+    expect(SRC).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, lockMode: 'held', onDialogBlocked: 'abort' \}\)/)
   })
 
   it('routes the resubmit action through the pure decision function', () => {

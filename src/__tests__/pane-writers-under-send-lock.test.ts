@@ -113,7 +113,10 @@ describe('every unguarded pane writer routes through the send lane', () => {
     expect(src).toMatch(/modal dismissals skipped/)
     // 'held' callers run the dismissals WITHOUT re-acquiring (self-deadlock guard):
     // the held branch must dismiss directly, before any acquire.
-    const heldIdx = src.indexOf("if (lockMode === 'held') {\n    await dismissSurveyModalIfPresent")
+    // BELA 6297 (B): the three dismissals live in runDialogDismissals (it also records a dialog left up).
+    const heldIdx = src.indexOf("if (lockMode === 'held') {\n    await runDialogDismissals()")
     expect(heldIdx).toBeGreaterThan(-1)
+    expect(src).toMatch(/const runDialogDismissals = async \(\): Promise<void> => \{\s*await dismissSurveyModalIfPresent\(session, host\)\s*const resume = await dismissResumeSummaryModalIfPresent\(session, host\)\s*const consent = await dismissModelConsentDialogIfPresent\(session, host\)/)
+    expect(src.indexOf('const runDialogDismissals')).toBeLessThan(heldIdx)
   })
 })

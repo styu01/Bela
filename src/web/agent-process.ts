@@ -2518,9 +2518,19 @@ export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
-  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode } = {},
-): Promise<'sent' | 'aborted-busy' | 'skipped-locked'> {
+  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; onDialogBlocked?: 'send' | 'abort' } = {},
+): Promise<'sent' | 'aborted-busy' | 'skipped-locked' | 'aborted-dialog'> {
   const lockMode: SendLockMode = opts.lockMode ?? 'deliver'
+  // BELA 6297 (B): opts.onDialogBlocked 'abort' (the scheduler's callers): when the resume or the model-consent
+  // handler leaves its dialog up ('blocked' / 'alerted'; it escalated), nothing is typed and 'aborted-dialog'
+  // is returned, so the caller can queue a retry. The default 'send' keeps the historical must-deliver path.
+  let dialogLeftUp = false
+  const runDialogDismissals = async (): Promise<void> => {
+    await dismissSurveyModalIfPresent(session, host)
+    const resume = await dismissResumeSummaryModalIfPresent(session, host)
+    const consent = await dismissModelConsentDialogIfPresent(session, host)
+    dialogLeftUp = resume === 'blocked' || resume === 'alerted' || consent === 'blocked'
+  }
   // PANEWRITERS805: the three modal dismissals are probe+act keystroke writers
   // that ran BEFORE the lane lock -- so they could press Escape/Enter into a
   // pane mid-delivery (an Enter on the model-consent dialog confirms its
@@ -2531,22 +2541,22 @@ export async function sendPromptToSession(
   // idle gate below times out and the emit still queues behind the holder.
   // 'held' callers already own the lane -- acquiring again would deadlock.
   if (lockMode === 'held') {
-    await dismissSurveyModalIfPresent(session, host)
-    await dismissResumeSummaryModalIfPresent(session, host)
-    await dismissModelConsentDialogIfPresent(session, host)
+    await runDialogDismissals()
   } else {
     const releaseDismissLane = tryAcquireSessionSendLane(session, host)
     if (releaseDismissLane) {
       try {
-        await dismissSurveyModalIfPresent(session, host)
-        await dismissResumeSummaryModalIfPresent(session, host)
-        await dismissModelConsentDialogIfPresent(session, host)
+        await runDialogDismissals()
       } finally {
         releaseDismissLane()
       }
     } else {
       logger.info({ session }, 'sendPromptToSession: modal dismissals skipped -- a delivery holds this pane send lane (fail-closed); emit will queue behind it')
     }
+  }
+  if (dialogLeftUp && opts.onDialogBlocked === 'abort') {
+    logger.warn({ session }, 'sendPromptToSession: a resume / model-consent dialog is still up after its handler (escalated): nothing typed, per caller policy')
+    return 'aborted-dialog'
   }
 
   // Pre-flight wait-until-idle (root-cause gate). Placed here -- inside

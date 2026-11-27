@@ -50,6 +50,8 @@ import {
   capturePane,
   sendEnterToSession,
   clearStaleParkedInput,
+  dismissResumeSummaryModalIfPresent,
+  dismissModelConsentDialogIfPresent,
 } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -57,7 +59,7 @@ import { sendTelegramMessage, resolveTelegramBotToken } from './telegram.js'
 import { runCommandTask } from './command-task.js'
 import { decideQuotaAction, type QuotaWorkClass } from '../quota-gate.js'
 import { readQuotaSnapshot } from '../quota-snapshot.js'
-import { paneShowsContextSaturation, detectsFirstRunGate, detectPaneState, type PaneState } from '../pane-state.js'
+import { paneShowsContextSaturation, detectsFirstRunGate, detectsResumeDialog, detectsModelConsentDialog, detectPaneState, type PaneState } from '../pane-state.js'
 import { withSessionSendLock } from './session-send-lock.js'
 
 // How many bare-Enter attempts the post-send resubmit tries before escalating
@@ -980,6 +982,13 @@ function mcpMissingReason(taskName: string, agentName: string): string {
 // janitor targets the SAME pane the fire path would have written to -- a second
 // copy of this derivation would drift, and a janitor aimed at the wrong session
 // is worse than no janitor at all.
+// The two dialogs a forceSend must not type into besides the first-run gates (BELA 6297 B).
+export function forceSendDialogKind(pane: string): 'resume' | 'model-consent' | null {
+  if (detectsResumeDialog(pane) != null) return 'resume'
+  if (detectsModelConsentDialog(pane)) return 'model-consent'
+  return null
+}
+
 export function resolveTaskTarget(
   task: Pick<ScheduledTask, 'targetSession'>,
   agentName: string,
@@ -1018,7 +1027,7 @@ async function attemptFireTask(
   now: number,
   preCheckPrefix?: string,
   lateCatchUpMs?: number,
-): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'first-run'> {
+): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'first-run' | 'dialog'> {
   const { session, host } = resolveTaskTarget(task, agentName)
   // resolveTaskTarget() computes this internally but does not expose it (it
   // only returns {session, host}) -- recompute the same cheap check here
@@ -1134,6 +1143,25 @@ async function attemptFireTask(
       logger.warn({ task: task.name, agent: agentName, session, gate: forceGate }, 'forceSend target session is parked on a Claude Code first-run dialog -- deferring to retry queue instead of typing into the dialog')
       return 'first-run'
     }
+    // BELA 6297 (B) / PROGI 6294: the same for the resume and the model-consent dialog. A force-injected
+    // prompt + Enter on "Resume this conversation?" can land on "Start a new conversation" (the session loses
+    // its context); on the consent dialog it confirms the focused row, by default the model switch. The
+    // shared, per-session-locked handlers answer them from the pane first (what sendPromptToSession would do
+    // before typing, so a session nobody else answers is not starved); a dialog still up afterwards, or a
+    // pane that cannot be read then, defers the task to the retry queue as 'dialog'. The handlers escalate
+    // a dialog they cannot answer themselves.
+    if (pane != null && forceSendDialogKind(pane) != null) {
+      const kind = forceSendDialogKind(pane)
+      await dismissResumeSummaryModalIfPresent(session, host)
+      await dismissModelConsentDialogIfPresent(session, host)
+      const after = capturePane(session, host)
+      const still = after == null ? 'unreadable' : (detectsFirstRunGate(after) ?? forceSendDialogKind(after))
+      if (still != null) {
+        logger.warn({ task: task.name, agent: agentName, session, dialog: kind, still }, 'forceSend target session is on a resume / model-consent dialog that is still up after answering it -- deferring to retry queue instead of typing into the dialog')
+        return 'dialog'
+      }
+      logger.info({ task: task.name, agent: agentName, session, dialog: kind }, 'forceSend target dialog answered from the pane before the injection')
+    }
     logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check')
   }
 
@@ -1221,7 +1249,13 @@ async function attemptFireTask(
     // task aimed at a long-busy session would block on the 12s idle wait every
     // tick -- defeating the very purpose of forceSend (inject regardless, let
     // Claude Code queue it). All non-forceSend tasks keep the gate ON.
-    await sendPromptToSession(session, fullPrompt, host, { waitForIdle: !task.forceSend })
+    const delivery = await sendPromptToSession(session, fullPrompt, host, { waitForIdle: !task.forceSend, onDialogBlocked: 'abort' })
+    if (delivery === 'aborted-dialog') {
+      // A resume / consent dialog came up between the gate above and the typing, and its handler could not
+      // answer it: nothing was typed. Not 'fired': the retry queue delivers once the dialog is gone.
+      logger.warn({ task: task.name, agent: agentName, session }, 'Scheduled task not typed: a dialog the handlers could not answer is on the pane -- deferring to retry queue')
+      return 'dialog'
+    }
     scheduleLastRun.set(task.name, now)
     persistScheduleLastRun()
     // A lateCatchUpMs value means this tick only matched because of the
@@ -1317,7 +1351,13 @@ async function attemptFireTask(
             // lockMode 'held': we are already inside this pane's lane; taking
             // the lock again would deadlock the promise-chain mutex.
             if (await clearStaleParkedInput(session, host)) {
-              await sendPromptToSession(session, fullPrompt, host, { waitForIdle: false, lockMode: 'held' })
+              const again = await sendPromptToSession(session, fullPrompt, host, { waitForIdle: false, lockMode: 'held', onDialogBlocked: 'abort' })
+              if (again === 'aborted-dialog') {
+                // The parked prompt is cleared and a dialog blocks the re-type: queue a retry so the task is not lost.
+                logger.warn({ task: task.name, session, attempt }, 'Scheduled prompt re-inject stopped: a dialog the handlers could not answer is on the pane -- queued a retry')
+                insertPendingTaskRetryIfNew(task.name, agentName, now, 'dialog')
+                return 'done'
+              }
               logger.info({ task: task.name, session, attempt }, 'Scheduled prompt re-injected after swallowed Enter')
             } else {
               sendEnterToSession(session, host)
@@ -1404,7 +1444,7 @@ export async function runScheduledTaskNow(
     // busy session both get a queued retry that lands once the session is
     // ready. We deliberately do NOT consult skipIfBusy here -- that flag trims
     // redundant cron ticks, but an explicit run-now must not be dropped.
-    if (result === 'starting' || result === 'busy' || result === 'mcp-missing' || result === 'first-run') {
+    if (result === 'starting' || result === 'busy' || result === 'mcp-missing' || result === 'first-run' || result === 'dialog') {
       const reason = result === 'mcp-missing' ? mcpMissingReason(task.name, agentName) : result
       insertPendingTaskRetryIfNew(task.name, agentName, now, reason)
     }
@@ -1484,6 +1524,7 @@ function pendingRetryAlertText(view: PendingRetryView, prefix: string, ageMinute
   // one-time login/consent on the agent session, not waiting for a busy
   // session to free up.
   const firstRunStuck = view.lastReason === 'first-run'
+  const dialogStuck = view.lastReason === 'dialog'
   return (mcpMissing
     ? [
         `${prefix} A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: a szükséges MCP szerver(ek) nem futnak a cél-sessionben: ${mcpMissing}.`,
@@ -1495,6 +1536,12 @@ function pendingRetryAlertText(view: PendingRetryView, prefix: string, ageMinute
         `${prefix} A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: az agent session a Claude Code első-indítási képernyőjén áll (mappa-jóváhagyás vagy belépés szükséges).`,
         `Első próbálkozás: ${firstAttempt} (${ageMinutes} perce).`,
         `A rendszer a jóváhagyás-dialogokat magától továbblépteti; ha belépés kell: tmux attach -t agent-${view.agentName}, majd válaszd ki a belépési módot. Utána a feladat magától lefut.`,
+      ]
+    : dialogStuck
+    ? [
+        `${prefix} A(z) "${view.taskName}" (${view.agentName}) feladat NEM tud lefutni: az agent session egy Claude Code dialóguson áll (folytatás vagy modellhasználati jóváhagyás), amit automatikusan nem tudtam biztonságosan megválaszolni.`,
+        `Első próbálkozás: ${firstAttempt} (${ageMinutes} perce).`,
+        `A dialógusról külön jelzés is ment. Ha megválaszolod (tmux attach -t agent-${view.agentName}), a feladat magától lefut.`,
       ]
     : [
         `${prefix} A(z) "${view.taskName}" (${view.agentName}) ütemezett feladat ${ageMinutes} perce várakozik.`,
@@ -2138,6 +2185,10 @@ export function startScheduleRunner(): NodeJS.Timeout {
           // trace. The retry row keeps it alive and the aged alert names the
           // actual blocker instead of a generic "busy".
           insertPendingTaskRetryIfNew(task.name, agentName, now, 'first-run')
+        } else if (result === 'dialog') {
+          // Same exemption: a forceSend target on a resume / consent dialog its handler could not answer
+          // (escalated by the handler) waits for a human; dropping ticks would lose the task without a trace.
+          insertPendingTaskRetryIfNew(task.name, agentName, now, 'dialog')
         }
       }
     }
