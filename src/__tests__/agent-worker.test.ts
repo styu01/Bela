@@ -127,14 +127,32 @@ describe('workerHomeFor (WORKERHOME1: worker home derives from MAIN_AGENT_ID)', 
 })
 
 describe('workerStartAllowed (WORKERHOME1: WEB_ONLY must suppress every worker start)', () => {
+  // upstream d3d0331a: an explicit install root; the default (PROJECT_ROOT) would make these depend on where the
+  // suite runs (a worktree checkout is itself a second instance).
+  const install = { projectRoot: '/home/x/marveen', isGitFile: () => false, tmpDir: '/tmp' }
+
   it('blocks in WEB_ONLY staging', () => {
-    expect(workerStartAllowed({ WEB_ONLY: 'true' })).toBe(false)
+    expect(workerStartAllowed({ WEB_ONLY: 'true' }, install)).toBe(false)
   })
 
   it('allows on a normal install (unset or explicit false)', () => {
-    expect(workerStartAllowed({})).toBe(true)
-    expect(workerStartAllowed({ WEB_ONLY: 'false' })).toBe(true)
-    expect(workerStartAllowed({ WEB_ONLY: '' })).toBe(true)
+    expect(workerStartAllowed({}, install)).toBe(true)
+    expect(workerStartAllowed({ WEB_ONLY: 'false' }, install)).toBe(true)
+    expect(workerStartAllowed({ WEB_ONLY: '' }, install)).toBe(true)
+  })
+
+  it('upstream d3d0331a: blocks a second instance (worktree path, linked worktree, temp clone) unless it opts in', () => {
+    const second = [
+      { projectRoot: '/home/x/marveen/.claude/worktrees/wt1', isGitFile: () => false, tmpDir: '/tmp' },
+      { projectRoot: '/home/x/marveen-upstream-w3t', isGitFile: () => true, tmpDir: '/tmp' },
+      { projectRoot: '/tmp/canary', isGitFile: () => false, tmpDir: '/tmp' },
+    ]
+    for (const where of second) {
+      expect(workerStartAllowed({}, where), where.projectRoot).toBe(false)
+      expect(workerStartAllowed({ MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES: '1' }, where), where.projectRoot).toBe(true)
+      expect(workerStartAllowed({ MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES: 'true' }, where), where.projectRoot).toBe(false)
+      expect(workerStartAllowed({ WEB_ONLY: 'true', MARVEEN_ALLOW_SECOND_INSTANCE_SERVICES: '1' }, where), where.projectRoot).toBe(false)
+    }
   })
 
   // String-contract wiring guard (house idiom: the pure predicate alone cannot
