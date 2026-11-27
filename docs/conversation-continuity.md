@@ -166,7 +166,10 @@ Notes that matter when touching this:
   labelled (team-mate / external-federated / channel + sender / direct prompt,
   sender unverified), the block says it is a quotation and not instructions, and
   `<` `>` inside quoted text are replaced so nothing in it can open or close a
-  frame. Plumbing (gate / guard / inbox nudges, task notifications, scheduled
+  frame. Every carried text and source is a JSON-quoted string (an inner `"` or
+  newline is escaped), and the opening / closing lines carry a random
+  per-replay nonce, so a quoted text that imitates the block's own markers
+  stays visibly inside its quotes and never matches the real boundary. Plumbing (gate / guard / inbox nudges, task notifications, scheduled
   task notices, the harness's interrupt marker) is not carried.
 - **The injected block is deliberately non-directive.** A `/clear` can be a
   deliberate fresh start as easily as a gate-driven restart, and the hook cannot
