@@ -38,6 +38,7 @@ import {
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir, readAgentClaudeConfigDir } from './agent-config.js'
 import { readTranscriptMtimeFromProjectDir } from './active-model.js'
+import { mainSessionTranscriptMtime, readOwnSessionTranscript, tmuxPanePid, type OwnTranscript } from './main-session-transcript.js'
 import { channelStateDir } from '../channel-provider.js'
 import {
   agentSessionName,
@@ -553,6 +554,38 @@ export type TaskTimeoutDecision = 'clear' | 'alert' | 'escalate' | 'hold' | 'los
 // evicted ('clear') before escalate is ever reached. Accepted -- a task
 // legitimately configured to run for hours AND stuck long enough to hit
 // that ceiling is an extreme edge case outside this card's scope.
+// STUCKOWNSID1127 follow-up (PROGI msg 6169 item 3a): which transcript mtime proves that an injected
+// scheduled prompt started a turn. For the MAIN agent (local main channels session, cwd = the marveen
+// root) the project dir is shared with other sessions -- the owner's CLI work, sdk-cli runs (two
+// measured in 14 days) -- and a foreign write after injectedAt would set sawTurn on a prompt that
+// never ran: a LOST scheduled task counted as delivered, a silent loss. So the main agent reads its
+// OWN transcript (sessions/<pid>.json record, same resolver as the stuck-watcher's kill gate);
+// unprovable -> the old directory-level read. Sub-agents (own project dirs) and remote hosts keep the
+// directory-level read.
+export interface InflightTranscriptDeps {
+  panePid(session: string): number | null
+  own(pid: number, projectRoot: string): OwnTranscript
+  dir(workingDir: string, configDir?: string): number | null
+}
+const LIVE_INFLIGHT_TRANSCRIPT_DEPS: InflightTranscriptDeps = {
+  panePid: tmuxPanePid,
+  own: readOwnSessionTranscript,
+  dir: readTranscriptMtimeFromProjectDir,
+}
+export function inflightTranscriptMtime(
+  entry: Pick<TaskInflightEntry, 'session' | 'host' | 'workingDir' | 'configDir'>,
+  deps: InflightTranscriptDeps = LIVE_INFLIGHT_TRANSCRIPT_DEPS,
+): number | null {
+  if (entry.session === MAIN_CHANNELS_SESSION && !entry.host && entry.workingDir === PROJECT_ROOT) {
+    return mainSessionTranscriptMtime(entry.session, PROJECT_ROOT, {
+      panePid: deps.panePid,
+      own: deps.own,
+      dir: () => deps.dir(entry.workingDir, entry.configDir),
+    }).mtime
+  }
+  return deps.dir(entry.workingDir, entry.configDir)
+}
+
 export function decideTaskTimeout(
   entry: Pick<TaskInflightEntry, 'injectedAt' | 'alerted' | 'ownerAlerted' | 'sawTurn'>,
   paneState: PaneState | null,
@@ -1729,7 +1762,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
         if (state === 'busy') {
           entry.sawTurn = true
         } else {
-          const mtime = readTranscriptMtimeFromProjectDir(entry.workingDir, entry.configDir)
+          const mtime = inflightTranscriptMtime(entry)
           if (mtime != null && mtime > entry.injectedAt) entry.sawTurn = true
         }
       }

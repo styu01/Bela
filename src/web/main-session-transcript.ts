@@ -32,10 +32,12 @@
 // Any failure returns { ok: false, reason } and the caller falls back to the old directory-level
 // read: never more kills than before this change, only fewer foreign-session masks.
 
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { projectsDirFor } from './active-model.js'
+import { resolveFromPath } from '../platform.js'
 
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -136,6 +138,41 @@ export const liveOwnTranscriptDeps: OwnTranscriptDeps = {
     return env === null ? null : parseEnvironConfigDir(env)
   },
   home: homedir(),
+}
+
+// The pid of a local tmux session's first pane, or null on any failure. For the main channels session
+// this IS its claude process (measured: pane_pid comm=claude, launched without a wrapper shell).
+export function tmuxPanePid(session: string): number | null {
+  try {
+    const out = execFileSync(resolveFromPath('tmux'), ['list-panes', '-t', session, '-F', '#{pane_pid}'],
+      { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const first = out.split('\n')[0]?.trim()
+    return first && /^\d+$/.test(first) ? Number(first) : null
+  } catch {
+    return null
+  }
+}
+
+export interface MainTranscriptMtimeDeps {
+  panePid(session: string): number | null
+  own(pid: number, projectRoot: string): OwnTranscript
+  /** The old directory-level read: the fallback whenever the own file cannot be proven. */
+  dir(): number | null
+}
+
+// The MAIN session's transcript mtime for the readers outside the stuck-watcher (STUCKOWNSID1127
+// follow-up, PROGI msg 6169 item 3): its own file when provable, else the old directory-level newest
+// jsonl -- so a failed proof behaves exactly as before this change.
+export function mainSessionTranscriptMtime(
+  session: string,
+  projectRoot: string,
+  deps: MainTranscriptMtimeDeps,
+): { mtime: number | null; source: 'own' | 'dir'; fallbackReason: string | null } {
+  const pid = deps.panePid(session)
+  if (pid === null) return { mtime: deps.dir(), source: 'dir', fallbackReason: 'no-pane-pid' }
+  const own = deps.own(pid, projectRoot)
+  if (own.ok) return { mtime: own.mtimeMs, source: 'own', fallbackReason: null }
+  return { mtime: deps.dir(), source: 'dir', fallbackReason: own.reason }
 }
 
 export function readOwnSessionTranscript(pid: number, projectRoot: string): OwnTranscript {
