@@ -430,6 +430,7 @@ function switchPage(pageId) {
   if (pageId === 'status') loadStatus()
   if (pageId === 'recall') loadRecallPage()
   if (pageId === 'bgTasks') loadBgTasksPage()
+  if (pageId === 'agentCatalog') loadAgentCatalogPage()
   if (pageId === 'vault') loadVaultPage()
   if (pageId === 'approvals') loadApprovalsPage()
   if (pageId === 'settings') loadSettings()
@@ -480,7 +481,7 @@ const SIDEBAR_GROUPS_LS_KEY = 'marveen.sidebarGroups'
 // into their group containers per this map, so regrouping a page (say, moving
 // naplo under system) or relabeling a group is a one-line change right here.
 const SIDEBAR_GROUPS = [
-  { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'messages', 'tasks', 'bgTasks'] },
+  { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'agentCatalog', 'messages', 'tasks', 'bgTasks'] },
   { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
   { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'tokenUsage'] },
   { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
@@ -556,7 +557,7 @@ const NAV_I18N = {
   overview: 'nav.overview', kanban: 'nav.kanban', archived: 'nav.archived',
   agents: 'nav.agents', activity: 'nav.activity', team: 'nav.team',
   messages: 'nav.messages', tasks: 'nav.tasks', memories: 'nav.memories',
-  recall: 'nav.recall', naplo: 'nav.recall', bgTasks: 'nav.bgTasks',
+  recall: 'nav.recall', naplo: 'nav.recall', bgTasks: 'nav.bgTasks', agentCatalog: 'nav.agentCatalog',
   skills: 'nav.skills', connectors: 'nav.connectors', migrate: 'nav.migrate',
   approvals: 'nav.approvals',
   docs: 'nav.docs', research: 'nav.research', status: 'nav.status',
@@ -591,6 +592,7 @@ const PAGE_HEADER_I18N = {
   memoriesPage:   { title: 'memories.page_title',    sub: 'memories.page_subtitle' },
   recallPage:     { title: 'recall.page_title',      sub: 'recall.page_subtitle' },
   bgTasksPage:    { title: 'bgTasks.page_title',     sub: 'bgTasks.page_subtitle' },
+  agentCatalogPage: { title: 'agentCatalog.page_title', sub: 'agentCatalog.page_subtitle' },
   connectorsPage: { title: 'connectors.page_title',  sub: 'connectors.page_subtitle' },
   migratePage:    { title: 'migrate.page_title',     sub: 'migrate.page_subtitle' },
   docsPage:       { title: 'docs.page_title',        sub: 'docs.page_subtitle' },
@@ -4422,6 +4424,481 @@ async function markMissingCustomProvider(sel, providerId, brokenModel = null) {
   const opt = Array.from(sel.options).find(o => o.value === `custom:${providerId}`)
   if (opt) { opt.textContent = '🔧 ' + t('agents.model.provider_deleted', { id: providerId }); opt.dataset.deleted = '1' }
   warn.hidden = sel.selectedOptions[0]?.dataset.deleted !== '1'
+}
+
+// The server's answer decides what an action says (upstream #2424-#2427, ported with the agent catalog; BELA 6404): a
+// refused request is never shown as done. readActionReply() keeps the status and the JSON body (an empty object when
+// there is none).
+async function readActionReply(res) {
+  const body = await res.json().catch(() => null)
+  return { ok: res.ok, status: res.status, body: body && typeof body === 'object' ? body : {} }
+}
+
+// An owner gate (mayActAsOwner) refused: the text says what to do, in the page language. Upstream also opens its
+// create-login form, which this fork does not have; here the break-glass is `npm run dashboard-user` on the machine.
+function ownerSessionText(body) {
+  if (!body || body.code !== 'owner_session_required') return ''
+  return t(body.setup_required === true ? 'common.owner_login_setup_required' : 'common.owner_session_required')
+}
+
+// ===================== MIOAGENTB4-1122: Agent catalog (agent packages from marveen.io) =====================
+// The page over the agent-package routes (src/web/routes/agent-packages.ts): link this machine with a one-time
+// code, list the catalog, install, start. Every catalog field is the publishing side's data, so it reaches the DOM
+// as text only (textContent), never as HTML or markdown (plan 6.5, T4; Samu, extra 2).
+
+// Error code -> lang key (agentCatalog.err.<key>), from the route and remote.ts tables. An unknown code keeps the
+// server's own text (the CLI gate answers with a sentence of its own).
+const AGENT_PKG_ERR_KEYS = {
+  bad_request: 'bad_request', invalid_code: 'invalid_code', token_limit: 'token_limit', redeem_failed: 'redeem_failed',
+  credential_store_failed: 'credential_store_failed', credential_delete_failed: 'credential_delete_failed',
+  not_connected: 'not_connected', credential_rejected: 'credential_rejected', not_entitled: 'not_entitled',
+  package_not_found: 'package_not_found', rate_limited: 'rate_limited', temporarily_unavailable: 'temporarily_unavailable',
+  download_failed: 'download_failed', unknown_kid: 'unknown_kid', incompatible: 'incompatible',
+  package_rejected: 'package_rejected', invalid_slug: 'invalid_slug', name_reserved: 'name_reserved',
+  name_taken: 'name_taken', stale_install: 'stale_install', already_installed: 'already_installed',
+  unsupported_layout: 'unsupported_layout', own_version_unknown: 'own_version_unknown', install_failed: 'install_failed',
+  invalid_display_name: 'invalid_display_name',
+  // Upstream PR-I4: the update's check and apply (plan 6.2, 6.3).
+  agent_not_found: 'agent_not_found', not_a_package: 'not_a_package', manifest_unreadable: 'manifest_unreadable',
+  version_conflict: 'version_conflict', downgrade_refused: 'downgrade_refused', plan_changed: 'plan_changed',
+  decision_required: 'decision_required', path_blocked: 'path_blocked', update_in_progress: 'update_in_progress',
+  update_failed: 'update_failed',
+  // This fork (BELA 6438/6444): the owner approval and the update under a running agent.
+  agent_running: 'agent_running', install_in_progress: 'install_in_progress', invalid_name: 'invalid_name',
+  not_a_package_agent: 'not_a_package_agent', package_changed: 'package_changed', package_record_unreadable: 'package_record_unreadable',
+}
+function agentPkgErrorText(d) {
+  const owner = ownerSessionText(d)
+  if (owner) return owner
+  const key = d && AGENT_PKG_ERR_KEYS[d.error]
+  return key ? t(`agentCatalog.err.${key}`) : ((d && typeof d.error === 'string' && d.error) || t('agentCatalog.err.generic'))
+}
+
+// The install step an install error belongs to: 1 download, 2 signature and files, 3 security scan, 4 creating the
+// agent. A package_rejected names its verifier step (verify.ts: 5 is the content scan, the others are the document,
+// the signature and the file set).
+const AGENT_PKG_ERR_STEP = {
+  not_connected: 1, credential_rejected: 1, not_entitled: 1, package_not_found: 1, rate_limited: 1,
+  temporarily_unavailable: 1, download_failed: 1, unknown_kid: 2, incompatible: 2,
+}
+function agentPkgErrorStep(d) {
+  if (d && d.error === 'package_rejected') return d.step === 5 ? 3 : 2
+  return (d && AGENT_PKG_ERR_STEP[d.error]) || 4
+}
+
+// The package picture: https only, and only from the publishing side's origin (Samu, extra 1); anything else gets the
+// initial placeholder.
+function agentPkgAvatarUrl(raw, origin) {
+  if (typeof raw !== 'string' || typeof origin !== 'string' || origin === '') return null
+  let u
+  try { u = new URL(raw) } catch { return null }
+  if (u.protocol !== 'https:' || u.origin !== origin) return null
+  return u.href
+}
+
+function agentPkgVersionParts(v) {
+  const m = typeof v === 'string' ? /^(\d+)\.(\d+)\.(\d+)$/.exec(v) : null
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+/** -1, 0, 1, or null when either is not x.y.z. */
+function agentPkgVersionCmp(a, b) {
+  const x = agentPkgVersionParts(a)
+  const y = agentPkgVersionParts(b)
+  if (!x || !y) return null
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1
+  return 0
+}
+
+/**
+ * The card state (plan 3.3). `view` is {catalog, knownKids, marveenVersion}; `installed` maps slug -> {name,
+ * version, running}. Order: installed first (the agent is here whatever the account says now), then the account,
+ * then what this build can take.
+ */
+function agentPkgCardState(pkg, view, installed) {
+  const cat = view.catalog || {}
+  const have = installed[pkg.slug]
+  if (have) {
+    const newer = agentPkgVersionCmp(pkg.version, have.version) === 1
+    return { kind: newer ? 'update' : 'installed', installed: have }
+  }
+  if (cat.access === 'none') return { kind: 'locked_free' }
+  if (cat.access === 'trial' && typeof cat.trial_pick === 'string' && cat.trial_pick !== pkg.slug) {
+    return { kind: 'locked_trial', pick: cat.trial_pick }
+  }
+  if (cat.access !== 'full' && cat.access !== 'trial') return { kind: 'locked_free' }
+  if (agentPkgVersionCmp(view.marveenVersion, pkg.min_marveen_version) === -1) return { kind: 'locked_old' }
+  if (typeof pkg.kid !== 'string' || !(view.knownKids || []).includes(pkg.kid)) return { kind: 'locked_old' }
+  return { kind: 'install', trialPick: cat.access === 'trial' && cat.trial_pick == null }
+}
+
+/** The files a package puts on the machine, from the catalog's files[] when given (D3/A), else from skills[] (D3/B). */
+function agentPkgFileRows(pkg) {
+  const rows = [['PACKAGE.md', t('agentCatalog.file.package')], ['SOUL.md', t('agentCatalog.file.soul')]]
+  if (Array.isArray(pkg.files) && pkg.files.every((f) => typeof f === 'string')) {
+    const perSkill = new Map()
+    for (const f of pkg.files) {
+      const m = /^skills\/([^/]+)\//.exec(f)
+      if (m) perSkill.set(m[1], (perSkill.get(m[1]) || 0) + 1)
+    }
+    for (const [name, n] of perSkill) rows.push([`skills/${name}/`, t('agentCatalog.file.count', { n })])
+    if (typeof pkg.avatar_url === 'string') rows.push(['avatar', t('agentCatalog.file.avatar')])
+    return rows
+  }
+  for (const name of (Array.isArray(pkg.skills) ? pkg.skills : [])) {
+    if (typeof name === 'string') rows.push([`skills/${name}/`, t('agentCatalog.file.skill')])
+  }
+  return rows
+}
+
+// ---- DOM helpers: text only ----
+function acEl(tag, cls, text) {
+  const e = document.createElement(tag)
+  if (cls) e.className = cls
+  if (text !== undefined && text !== null) e.textContent = String(text)
+  return e
+}
+function acBtn(cls, text, onClick) {
+  const b = acEl('button', cls, text)
+  b.type = 'button'
+  b.addEventListener('click', onClick)
+  return b
+}
+
+const agentCatalogState = { busy: false }
+
+async function loadAgentCatalogPage() {
+  const root = document.getElementById('agentCatalogRoot')
+  if (!root) return
+  root.replaceChildren(acEl('p', 'ac-muted', t('agentCatalog.loading')))
+  let cred
+  try {
+    const r = await readActionReply(await fetch('/api/agent-packages/credential'))
+    if (!r.ok) { root.replaceChildren(acEl('p', 'ac-error', agentPkgErrorText(r.body))); return }
+    cred = r.body
+  } catch {
+    root.replaceChildren(acEl('p', 'ac-error', t('agentCatalog.err.generic')))
+    return
+  }
+  if (!cred.connected) { root.replaceChildren(agentCatalogConnectForm()); return }
+  const head = acEl('div', 'ac-connected')
+  head.append(acEl('span', null, t('agentCatalog.connected_as', { label: cred.label })))
+  head.append(acBtn('btn-secondary btn-compact', t('agentCatalog.disconnect'), agentCatalogDisconnect))
+  const list = acEl('div', 'ac-list')
+  root.replaceChildren(head, list)
+  list.append(acEl('p', 'ac-muted', t('agentCatalog.loading')))
+  let view
+  let agents
+  try {
+    const [c, a] = await Promise.all([fetch('/api/agent-packages/catalog').then(readActionReply), fetch('/api/agents').then(readActionReply)])
+    if (!c.ok) { list.replaceChildren(acEl('p', 'ac-error', agentPkgErrorText(c.body))); return }
+    view = c.body
+    agents = Array.isArray(a.body) ? a.body : (Array.isArray(a.body.agents) ? a.body.agents : [])
+  } catch {
+    list.replaceChildren(acEl('p', 'ac-error', t('agentCatalog.err.generic')))
+    return
+  }
+  const installed = {}
+  for (const ag of agents) {
+    if (ag && ag.package && typeof ag.package.slug === 'string') {
+      installed[ag.package.slug] = { name: ag.name, version: ag.package.version, running: !!ag.running, approval: ag.packageApproval || null }
+    }
+  }
+  const pkgs = Array.isArray(view.catalog && view.catalog.packages) ? view.catalog.packages : []
+  list.replaceChildren()
+  if (pkgs.length === 0) { list.append(acEl('p', 'ac-muted', t('agentCatalog.empty'))); return }
+  for (const pkg of pkgs) {
+    if (pkg && typeof pkg.slug === 'string') list.append(agentCatalogCard(pkg, view, installed))
+  }
+}
+
+function agentCatalogConnectForm() {
+  const box = acEl('div', 'ac-panel')
+  box.append(acEl('h3', null, t('agentCatalog.connect.title')))
+  box.append(acEl('p', 'ac-muted', t('agentCatalog.connect.desc')))
+  const label = acEl('label', 'form-label-sm', t('agentCatalog.connect.code_label'))
+  const input = acEl('input', 'input ac-code')
+  input.id = 'agentCatalogCode'
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  input.placeholder = 'XXXX-XXXXXXXX'
+  label.htmlFor = input.id
+  const msg = acEl('p', 'ac-msg')
+  const go = acBtn('btn-primary', t('agentCatalog.connect.btn'), async () => {
+    const code = input.value.trim()
+    if (!code) { msg.className = 'ac-msg ac-error'; msg.textContent = t('agentCatalog.connect.empty'); return }
+    go.disabled = true
+    try {
+      const r = await readActionReply(await fetch('/api/agent-packages/credential', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
+      }))
+      if (!r.ok) { msg.className = 'ac-msg ac-error'; msg.textContent = agentPkgErrorText(r.body); return }
+      showToast(t('agentCatalog.connect.done'))
+      loadAgentCatalogPage()
+    } catch {
+      msg.className = 'ac-msg ac-error'
+      msg.textContent = t('agentCatalog.err.generic')
+    } finally {
+      go.disabled = false
+    }
+  })
+  box.append(label, input, go, msg, acEl('p', 'ac-muted', t('agentCatalog.connect.expiry')))
+  return box
+}
+
+async function agentCatalogDisconnect() {
+  if (!confirm(t('agentCatalog.disconnect_confirm'))) return
+  try {
+    const r = await readActionReply(await fetch('/api/agent-packages/credential', { method: 'DELETE' }))
+    if (!r.ok) { showToast(agentPkgErrorText(r.body), 'error'); return }
+  } catch {
+    showToast(t('agentCatalog.err.generic'), 'error')
+    return
+  }
+  loadAgentCatalogPage()
+}
+
+function agentCatalogInitial(pkg) {
+  return acEl('div', 'ac-avatar ac-avatar-initial', (String(pkg.title || pkg.slug).trim()[0] || '?').toUpperCase())
+}
+
+function agentCatalogCard(pkg, view, installed) {
+  const state = agentPkgCardState(pkg, view, installed)
+  const card = acEl('div', 'ac-card')
+  card.dataset.slug = pkg.slug
+  card.dataset.state = state.kind
+  const top = acEl('div', 'ac-card-top')
+  const src = agentPkgAvatarUrl(pkg.avatar_url, view.origin)
+  if (src) {
+    const img = acEl('img', 'ac-avatar')
+    img.alt = ''
+    img.referrerPolicy = 'no-referrer'
+    // A signed picture URL expires (Samu 83364): a picture that does not load falls back to the initial.
+    img.addEventListener('error', () => img.replaceWith(agentCatalogInitial(pkg)), { once: true })
+    img.src = src
+    top.append(img)
+  } else {
+    top.append(agentCatalogInitial(pkg))
+  }
+  const head = acEl('div', 'ac-card-head')
+  head.append(acEl('div', 'ac-title', pkg.title || pkg.slug))
+  const skillCount = Array.isArray(pkg.skills) ? pkg.skills.length : 0
+  head.append(acEl('div', 'ac-meta', t('agentCatalog.meta', { version: pkg.version || '?', n: skillCount })))
+  top.append(head)
+  card.append(top)
+  if (pkg.description) card.append(acEl('p', 'ac-desc', pkg.description))
+  if (Array.isArray(pkg.connectors) && pkg.connectors.length) {
+    const ul = acEl('ul', 'ac-connectors')
+    for (const c of pkg.connectors) {
+      if (!c || typeof c.name !== 'string') continue
+      const lvl = c.level === 'required' ? t('agentCatalog.connector.required') : t('agentCatalog.connector.recommended')
+      ul.append(acEl('li', null, `${c.name}: ${lvl}`))
+    }
+    card.append(ul)
+  }
+  if (typeof pkg.changelog === 'string' && pkg.changelog) {
+    const det = acEl('details', 'ac-changelog')
+    det.append(acEl('summary', null, t('agentCatalog.changelog')), acEl('pre', null, pkg.changelog))
+    card.append(det)
+  }
+  const foot = acEl('div', 'ac-foot')
+  card.append(foot)
+  const panel = acEl('div', 'ac-panel-slot')
+  card.append(panel)
+  if (state.kind === 'installed' || state.kind === 'update') {
+    const run = state.installed.running ? t('agentCatalog.running') : t('agentCatalog.stopped')
+    foot.append(acEl('span', 'ac-state', t('agentCatalog.installed', { version: state.installed.version, run })))
+    if (state.kind === 'update') foot.append(acEl('span', 'ac-state ac-update', t('agentCatalog.update_available', { version: pkg.version })))
+    // This fork (BELA 6438/6444): an installed package waits for the owner approval before it can start.
+    if (state.installed.approval === 'pending') {
+      foot.append(acEl('span', 'ac-state ac-update', t('agentCatalog.pending')))
+      const box = acEl('div', 'ac-panel')
+      const status = acEl('p', 'ac-muted', t('agentCatalog.pending_review'))
+      box.append(status)
+      const approve = acBtn('btn-primary btn-compact', t('agentCatalog.approve_btn'), async () => {
+        approve.disabled = true
+        if (!(await agentCatalogApprove(state.installed.name, state.installed.version, null, status, box))) approve.disabled = false
+        else approve.remove()
+      })
+      box.append(approve)
+      panel.replaceChildren(box)
+    }
+  } else if (state.kind === 'locked_free') {
+    foot.append(acEl('span', 'ac-state ac-locked', t('agentCatalog.locked_free')))
+  } else if (state.kind === 'locked_trial') {
+    foot.append(acEl('span', 'ac-state ac-locked', t('agentCatalog.locked_trial', { pick: state.pick })))
+  } else if (state.kind === 'locked_old') {
+    foot.append(acEl('span', 'ac-state ac-locked', t('agentCatalog.locked_old')))
+  } else {
+    foot.append(acBtn('btn-primary', t('agentCatalog.install'), () => agentCatalogConfirm(pkg, state, panel)))
+  }
+  return card
+}
+
+function agentCatalogConfirm(pkg, state, panel) {
+  const box = acEl('div', 'ac-panel')
+  box.append(acEl('p', null, t('agentCatalog.confirm.files')))
+  const ul = acEl('ul', 'ac-files')
+  for (const [path, what] of agentPkgFileRows(pkg)) ul.append(acEl('li', null, `${path} · ${what}`))
+  box.append(ul)
+  const go = acBtn('btn-primary', t('agentCatalog.install'), () => agentCatalogInstall(pkg, panel, go))
+  if (state.trialPick) {
+    box.append(acEl('p', 'ac-warn', t('agentCatalog.confirm.trial')))
+    const lab = acEl('label', 'ac-check')
+    const cb = acEl('input')
+    cb.type = 'checkbox'
+    cb.className = 'ac-trial-ack'
+    go.disabled = true
+    cb.addEventListener('change', () => { go.disabled = !cb.checked || agentCatalogState.busy })
+    lab.append(cb, acEl('span', null, t('agentCatalog.confirm.trial_ack')))
+    box.append(lab)
+  }
+  const row = acEl('div', 'ac-actions')
+  row.append(acBtn('btn-secondary', t('agentCatalog.cancel'), () => panel.replaceChildren()), go)
+  box.append(row)
+  panel.replaceChildren(box)
+}
+
+// This fork (BELA 6438/6444): the fifth step is the owner approval, not the start: an installed package is set aside
+// and starts only after its approval (POST /api/agents/<name>/approve-package).
+const AGENT_PKG_STEPS = ['download', 'verify', 'scan', 'create', 'review']
+
+/** Is `slug` installed now? The re-measure after a request whose answer was lost (Samu, extra 3). */
+async function agentCatalogInstalledName(slug) {
+  try {
+    const a = await readActionReply(await fetch('/api/agents'))
+    const list = Array.isArray(a.body) ? a.body : (Array.isArray(a.body.agents) ? a.body.agents : [])
+    const hit = list.find((ag) => ag && ag.package && ag.package.slug === slug)
+    return hit ? hit.name : null
+  } catch {
+    return null
+  }
+}
+
+async function agentCatalogInstall(pkg, panel, btn) {
+  if (agentCatalogState.busy) return
+  agentCatalogState.busy = true
+  btn.disabled = true
+  const box = acEl('div', 'ac-panel')
+  const ol = acEl('ol', 'ac-steps')
+  const items = AGENT_PKG_STEPS.map((s) => {
+    const li = acEl('li', 'ac-step', t(`agentCatalog.step.${s}`))
+    li.dataset.step = s
+    ol.append(li)
+    return li
+  })
+  const status = acEl('p', 'ac-muted', t('agentCatalog.step.running'))
+  box.append(ol, status, acEl('p', 'ac-muted', t('agentCatalog.step.all_or_nothing')))
+  panel.replaceChildren(box)
+  const mark = (i, cls) => { items[i].classList.add(cls) }
+  let name = null
+  try {
+    let r = null
+    try {
+      r = await readActionReply(await fetch('/api/agents/install-package', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slug: pkg.slug }),
+      }))
+    } catch {
+      // The answer was lost (a proxy or the network cut it): the install may have finished. Measure, do not guess.
+      name = await agentCatalogInstalledName(pkg.slug)
+      if (name === null) { status.className = 'ac-error'; status.textContent = t('agentCatalog.err.lost'); return }
+    }
+    if (r && !r.ok) {
+      const step = agentPkgErrorStep(r.body) - 1
+      for (let i = 0; i < step; i++) mark(i, 'ac-done')
+      mark(step, 'ac-failed')
+      status.className = 'ac-error'
+      status.textContent = agentPkgErrorText(r.body)
+      return
+    }
+    if (r) name = r.body.name
+    for (let i = 0; i < 4; i++) mark(i, 'ac-done')
+    // Installed: the card's Install button goes (a failed install keeps it, to try again).
+    panel.closest('.ac-card')?.querySelector('.ac-foot')?.replaceChildren(acEl('span', 'ac-state', t('agentCatalog.installed_now')))
+    if (r && r.body.skillReport && r.body.skillReport.findings && Object.keys(r.body.skillReport.findings).length) {
+      box.append(acEl('p', 'ac-warn', t('agentCatalog.skill_findings')))
+    }
+    // Step 5: set aside, waiting for the owner approval (after BELA reviewed it); the start comes after the approval.
+    status.className = 'ac-muted'
+    status.textContent = t('agentCatalog.pending_review')
+    const version = r ? r.body.version : null
+    const approve = acBtn('btn-primary btn-compact', t('agentCatalog.approve_btn'), async () => {
+      approve.disabled = true
+      if (!(await agentCatalogApprove(name, version, items[4], status, box))) approve.disabled = false
+      else approve.remove()
+    })
+    box.append(approve)
+  } finally {
+    agentCatalogState.busy = false
+  }
+}
+
+/** This fork: the owner approval of an installed package (exactly `version` when known: a package changed since the
+ *  review is refused by the server). On success the start is offered. Returns whether the approval went through. */
+async function agentCatalogApprove(name, version, item, status, box) {
+  status.className = 'ac-muted'
+  status.textContent = t('agentCatalog.approving')
+  let r
+  try {
+    r = await readActionReply(await fetch(`/api/agents/${encodeURIComponent(name)}/approve-package`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(version ? { version } : {}),
+    }))
+  } catch {
+    r = { ok: false, body: {} }
+  }
+  if (!r.ok) {
+    status.className = 'ac-error'
+    status.textContent = t('agentCatalog.approve_failed', { reason: ownerSessionText(r.body) || r.body.error || t('agentCatalog.err.generic') })
+    return false
+  }
+  if (item) item.classList.add('ac-done')
+  status.className = 'ac-ok'
+  status.textContent = t('agentCatalog.approved', { name })
+  const startItem = item || acEl('li')
+  const start = acBtn('btn-primary btn-compact', t('agentCatalog.start_btn'), async () => {
+    start.remove()
+    await agentCatalogStart(name, startItem, status, box)
+  })
+  box.append(start)
+  return true
+}
+
+/** Start the approved agent (upstream's step 5, Samu D4). A failed start is not a failed install: the agent exists. */
+async function agentCatalogStart(name, item, status, box) {
+  item.classList.remove('ac-failed')
+  status.className = 'ac-muted'
+  status.textContent = t('agentCatalog.step.starting')
+  let r
+  try {
+    r = await readActionReply(await fetch(`/api/agents/${encodeURIComponent(name)}/start`, { method: 'POST' }))
+  } catch {
+    r = { ok: false, body: {} }
+  }
+  if (r.ok) {
+    item.classList.add('ac-done')
+    status.className = 'ac-ok'
+    status.textContent = t('agentCatalog.done', { name })
+    return
+  }
+  item.classList.add('ac-failed')
+  status.className = 'ac-error'
+  status.textContent = t('agentCatalog.start_failed', { reason: ownerSessionText(r.body) || r.body.error || r.body.message || t('agentCatalog.err.generic') })
+  const again = acBtn('btn-secondary btn-compact', t('agentCatalog.start_btn'), async () => {
+    again.remove()
+    await agentCatalogStart(name, item, status, box)
+  })
+  box.append(again)
+}
+
+// HOSTINGERWIZERRI18N1122: the Claude step's errors come from the server in one fixed language (the Claude branch
+// Hungarian, the router branch English). The wizard shows them in the UI language, by the response's reason, per
+// branch (bad-key and write-failed occur in both). An unknown reason keeps the server's own text.
+const ONB_AUTH_ERR_KEYS = {
+  claude: { missing: 'missing', 'bad-token': 'bad_token', 'bad-key': 'bad_key', 'verify-failed': 'verify_failed', 'write-failed': 'write_failed' },
+  router: { mixed: 'router_mixed', 'router-unavailable': 'router_unavailable', 'bad-key': 'router_bad_key', 'bad-model': 'router_bad_model', 'write-failed': 'router_write_failed' },
+}
+function onbAuthErrorText(d, router) {
+  const key = ONB_AUTH_ERR_KEYS[router ? 'router' : 'claude'][d && d.reason]
+  return key ? t(`onboarding.auth_err.${key}`) : ((d && d.error) || t('onboarding.error'))
 }
 
 function updateCustomModelIdRow(selectEl) {
