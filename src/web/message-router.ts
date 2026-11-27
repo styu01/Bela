@@ -31,7 +31,6 @@ import {
 import { detectPaneState, footerWordsOffAnchor, type PaneState } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
-import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
 import { selectTickWindow } from './message-router-window.js'
 import { readFleetPauseState, shouldHoldForFleetPause, type FleetPauseState } from './usage-fleet-pause.js'
@@ -177,13 +176,6 @@ function notifyOrchestratorOfHeldForUsagePause(msg: AgentMessage, pauseState: Fl
     logger.warn({ err, id: msg.id }, 'Failed to enqueue usage-pause-held notification')
   }
 }
-
-// Wakeup cooldown for the main agent: the router fires at most one
-// sendPromptToSession wakeup per COOLDOWN_MS window to avoid spamming the
-// channels session. 45s gives enough headroom that a normal turn (typically
-// 5-30s) ends and drain-inbox fires before we would retry.
-let lastMainAgentWakeupMs = 0
-const MAIN_AGENT_WAKEUP_COOLDOWN_MS = 45 * 1000
 
 // Bounce a terminal federated-delivery failure back to the SENDER's inbox as
 // a local 'system' notice, so a delegating agent learns its task never
@@ -491,14 +483,10 @@ export async function runMessageRouterTick(): Promise<void> {
     // The window is chosen FAIRLY across recipients (selectTickWindow, upstream 85c11575): the globally oldest
     // rows of busy recipients used to fill it and starve every other recipient, idle ones included. Each
     // recipient's own rows stay oldest first.
-    // LOCAL ADAPTATION: selectTickWindow leaves the main agent's rows out (it drains its own inbox), but in this
-    // fork a main-agent row in the window is what fires the [inbox-wakeup] nudge below. So the OLDEST main-agent
-    // row, if any, rides in front of the window and takes exactly one slot; the rest of the window is fair.
-    const mainHead = localPending.find((m) => m.to_agent === MAIN_AGENT_ID)
-    const pending = [
-      ...(mainHead ? [mainHead] : []),
-      ...selectTickWindow(localPending, MAX_MESSAGES_PER_TICK - (mainHead ? 1 : 0), MAIN_AGENT_ID),
-    ]
+    // selectTickWindow leaves the main agent's rows out: it drains its own inbox (PULL), and since the blind
+    // router wakeup is gone (upstream 7a47b24a) a main-agent row in the window would do nothing. The local
+    // "oldest main-agent row rides in front" slot existed only to fire that wakeup, so it went with it.
+    const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
     const now = Date.now()
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.
@@ -554,7 +542,6 @@ export async function runMessageRouterTick(): Promise<void> {
     // on their own budget so neither queue starves the other.
     await deliverFederatedBatch(federatedPending, now)
 
-    let mainAgentWakeupFiredThisTick = false
     for (const msg of pending) {
       // Skip messages already batched by the reconnect pre-pass: they are
       // 'done' in the DB now but still appear in our snapshot slice.
@@ -577,24 +564,19 @@ export async function runMessageRouterTick(): Promise<void> {
       // day. Leave the message pending; the next main-agent turn claims it
       // atomically. Sub-agents keep the tmux-inject path (they have idle gaps).
       //
-      // WAKEUP: without an active nudge the main agent only drains on the next
-      // user message or heartbeat -- up to 22+ min latency observed in prod.
-      // Fire one lightweight wakeup per cooldown window so an idle channels
-      // session starts a turn and drain-inbox claims the message immediately.
-      // Busy session: Claude Code queues the wakeup for the next turn boundary.
-      if (isMainAgent) {
-        if (!mainAgentWakeupFiredThisTick && now - lastMainAgentWakeupMs >= MAIN_AGENT_WAKEUP_COOLDOWN_MS) {
-          mainAgentWakeupFiredThisTick = true
-          lastMainAgentWakeupMs = now
-          try {
-            await sendPromptToSession(MAIN_CHANNELS_SESSION, '[inbox-wakeup: pending inter-agent messages]', null, { waitForIdle: false })
-            logger.info({ msgId: msg.id }, 'message-router: main-agent wakeup fired')
-          } catch (err) {
-            logger.warn({ err }, 'message-router: main-agent wakeup injection failed')
-          }
-        }
-        continue
-      }
+      // WAKEUP (upstream 7a47b24a): owned by the inbox-nudge-watcher, NOT by this router. The wakeup
+      // that used to live here (#538) predates that watcher (#557) and was never removed, so two
+      // engines nudged the same pane -- and this one fired BLIND: waitForIdle:false, no readiness
+      // check, no staleness tracking, once per 45 s for as long as the row stayed pending. Against a
+      // mid-turn pane it lands as a queued mid-turn message, not a prompt submit: no
+      // UserPromptSubmit, no drain-inbox, no claim, and the cooldown re-arms. Measured on this
+      // install: 2847 "main-agent wakeup fired" lines in store/dashboard.log against 271 inbox-nudge
+      // prompts, and 368 "[inbox-wakeup...]" prompts in the main transcripts over 14 days (~26 a
+      // day, each one a main-agent turn). The watcher does the job correctly (double-capture idle,
+      // abort-on-busy send, stale-spell escalation with an owner alert, hourly budget), so the
+      // router leaves the row for the PULL path. (Kept defensively: selectTickWindow already
+      // excludes main-agent rows.)
+      if (isMainAgent) continue
       // Use cached session data from the pre-pass (one sessionExistsOnHost call
       // per unique receiver per tick). Fall back to a direct call for agents not
       // in the pending set (shouldn't happen, but safe).

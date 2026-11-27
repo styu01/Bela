@@ -129,12 +129,10 @@ describe('one router tick with a busy backlog in front of an idle recipient (fc5
   })
 })
 
-// LOCAL ADAPTATION (this fork): a main-agent row in the tick is what fires the
-// [inbox-wakeup] nudge into the main agent's channel session (pull model).
-// selectTickWindow leaves main-agent rows out, so the router puts the OLDEST
-// one in front of the fair window (one slot). Without that, a main-agent
-// message behind a busy backlog would never wake the main agent.
-describe('the main agent still gets its wakeup with the fair window (local)', () => {
+// Upstream 7a47b24a: the router no longer wakes the main agent (the inbox-nudge-watcher owns that),
+// so the former local "oldest main-agent row rides in front of the window" slot is gone too: a
+// main-agent row neither takes a window slot nor makes the router type anything into its channel.
+describe('a main-agent row takes no window slot and is never typed or delivered by the router', () => {
   beforeEach(() => {
     vi.clearAllMocks(); liveStatus.clear()
     mockMarkDelivered.mockReturnValue(true)
@@ -142,13 +140,14 @@ describe('the main agent still gets its wakeup with the fair window (local)', ()
     process.env.ROUTER_BATCH_INJECT_AGENTS = 'nobody-opted-in'
   })
 
-  it('a main-agent row behind 30 busy rows fires the wakeup, and the idle recipient is still served', async () => {
+  it('a main-agent row behind 30 busy rows: no [inbox-wakeup], no main-session send, the idle recipient is served', async () => {
     const rows = [...Array.from({ length: 30 }, (_, i) => row(i + 1, 'dex')), row(31, 'orin'), row(32, 'eve')]
     for (const r of rows) liveStatus.set(r.id, 'pending')
     mockGetPendingMessages.mockReturnValue(rows)
     await runMessageRouterTick()
     const calls: Array<[string, string]> = mockSendPrompt.mock.calls.map((c) => [String(c[0]), String(c[1])])
-    expect(calls.some(([s, t]) => s === 'orin-channels' && t.includes('[inbox-wakeup'))).toBe(true)
+    expect(calls.some(([, t]) => t.includes('[inbox-wakeup'))).toBe(false)
+    expect(calls.some(([s]) => s === 'orin-channels')).toBe(false)
     expect(calls.map(([s]) => s)).toContain('agent-eve')
     // the main agent's row is never injected or marked delivered by the router (pull model)
     expect(mockMarkDelivered.mock.calls.map((c) => c[0])).toEqual([32])
