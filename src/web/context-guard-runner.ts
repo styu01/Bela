@@ -16,6 +16,7 @@ import {
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation } from '../pane-state.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readLastTurnActivityMs } from './active-model.js'
+import { mainSessionTranscriptMtime, readOwnSessionTranscript, tmuxPanePid, type OwnTranscript } from './main-session-transcript.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import {
   readPendingResumes,
@@ -340,8 +341,37 @@ function measureContextTokens(name: string): number | null {
  * a clock change) is treated as "just now" rather than as a large idle time --
  * a wrong clock must not be able to trigger a flush.
  */
+// STUCKOWNSID1127 follow-up (PROGI msg 6169 item 3b): the idle-flush tier's "untouched since" for the
+// MAIN agent reads its OWN transcript (sessions/<pid>.json record, the same resolver as the
+// stuck-watcher's kill gate and the schedule-runner's sawTurn), not the newest file of the shared
+// marveen-root project dir. The directory read was the SAFE direction (a foreign write only made BELA
+// look busier and delayed the flush), but the three readers now agree on which file is the main
+// session's. Unprovable -> the old directory read; sub-agents keep the directory read.
+export interface GuardTranscriptDeps {
+  panePid(session: string): number | null
+  own(pid: number, projectRoot: string): OwnTranscript
+  dir(workingDir: string, configDir?: string): number | null
+}
+const LIVE_GUARD_TRANSCRIPT_DEPS: GuardTranscriptDeps = {
+  panePid: tmuxPanePid,
+  own: readOwnSessionTranscript,
+  dir: readTranscriptMtimeFromProjectDir,
+}
+export function guardTranscriptMtime(name: string, deps: GuardTranscriptDeps = LIVE_GUARD_TRANSCRIPT_DEPS): number | null {
+  const workingDir = workingDirFor(name)
+  const configDir = configDirFor(name)
+  if (name === MAIN_AGENT_ID && workingDir === PROJECT_ROOT) {
+    return mainSessionTranscriptMtime(MAIN_CHANNELS_SESSION, PROJECT_ROOT, {
+      panePid: deps.panePid,
+      own: deps.own,
+      dir: () => deps.dir(workingDir, configDir),
+    }).mtime
+  }
+  return deps.dir(workingDir, configDir)
+}
+
 function measureIdleMs(name: string, nowMs: number): number | null {
-  const mtime = readTranscriptMtimeFromProjectDir(workingDirFor(name), configDirFor(name))
+  const mtime = guardTranscriptMtime(name)
   if (mtime === null) return null
   return Math.max(0, nowMs - mtime)
 }
