@@ -2158,10 +2158,14 @@ async function showCardDetail(card) {
         const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...card, assignee: newVal }),
+          // PROGI review 6187: ONLY the field this control changes. The whole card object was locked
+          // in when the detail view opened, so a whole-card body wrote back stale status/description
+          // over anything an agent wrote meanwhile. No version on purpose: a one-field body cannot
+          // overwrite another field, and a version would refuse it for an unrelated change.
+          body: JSON.stringify({ assignee: newVal }),
         })
-        // `{...card}` carries the version this object was loaded at, so a card that changed
-        // meanwhile is refused instead of having its description reverted (upstream 5b404c44).
+        // This one-field body carries no version, so the server does not answer it with a 409; the
+        // branch stays as a harmless guard should a version ever be added here again.
         if (r.status === 409) {
           const e = await r.json().catch(() => ({}))
           if (e.conflict === 'stale_version') {
@@ -2221,7 +2225,8 @@ async function showCardDetail(card) {
       const label = newParentId ? t('kanban.toast.parent_updated') : t('kanban.toast.parent_unset')
       const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...card, parent_id: newParentId }),
+        // PROGI review 6187: only the changed field (see the assignee edit above).
+        body: JSON.stringify({ parent_id: newParentId }),
       })
       if (r.ok) {
         const saved = await r.json().catch(() => ({}))
