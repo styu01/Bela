@@ -350,8 +350,12 @@ def _quote(text):
     cannot end its own quotation (an inner '"' becomes '\\"'), cannot start a new line (a newline
     becomes '\\n'), and its tag brackets are neutralised first. So a federated text that imitates the
     block's own markers ("=== ... VEGE ===", "- [csapattars-uzenet] ...") stays visibly inside the
-    quotes of the line it came in on."""
-    return json.dumps(_neutral(str(text or "")), ensure_ascii=False)
+    quotes of the line it came in on.
+
+    json.dumps(ensure_ascii=False) leaves U+2028 / U+2029 (line / paragraph separator) and U+0085 (NEL)
+    raw, and some renderers break the line there (PROGI review 6212): those three are escaped too."""
+    out = json.dumps(_neutral(str(text or "")), ensure_ascii=False)
+    return out.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").replace("\u0085", "\\u0085")
 
 
 def _item_line(p):
