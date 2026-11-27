@@ -217,7 +217,8 @@ describe('context-guard: a failed rescue is not filed as a completed one', () =>
     const body = fnBody(runner, 'checkAgent')
     const i = body.indexOf('await performRestart(name)')
     expect(i).toBeGreaterThan(-1)
-    const tail = body.slice(i, i + 900)
+    // 1600, was 900: the owed-resume record (upstream 4e4dba22 port) sits between the restart and the catch now.
+    const tail = body.slice(i, i + 1600)
     // guardStates.set(nextState) runs BEFORE the action switch, so without the
     // rollback the guard waits for a session it never started, prompts the old
     // saturated pane, and sits out its cooldown.
