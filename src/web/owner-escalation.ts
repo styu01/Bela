@@ -331,6 +331,12 @@ export function escalateToOwner(opts: EscalateToOwnerOptions): void {
  * sequence rather than being stuck permanently in "already escalated" --
  * and, critically, cancels any pending retry timer so a problem that
  * resolves mid-retry never fires a stale "still broken" alert afterward. */
+/** Has the direct owner alert (stage 2) of this escalation already gone out? Lets a caller that clears a
+ *  resolved incident tell the owner too, when the owner was told about it (gate self-test, PROGI 6268 d). */
+export function ownerEscalationStage2Sent(key: string): boolean {
+  return escalationState.get(key)?.stage2At != null
+}
+
 export function clearOwnerEscalation(key: string): void {
   escalationState.delete(key)
   stage2ExtraMsByKey.delete(key)

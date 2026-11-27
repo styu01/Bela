@@ -1,11 +1,14 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { loadavg } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, WEB_PORT } from '../config.js'
 import { logger } from '../logger.js'
 import { createAgentMessage } from '../db.js'
 import { agentDir, listAgentNames } from './agent-config.js'
-import { agentSettingsPath } from './agent-scaffold.js'
+import { agentSettingsPath, GATE_FAIL_CLOSED_TAG } from './agent-scaffold.js'
+import { escalateToOwner, clearOwnerEscalation, ownerEscalationStage2Sent } from './owner-escalation.js'
+import { notifyChannel } from '../notify.js'
 
 // Gate self-test (BELA 6223 a). Since the gates fail closed (upstream 0e681c83), a gate whose file is broken
 // blocks every call it matches: a broken self-pace-gate makes the sub-agents mute (they cannot even run the
@@ -30,7 +33,13 @@ export const GATE_SELF_TEST_INTERVAL_MS = 15 * 60_000
 
 export interface GateTarget { agent: string; settingsPath: string; projectDir: string }
 export interface GateEntry extends GateTarget { matcher: string; command: string; timeoutSec: number; gate: string }
-export interface GateRunResult { entry: GateEntry; ok: boolean; detail: string }
+export interface GateRunResult {
+  entry: GateEntry
+  ok: boolean
+  detail: string
+  /** A deadline / kill / signal failure: worth one re-run before alerting (PROGI 6248 ii). */
+  timeoutLike?: boolean
+}
 
 /** Every settings file a gate can be wired in, with the project dir its session runs in. */
 export function gateTargets(): GateTarget[] {
@@ -91,13 +100,26 @@ export function benignToolCall(matcher: string, cwd: string, port: number | stri
 }
 
 /** ok = exit 0 and no deny / block decision on stdout. Pure. */
-export function classifyGateRun(rc: number | null, stdout: string, stderr: string, signal: string | null = null): { ok: boolean; detail: string } {
+export function classifyGateRun(rc: number | null, stdout: string, stderr: string, signal: string | null = null): { ok: boolean; detail: string; timeoutLike: boolean } {
   const deny = /"permissionDecision"\s*:\s*"deny"/.test(stdout) || /"decision"\s*:\s*"block"/.test(stdout)
   const ok = rc === 0 && !deny
-  if (ok) return { ok, detail: '' }
+  if (ok) return { ok, detail: '', timeoutLike: false }
+  // The fail-closed tail reports the gate's own status in its message: rc=124 is the wrapper deadline, 137
+  // the kill after it; a null rc is our own kill or a signal.
+  const timeoutLike = rc === null || signal != null || /\brc=(?:124|137)\b/.test(stderr)
   const last = stderr.split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? ''
   const head = rc === null ? `jel=${signal ?? '?'}` : `rc=${rc}`
-  return { ok, detail: `${head}${deny ? ', deny a stdout-on' : ''}${last ? `: ${last.slice(0, 300)}` : ''}` }
+  return { ok, detail: `${head}${deny ? ', deny a stdout-on' : ''}${last ? `: ${last.slice(0, 300)}` : ''}`, timeoutLike }
+}
+
+/** The gate script path a hook command runs, with $CLAUDE_PROJECT_DIR expanded, or null. Pure. */
+export function gateScriptPath(command: string, gate: string, projectDir: string): string | null {
+  for (const raw of command.split(/\s+/)) {
+    const token = raw.replace(/^['"]+/, '').replace(/;+$/, '').replace(/['"]+$/, '')
+    if (!token.endsWith('/' + gate) && token !== gate) continue
+    return token.replace(/\$\{?CLAUDE_PROJECT_DIR\}?/g, projectDir)
+  }
+  return null
 }
 
 /** Run one wired gate command exactly as written, with a benign call on stdin. Never throws. */
@@ -108,6 +130,12 @@ export function runGateCommand(entry: GateEntry, port: number | string = WEB_POR
     session_id: 'gate-self-test', transcript_path: '/dev/null', cwd,
     hook_event_name: 'PreToolUse', ...call,
   })
+  // PROGI 6248 (i): the main agent's Telegram arm exits 0 when its gate file is missing (a missing file must
+  // not block the owner's only channel), so running it would pass silently; the file itself is checked.
+  const script = gateScriptPath(entry.command, entry.gate, cwd)
+  if (script != null && script.startsWith('/') && !existsSync(script)) {
+    return Promise.resolve({ entry, ok: false, detail: `a kapu fajlja hianyzik: ${script}`, timeoutLike: false })
+  }
   return new Promise((resolve) => {
     let stdout = ''
     let stderr = ''
@@ -117,7 +145,7 @@ export function runGateCommand(entry: GateEntry, port: number | string = WEB_POR
       settled = true
       clearTimeout(timer)
       const c = classifyGateRun(rc, stdout, stderr, signal)
-      resolve({ entry, ok: c.ok, detail: c.detail })
+      resolve({ entry, ok: c.ok, detail: c.detail, timeoutLike: c.timeoutLike })
     }
     const child = spawn('/bin/sh', ['-c', entry.command], {
       cwd,
@@ -154,10 +182,21 @@ export function diffGateStates(prev: ReadonlyMap<string, boolean>, results: read
   return { newlyFailed, recovered, next }
 }
 
-export function gateFailureText(failed: readonly GateRunResult[]): string {
-  const lines = failed.map((r) => `- agens: ${r.entry.agent}, kapu: ${r.entry.gate} (matcher: ${r.entry.matcher || '(mind)'}), beallitas: ${r.entry.settingsPath}, ${r.detail}`)
+const isWrapped = (e: GateEntry) => e.command.includes(GATE_FAIL_CLOSED_TAG)
+
+/** One alert text for the entries of one gate script that stopped passing. A fail-closed (wrapped) entry
+ *  blocks every call it matches; an unwrapped one (the main agent's Telegram arm, fail-open by design) lets
+ *  them through UNCHECKED (PROGI 6248 iii). The load average is given for a timeout-like failure (ii). */
+export function gateFailureText(failed: readonly GateRunResult[], load: readonly number[] = loadavg()): string {
+  const lines = failed.map((r) => {
+    const effect = isWrapped(r.entry)
+      ? 'az illeszkedo hivasok TILTVA'
+      : 'a kapu nem fut, a hivasok ellenorzes NELKUL mennek ki'
+    return `- agens: ${r.entry.agent}, kapu: ${r.entry.gate} (matcher: ${r.entry.matcher || '(mind)'}), beallitas: ${r.entry.settingsPath}, ${r.detail}. Hatas: ${effect}.`
+  })
+  const timed = failed.some((r) => r.timeoutLike)
   return [
-    `[kapu-onteszt] KAPU HIBA: ${failed.length} bekotott kapu egy artalmatlan hivast sem enged at, vagy nem fut. Az erintett agens minden ilyen hivasa TILTVA, amig ez fennall.`,
+    `[kapu-onteszt] KAPU HIBA: ${failed.length} bekotott kapu-bejegyzes egy artalmatlan hivason elbukott, vagy nem fut.${timed ? ` Idotullepes jellegu hiba (60 mp mulva ujrafuttatva is), load: ${load.map((x) => x.toFixed(2)).join(' ')}.` : ''}`,
     ...lines,
     'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkoze nincs kapuzva. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
   ].join('\n')
@@ -168,18 +207,79 @@ export function gateRecoveryText(recovered: readonly GateRunResult[]): string {
   return `[kapu-onteszt] HELYREALLT: ${list}. Az artalmatlan hivast ujra atengedik.`
 }
 
-type Send = (text: string) => void
-const sendToMain: Send = (text) => { createAgentMessage('system', MAIN_AGENT_ID, text, 'gate self-test') }
+// PROGI 6248 (iv): BELA first, the owner if it stays (escalateToOwner), keyed per gate SCRIPT, so one broken
+// gate file seen on every agent is one escalation.
+// PROGI 6268 (the review of that): the stage-2 owner alert fires on escalateToOwner's own timer, 5 min by
+// default, while this test looks only every 15 min, so practically every gate failure reached the owner even
+// when BELA fixed it in a minute. The gate keys get GATE_STAGE2_EXTRA_MS (20 min = the 15 min cycle + the
+// 60 s re-run + margin): a fix within one cycle is seen and cleared before the owner is paged; a persistent
+// break still reaches the owner in ~20 min. (A 2-3 min re-check loop while open was the alternative; it adds
+// a second timer path and more process spawns exactly during an incident, for a faster all-clear only.)
+// When the owner WAS paged, the all-clear goes to the owner too.
+export const GATE_STAGE2_EXTRA_MS = 20 * 60_000
+
+export interface GateAlerter {
+  fail: (key: string, text: string) => void
+  recover: (key: string, text: string) => void
+}
+const escalatingAlerter: GateAlerter = {
+  fail: (key, text) => escalateToOwner({
+    key,
+    belaText: text,
+    ownerText: `⚠️ ${text}\nBÉLA mar ertesitve volt errol, de nem oldodott meg.`,
+    stage2ExtraMs: GATE_STAGE2_EXTRA_MS,
+  }),
+  recover: (key, text) => {
+    const ownerWasTold = ownerEscalationStage2Sent(key)
+    clearOwnerEscalation(key)
+    createAgentMessage('system', MAIN_AGENT_ID, text, 'gate self-test')
+    if (ownerWasTold) void notifyChannel(text).catch(() => { /* best effort: BELA has it */ })
+  },
+}
+const sendAlerter = (send: (text: string) => void): GateAlerter => ({ fail: (_k, t) => send(t), recover: (_k, t) => send(t) })
+
+export const GATE_SELF_TEST_RETRY_DELAY_MS = 60_000
 
 let lastStates = new Map<string, boolean>()
+// Open gate escalations: gate script -> the failing entries (by resultKey) it was raised for, and their results.
+let openGates = new Map<string, { keys: Set<string>; results: GateRunResult[] }>()
+
+/** PROGI 6268 (a)(b): reconcile the open gate escalations with THIS pass's results. Pure over its inputs:
+ *  - a gate with no failing entry now -> recover (also when its failing entry simply disappeared: an agent
+ *    removed, a matcher repaired; before, only a per-entry "recovered" transition cleared the key, and a
+ *    later failure of the same gate on another agent was swallowed by the still-open key);
+ *  - a gate failing now that has no open escalation -> fail;
+ *  - an open gate where an entry fails that was not part of the escalation -> fail again (the caller clears
+ *    first), with the full current list. */
+export function reconcileGateEscalations(
+  open: ReadonlyMap<string, { keys: ReadonlySet<string>; results: readonly GateRunResult[] }>,
+  results: readonly GateRunResult[],
+): { fail: { gate: string; results: GateRunResult[]; reraise: boolean }[]; recover: { gate: string; results: GateRunResult[] }[] } {
+  const failingByGate = new Map<string, GateRunResult[]>()
+  for (const r of results) if (!r.ok) failingByGate.set(r.entry.gate, [...(failingByGate.get(r.entry.gate) ?? []), r])
+  const fail: { gate: string; results: GateRunResult[]; reraise: boolean }[] = []
+  const recover: { gate: string; results: GateRunResult[] }[] = []
+  for (const [gate, o] of open) {
+    if (!failingByGate.has(gate)) recover.push({ gate, results: [...o.results] })
+  }
+  for (const [gate, failing] of failingByGate) {
+    const o = open.get(gate)
+    if (!o) fail.push({ gate, results: failing, reraise: false })
+    else if (failing.some((r) => !o.keys.has(resultKey(r.entry)))) fail.push({ gate, results: failing, reraise: true })
+  }
+  return { fail, recover }
+}
 let running = false
 
-/** One self-test pass. Exported for tests (targets, reader and sender injectable). */
+/** One self-test pass. Exported for tests (targets, reader, alerter / sender and the re-run wait injectable). */
 export async function runGateSelfTest(opts: {
   targets?: GateTarget[]
   read?: (path: string) => string | null
-  send?: Send
+  send?: (text: string) => void
+  alerter?: GateAlerter
   port?: number | string
+  retryDelayMs?: number
+  load?: () => number[]
 } = {}): Promise<GateRunResult[]> {
   if (running) return []
   running = true
@@ -189,16 +289,35 @@ export async function runGateSelfTest(opts: {
     const results: GateRunResult[] = []
     // Sequential on purpose: ~30 short processes every 15 minutes, never a burst on a loaded host.
     for (const e of entries) results.push(await runGateCommand(e, opts.port))
+    // PROGI 6248 (ii): a timeout-like failure (deadline, kill, signal) on a loaded host is given one more
+    // chance 60 s later; only a second failure counts.
+    const timed = results.map((r, i) => (!r.ok && r.timeoutLike ? i : -1)).filter((i) => i >= 0)
+    if (timed.length) {
+      logger.warn({ count: timed.length, load: loadavg() }, 'gate self-test: timeout-like gate failures, one re-run in 60 s before alerting')
+      await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? GATE_SELF_TEST_RETRY_DELAY_MS))
+      for (const i of timed) results[i] = await runGateCommand(results[i].entry, opts.port)
+    }
     const d = diffGateStates(lastStates, results)
     lastStates = d.next
-    const send = opts.send ?? sendToMain
     if (d.newlyFailed.length) {
       logger.error({ failed: d.newlyFailed.map((r) => ({ agent: r.entry.agent, gate: r.entry.gate, matcher: r.entry.matcher, detail: r.detail })) }, 'gate self-test: a wired gate no longer passes a benign call')
-      try { send(gateFailureText(d.newlyFailed)) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
     }
-    if (d.recovered.length) {
-      logger.info({ recovered: d.recovered.map((r) => ({ agent: r.entry.agent, gate: r.entry.gate })) }, 'gate self-test: gate recovered')
-      try { send(gateRecoveryText(d.recovered)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+    const alerter = opts.alerter ?? (opts.send ? sendAlerter(opts.send) : escalatingAlerter)
+    const rec = reconcileGateEscalations(openGates, results)
+    for (const r of rec.recover) {
+      openGates.delete(r.gate)
+      logger.info({ gate: r.gate }, 'gate self-test: gate recovered (no failing entry left)')
+      try { alerter.recover(`gate-self-test:${r.gate}`, gateRecoveryText(r.results)) } catch (err) { logger.warn({ err }, 'gate self-test: recovery send failed') }
+    }
+    if (rec.fail.length) {
+      const load = opts.load ? opts.load() : loadavg()
+      for (const f of rec.fail) {
+        const key = `gate-self-test:${f.gate}`
+        // An open escalation only refreshes its text in escalateToOwner: clear it first so the new entry is told.
+        if (f.reraise) { try { clearOwnerEscalation(key) } catch { /* not open */ } }
+        openGates.set(f.gate, { keys: new Set(f.results.map((r) => resultKey(r.entry))), results: f.results })
+        try { alerter.fail(key, gateFailureText(f.results, load)) } catch (err) { logger.warn({ err }, 'gate self-test: alert send failed') }
+      }
     }
     return results
   } finally {
@@ -210,13 +329,15 @@ const prunedKeptAlerted = new Set<string>()
 
 /** The boot prune kept a fail-closed gate whose file is missing at the live root: it denies every call it
  *  matches. Told to the main agent once per entry per process lifetime (the prune runs at boot). */
-export function reportPruneKept(agent: string, settingsPath: string, commands: readonly string[], send: Send = sendToMain): void {
+export function reportPruneKept(agent: string, settingsPath: string, commands: readonly string[], send?: (text: string) => void): void {
   const fresh = commands.filter((c) => !prunedKeptAlerted.has(`${settingsPath}\u0000${c}`))
   if (!fresh.length) return
   for (const c of fresh) prunedKeptAlerted.add(`${settingsPath}\u0000${c}`)
   const gates = fresh.map((c) => GATE_SCRIPT_NAMES.find((g) => c.includes(g)) ?? c.slice(0, 80))
+  const text = `[kapu-onteszt] HIANYZO KAPU-FAJL: agens ${agent}, beallitas ${settingsPath}, kapu: ${gates.join(', ')}. A bejegyzes megmaradt (fail-closed), igy az illeszkedo hivasok TILTVA, amig a fajl vissza nem kerul. Teendo: a fajl visszaallitasa (git), majd dashboard ujrainditas.`
   try {
-    send(`[kapu-onteszt] HIANYZO KAPU-FAJL: agens ${agent}, beallitas ${settingsPath}, kapu: ${gates.join(', ')}. A bejegyzes megmaradt (fail-closed), igy az illeszkedo hivasok TILTVA, amig a fajl vissza nem kerul. Teendo: a fajl visszaallitasa (git), majd dashboard ujrainditas.`)
+    const alerter = send ? sendAlerter(send) : escalatingAlerter
+    alerter.fail(`gate-prune-kept:${settingsPath}`, text)
   } catch (err) {
     logger.warn({ err }, 'gate self-test: prune-kept alert send failed')
   }
@@ -225,6 +346,7 @@ export function reportPruneKept(agent: string, settingsPath: string, commands: r
 /** Test hook: forget the per-process state. */
 export function resetGateSelfTestState(): void {
   lastStates = new Map()
+  openGates = new Map()
   running = false
   prunedKeptAlerted.clear()
 }

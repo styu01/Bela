@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   collectGateEntries, benignToolCall, classifyGateRun, diffGateStates, runGateCommand, runGateSelfTest,
-  reportPruneKept, resetGateSelfTestState, gateFailureText, type GateEntry, type GateTarget,
+  reportPruneKept, resetGateSelfTestState, gateFailureText, gateScriptPath, type GateEntry, type GateTarget,
 } from '../web/gate-self-test.js'
 import { hookCommand, GATE_FAIL_CLOSED_TAG, injectEmailSendGate, injectSelfPaceGate, injectKanbanWriteGate, injectEgressGate } from '../web/agent-scaffold.js'
 import { PROJECT_ROOT } from '../config.js'
@@ -150,9 +150,11 @@ describe('the real gates, as the injectors wire them, on a disposable copy', () 
     expect(sent).toEqual([])
     appendFileSync(join(root, 'scripts', 'self-pace-gate.mjs'), '\nconst = ;\n')
     await runGateSelfTest({ targets, send: (t) => { sent.push(t) }, port: 3420 })
-    expect(sent.length).toBe(1)
-    expect(sent[0]).toContain('kapu: self-pace-gate.mjs')
-    expect(sent[0]).toContain('agens: progi')
+    // kanban-write-gate imports self-pace-gate, so a broken self-pace-gate breaks both scripts: one alert per
+    // gate script (PROGI 6248 iv grouping).
+    expect(sent.length).toBe(2)
+    expect(sent.some((t) => t.includes('kapu: self-pace-gate.mjs') && t.includes('agens: progi'))).toBe(true)
+    expect(sent.some((t) => t.includes('kapu: kanban-write-gate.mjs'))).toBe(true)
   }, 60_000)
 
   it('the main agent project settings (outgoing-copy-gate arms) pass their benign calls', async () => {
@@ -200,5 +202,104 @@ describe('wiring', () => {
   })
   it('the boot prune hands its kept entries to reportPruneKept', () => {
     expect(web).toMatch(/pruneStaleHooksFromSettingsFile\(agentSettingsPath\(agentName\), PROJECT_ROOT,\s*\(kept\) => reportPruneKept\(agentName, agentSettingsPath\(agentName\), kept\)\)/)
+  })
+})
+
+describe('PROGI 6248 follow-ups', () => {
+  beforeEach(() => resetGateSelfTestState())
+
+  it('(ii) a timeout-like failure is re-run once after the delay; a gate that recovered meanwhile is not alerted', async () => {
+    mkdirSync(join(tmp, 'tl'), { recursive: true })
+    const g = gate('tl/self-pace-gate.mjs', 'setTimeout(()=>{},60000)')
+    const sp = join(tmp, 'tl.json'); writeFileSync(sp, settingsWith([{ matcher: 'Bash', command: hookCommand(g, [], 3), timeout: 3 }]))
+    const sent: string[] = []
+    // the gate is fixed while the re-run waits
+    setTimeout(() => writeFileSync(g, 'process.exit(0)'), 200)
+    const res = await runGateSelfTest({ targets: [{ agent: 'a', settingsPath: sp, projectDir: tmp }], send: (t) => { sent.push(t) }, retryDelayMs: 500 })
+    expect(res[0].ok).toBe(true)
+    expect(sent).toEqual([])
+  }, 30_000)
+
+  it('(ii) still failing after the re-run: alerted, with the load average', async () => {
+    mkdirSync(join(tmp, 'tl2'), { recursive: true })
+    const g = gate('tl2/self-pace-gate.mjs', 'setTimeout(()=>{},60000)')
+    const sp = join(tmp, 'tl2.json'); writeFileSync(sp, settingsWith([{ matcher: 'Bash', command: hookCommand(g, [], 3), timeout: 3 }]))
+    const sent: string[] = []
+    await runGateSelfTest({ targets: [{ agent: 'a', settingsPath: sp, projectDir: tmp }], send: (t) => { sent.push(t) }, retryDelayMs: 10, load: () => [9.5, 4, 2] })
+    expect(sent.length).toBe(1)
+    expect(sent[0]).toContain('60 mp mulva ujrafuttatva is), load: 9.50 4.00 2.00')
+    expect(sent[0]).toContain('rc=2')
+  }, 30_000)
+
+  it('(ii) a non-timeout failure is not re-run (no delay)', async () => {
+    mkdirSync(join(tmp, 'nt'), { recursive: true })
+    const g = gate('nt/self-pace-gate.mjs', 'const = ;')
+    const sp = join(tmp, 'nt.json'); writeFileSync(sp, settingsWith([{ matcher: 'Bash', command: hookCommand(g) }]))
+    const t0 = Date.now()
+    const sent: string[] = []
+    await runGateSelfTest({ targets: [{ agent: 'a', settingsPath: sp, projectDir: tmp }], send: (t) => { sent.push(t) }, retryDelayMs: 5_000 })
+    expect(Date.now() - t0).toBeLessThan(4_000)
+    expect(sent.length).toBe(1)
+    expect(sent[0]).not.toContain('ujrafuttatva')
+  }, 30_000)
+
+  it('(iii) an unwrapped (fail-open) entry is reported as "checks NOT run", a wrapped one as blocked', () => {
+    const e = (command: string): GateEntry => ({ agent: 'bela', settingsPath: 's', projectDir: tmp, matcher: 'm', command, timeoutSec: 15, gate: 'outgoing-copy-gate.py' })
+    const t = gateFailureText([
+      { entry: e('python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py"'), ok: false, detail: 'rc=1' },
+      { entry: e(`x; echo "${GATE_FAIL_CLOSED_TAG}"`), ok: false, detail: 'rc=2' },
+    ], [0, 0, 0])
+    expect(t).toContain('a kapu nem fut, a hivasok ellenorzes NELKUL mennek ki')
+    expect(t).toContain('az illeszkedo hivasok TILTVA')
+  })
+
+  it('(i) the guarded Telegram arm with its gate file missing is reported (the command alone would pass)', async () => {
+    const root = join(tmp, 'tgroot'); mkdirSync(join(root, 'scripts', 'hooks'), { recursive: true })
+    const cmd = '[ -f "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py" ] || exit 0; python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py"'
+    const sp = join(tmp, 'tg.json'); writeFileSync(sp, settingsWith([{ matcher: 'mcp__plugin_telegram_telegram__(reply|edit_message)$', command: cmd, timeout: 15 }]))
+    const sent: string[] = []
+    const res = await runGateSelfTest({ targets: [{ agent: 'bela', settingsPath: sp, projectDir: root }], send: (t) => { sent.push(t) } })
+    expect(res[0].ok).toBe(false)
+    expect(res[0].detail).toContain('a kapu fajlja hianyzik')
+    expect(sent[0]).toContain('ellenorzes NELKUL mennek ki')
+  })
+
+  it('one broken gate script seen on several agents is ONE alert, and recovers once all its entries pass', async () => {
+    mkdirSync(join(tmp, 'grp'), { recursive: true })
+    const g = gate('grp/self-pace-gate.mjs', 'const = ;')
+    const targets = ['a1', 'a2', 'a3'].map((a) => {
+      const sp = join(tmp, `grp-${a}.json`); writeFileSync(sp, settingsWith([{ matcher: 'Bash', command: hookCommand(g) }]))
+      return { agent: a, settingsPath: sp, projectDir: tmp }
+    })
+    const keys: string[] = []
+    const alerter = { fail: (k: string) => { keys.push(`fail ${k}`) }, recover: (k: string) => { keys.push(`recover ${k}`) } }
+    await runGateSelfTest({ targets, alerter })
+    expect(keys).toEqual(['fail gate-self-test:self-pace-gate.mjs'])
+    writeFileSync(g, 'process.exit(0)')
+    await runGateSelfTest({ targets, alerter })
+    expect(keys).toEqual(['fail gate-self-test:self-pace-gate.mjs', 'recover gate-self-test:self-pace-gate.mjs'])
+  }, 30_000)
+
+  it('a partial recovery (one agent of two) does NOT clear the gate escalation; the last one does', async () => {
+    const mk = (n: string) => { mkdirSync(join(tmp, `pr-${n}`), { recursive: true }); return gate(`pr-${n}/self-pace-gate.mjs`, 'const = ;') }
+    const g1 = mk('1'); const g2 = mk('2')
+    const targets = [[g1, 'a1'], [g2, 'a2']].map(([g, a]) => {
+      const sp = join(tmp, `pr-${a}.json`); writeFileSync(sp, settingsWith([{ matcher: 'Bash', command: hookCommand(g) }]))
+      return { agent: a, settingsPath: sp, projectDir: tmp }
+    })
+    const keys: string[] = []
+    const alerter = { fail: (k: string) => { keys.push(`fail ${k}`) }, recover: (k: string) => { keys.push(`recover ${k}`) } }
+    await runGateSelfTest({ targets, alerter })
+    writeFileSync(g1, 'process.exit(0)')
+    await runGateSelfTest({ targets, alerter })
+    expect(keys).toEqual(['fail gate-self-test:self-pace-gate.mjs'])
+    writeFileSync(g2, 'process.exit(0)')
+    await runGateSelfTest({ targets, alerter })
+    expect(keys).toEqual(['fail gate-self-test:self-pace-gate.mjs', 'recover gate-self-test:self-pace-gate.mjs'])
+  }, 30_000)
+
+  it('gateScriptPath expands $CLAUDE_PROJECT_DIR and reads the wrapper form', () => {
+    expect(gateScriptPath('python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py"', 'outgoing-copy-gate.py', '/r')).toBe('/r/scripts/hooks/outgoing-copy-gate.py')
+    expect(gateScriptPath(hookCommand('/x/scripts/self-pace-gate.mjs'), 'self-pace-gate.mjs', '/r')).toBe('/x/scripts/self-pace-gate.mjs')
   })
 })

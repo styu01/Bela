@@ -23,13 +23,21 @@ fájlja elromlik, az összes illeszkedő hívás TILTVA lesz. A stderr-üzenet m
 kiutat: Bash nélkül is javítható, mert a fő ágens Read/Edit/Write eszköze nincs kapuzva.
 
 Szándékos kivétel: a fő ágens Telegram-válasz ága (outgoing-copy-gate a Telegram matcheren) fail-open
-marad, mert a Telegram a tulajdonos egyetlen felügyeleti csatornája.
+marad, mert a Telegram a tulajdonos egyetlen felügyeleti csatornája. Ez a hiányzó fájlra is igaz: a parancs
+elején `[ -f "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py" ] || exit 0`, mert a python3 hiányzó
+fájlnál 2-vel lép ki, és a 2 TILTÁS lenne (a Telegram-válaszok blokkolódnának). Ilyenkor a válaszok
+ellenőrzés nélkül mennek ki; az önteszt ezt külön jelzi („a kapu nem fut, a hívások ellenőrzés NÉLKÜL
+mennek ki”), mert a bekötött kapu-fájl meglétét is vizsgálja.
 
 ## Önteszt (`src/web/gate-self-test.ts`)
 
 Bootkor (+90 mp) és 15 percenként minden bekötött kapu-parancs pontosan úgy fut, ahogy a settings-ben
-áll, egy ártalmatlan hívással. Ha egy kapu nem 0-val lép ki vagy tilt, a fő ágens EGY inter-agent
-üzenetet kap (`[kapu-onteszt] KAPU HIBA ...`), a helyreálláskor egy másikat (`HELYREALLT`). A boot-prune
+áll, egy ártalmatlan hívással, és a kapu-fájl meglétét is ellenőrzi. Ha egy kapu nem 0-val lép ki, tilt,
+vagy a fájlja hiányzik, kapu-szkriptenként EGY eszkaláció indul (`[kapu-onteszt] KAPU HIBA ...`; előbb a fő
+ágens, ha megmarad, a tulajdonos), és ha a kapu minden bejegyzése újra rendben, egy `HELYREALLT` üzenet.
+Időtúllépés jellegű hibánál (határidő, kill, jel) 60 mp múlva egyszer újrafuttatja, és csak a második
+hibánál riaszt, a load-dal együtt. Fail-closed bejegyzésnél a szöveg „TILTVA”, a burkolatlan (fail-open)
+Telegram-ágnál „a kapu nem fut, a hívások ellenőrzés NÉLKÜL mennek ki”. A boot-prune
 „megtartott” esete (fail-closed kapu, amelynek fájlja hiányzik az élő gyökérben) ugyanígy jelez
 (`HIANYZO KAPU-FAJL`). Worktree / ideiglenes / WEB_ONLY példány nem futtatja.
 

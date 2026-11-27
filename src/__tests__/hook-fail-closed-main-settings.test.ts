@@ -16,6 +16,7 @@ import { PROJECT_ROOT } from '../config.js'
 const GATE = 'scripts/hooks/outgoing-copy-gate.py'
 const RAW = 'python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py"'
 const TG = /telegram/
+const TG_GUARD = '[ -f "$CLAUDE_PROJECT_DIR/scripts/hooks/outgoing-copy-gate.py" ] || exit 0; '
 
 let tmp: string
 let root: string
@@ -78,7 +79,9 @@ describe('main agent project settings: outgoing-copy-gate arms', () => {
       expect(e.command).toContain(GATE_FAIL_CLOSED_TAG)
     }
     expect(open.length).toBe(1)
-    expect(open[0].command).toBe(RAW)
+    // PROGI 6248 (i): a MISSING gate file must not block the owner's only channel either (python3 exits 2
+    // on a missing file, and 2 blocks), so the Telegram arm exits 0 when the file is not there.
+    expect(open[0].command).toBe(TG_GUARD + RAW)
   })
 
   for (const e of entries()) {
@@ -109,4 +112,21 @@ describe('main agent project settings: outgoing-copy-gate arms', () => {
       }
     }, 60_000)
   }
+})
+
+describe('the Telegram arm with the gate file MISSING (PROGI 6248 i)', () => {
+  it('exits 0 (passes) where the bare python3 call exits 2 (blocks); the closed arms still block', () => {
+    const p = join(root, GATE)
+    const orig = readFileSync(p)
+    rmSync(p)
+    try {
+      const input = inputsFor('Bash')[0]
+      expect(run(RAW, input).rc).toBe(2)
+      for (const e of entries()) {
+        expect(run(e.command, input).rc, e.matcher).toBe(TG.test(e.matcher) ? 0 : 2)
+      }
+    } finally {
+      writeFileSync(p, orig)
+    }
+  }, 60_000)
 })
