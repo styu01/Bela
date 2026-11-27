@@ -1022,6 +1022,37 @@ const MANAGE_EMAIL_SEND_OPS = new Set(['send', 'reply', 'replyall', 'forward'])
 // entrypoint: 'draft-required' is the manage_email case (drafting is fine,
 // only the actual send is refused), everything else is the sub-agent
 // governance block.
+// MAILCRED1127 (BELA msg 6120, PROGI msg 6118 (e)): this host has a CONFIGURED mail path the shell-form rules never
+// knew: scripts/send-gmail.py (and the outreach scripts send_outreach.py / send_batch_daily.py) fetch a mail
+// account's SMTP app password from the dashboard vault (GET /api/vault/<id>, authorized by the dashboard token every
+// agent can read) and send through smtplib. 'python3 scripts/send-gmail.py --to ...' passed this gate directly.
+// Sub-agent only (this gate is not wired on the main agent), and deliberately NOT in isSendInvocation: the Python
+// twin of that contract decides when the MAIN agent's copy-QA gate runs, and treating these scripts as sends there
+// would put the main agent's own file-bodied sends behind its fail-closed "unreadable body" block.
+// (1) Running one of the mailer scripts, in any spelling the send-invocation rules understand (path, ./, env, sh -c,
+//     interpreter code, heredoc, pipes...): the script name is read as a sender name for that check, so reading the
+//     file ('cat', 'grep', 'sed -n') stays allowed while every way of running it is refused.
+// (2) Touching the credential: the mail app password's vault id anywhere in the command (curl, python -c, a heredoc,
+//     node importing vault.js), or the secret-value endpoint /api/vault/<id> used as an endpoint (after a host or
+//     port, or followed by an id character). A mention like grep "/api/vault/" or "/api/vault/<id>" stays allowed.
+// Stated limit: this is a name rule, not an access control. A copied/renamed script or another vault id read through
+// vault.js is not seen; the real control is restricting the vault value route to the main agent (separate task).
+// The bare name is enough: the replacement keeps any directory in front, and the send rules judge the basename.
+const MAILER_SCRIPT_RX = /(?:send-gmail|send_outreach|send_batch_daily)\.py(?![\w.-])/g
+const MAIL_CREDENTIAL_RX = /gmail_kiss_i_god_app_pw|(?:https?:\/\/|localhost|127\.0\.0\.1|\[::1\]|:\d{2,5})[^\s'"`]*\/api\/vault\/|\/api\/vault\/[A-Za-z0-9_%$.@{-]/i
+// 'sed -n 1,40p FILE...' only prints: sed is not a never-exec program for the name layer (its e/w commands run and
+// write), but this exact shape -- -n, one line-range print script, plain file operands -- cannot. It is how the fleet
+// reads these scripts (measured on the real corpus), so for the mailer-script check alone it is taken out first.
+const SED_PRINT_RX = /(^|[;&|(\n]|\s)sed\s+-n\s+(['"]?)[\d,$]+p\2((?:[ \t]+[^\s;&|<>()`$'"\\]+)+)/g
+export function runsMailerScript(cmd) {
+  const s = String(cmd ?? '')
+  if (!s.match(MAILER_SCRIPT_RX)) return false
+  return isSendInvocation(s.replace(SED_PRINT_RX, '$1true').replace(MAILER_SCRIPT_RX, 'sendmail'))
+}
+export function touchesMailCredential(cmd) {
+  return MAIL_CREDENTIAL_RX.test(String(cmd ?? ''))
+}
+
 export function gateDecision(toolName, toolInput) {
   const name = String(toolName ?? '')
   // Any MCP send_email tool, name-agnostic (gmail or a differently-named
@@ -1046,8 +1077,29 @@ export function gateDecision(toolName, toolInput) {
   if (name === 'Bash') {
     const cmd = String(toolInput?.command ?? '')
     if (isSendInvocation(cmd)) return { deny: true }
+    if (touchesMailCredential(cmd)) return { deny: true, kind: 'mail-credential' }
+    if (runsMailerScript(cmd)) return { deny: true }
   }
   return { deny: false }
+}
+
+// MAILCRED1127 (PROGI msg 6118 (d)): the hook entry point's decision. An unexpected exception inside the decision used
+// to exit 1, which PreToolUse treats as NON-blocking, so the call ran unchecked. Any throw is a deny (fail-closed).
+export function hookDecision(payload, decide = gateDecision) {
+  try {
+    return decide(payload?.tool_name, payload?.tool_input)
+  } catch {
+    return { deny: true }
+  }
+}
+
+// MAILCRED1127: deny wording when a sub-agent reaches for the mail credential itself.
+export function buildCredentialMsg(botName) {
+  return (
+    'A levelezo hitelesito adat (vault) es a levelkuldo szkriptek sub-agentbol tiltottak (governance hard-gate). ' +
+    `Kimeno levelet csak ${botName} kuld: kuldd neki a tervezett levelet (CIMZETT + TARGY + TELJES SZOVEG) ` +
+    'inter-agent uzenetben. Ha a vault-hozzaferes mas, nem levelezo celra kell, azt is neki jelezd.'
+  )
 }
 
 // Deny wording for the manage_email case. Unlike the sub-agent governance
@@ -1133,10 +1185,14 @@ if (isInvokedDirectly()) {
   } catch {
     allow() // malformed/empty input must never break the agent's tool calls
   }
-  const { deny: shouldDeny, kind } = gateDecision(payload?.tool_name, payload?.tool_input)
-  if (shouldDeny) {
-    const { botName, ownerName } = readBrandEnv()
-    deny(kind === 'draft-required' ? buildDraftOnlyMsg(ownerName) : buildGateMsg(botName, ownerName))
+  // MAILCRED1127: hookDecision turns any throw into a deny; the brand lookup has its own fallbacks.
+  const decision = hookDecision(payload)
+  if (decision.deny) {
+    let names = { botName: 'Marveen', ownerName: 'Szabolcs' }
+    try { names = readBrandEnv() } catch { /* stock names */ }
+    deny(decision.kind === 'draft-required' ? buildDraftOnlyMsg(names.ownerName)
+      : decision.kind === 'mail-credential' ? buildCredentialMsg(names.botName)
+        : buildGateMsg(names.botName, names.ownerName))
   }
   allow()
 }
