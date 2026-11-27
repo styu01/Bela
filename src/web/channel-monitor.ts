@@ -33,6 +33,7 @@ import {
   shSingleQuote,
 } from './agent-process.js'
 import { beginRestart, endRestart, isRestartInFlight } from './restart-lock.js'
+import { mainCustomProviderLaunchEnv } from './main-custom-provider-env.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence, reapForeignMainPollers } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
@@ -853,6 +854,13 @@ export function buildMainSessionRespawnCmd(opts: {
    * non-primary channel after a recovery respawn -- see that helper's comment.
    */
   extraPluginIds?: string[]
+  /**
+   * HOSTINGERRETEST1125 (upstream 4a777cc9, ported): the main agent's custom provider env
+   * (mainCustomProviderLaunchEnv), '' or absent when it has none. Set: it goes after the config/token exports, as
+   * channels.sh's CUSTOM_PROVIDER_ENV does, and the --model flag is dropped (the provider's model rides
+   * ANTHROPIC_MODEL; a flag would override it). Absent or '': the command is byte-for-byte the one before the port.
+   */
+  customProviderEnv?: string
 }): string {
   return [
     'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
@@ -872,6 +880,9 @@ export function buildMainSessionRespawnCmd(opts: {
       : opts.fleetToken
         ? [`&& export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`]
         : []),
+    // HOSTINGERRETEST1125: the custom provider after the config/token exports, as channels.sh's CUSTOM_PROVIDER_ENV
+    // (its prefix starts with `unset CLAUDE_CODE_OAUTH_TOKEN`, so the fleet token exported above does not reach it).
+    ...(opts.customProviderEnv ? [`&& ${opts.customProviderEnv}`] : []),
     '&&', opts.claudePath,
     ...(opts.continueSession
       ? (opts.resumeSessionId && SESSION_UUID_RX.test(opts.resumeSessionId)
@@ -885,7 +896,7 @@ export function buildMainSessionRespawnCmd(opts: {
     // the 5th launch sink; it must use the same escaper as the other four (the
     // allowlist is the belt, this is the braces). shSingleQuote makes the value
     // one inert shell word. See model-id-injection.test.ts.
-    ...(opts.model ? ['--model', shSingleQuote(opts.model)] : []),
+    ...(opts.model && !opts.customProviderEnv ? ['--model', shSingleQuote(opts.model)] : []),
     // EFFORT806-B: same escaping rationale as --model just above -- see
     // readConfiguredMainEffort() for why this can legitimately be empty.
     ...(opts.effort ? ['--effort', shSingleQuote(opts.effort)] : []),
@@ -907,6 +918,11 @@ export function buildMainSessionRespawnCmd(opts: {
 // is called here too, so the two paths cannot drift on the parts that matter.
 export function respawnMainSessionFresh(): void {
   const provider = getProvider(getMainAgentProvider())
+  // HOSTINGERRETEST1125 (upstream 4a777cc9 + Samu's review, ported): the custom provider env is decided FIRST,
+  // before the reaps below can kill the pane's claude. A provider that cannot be served throws here, and the running
+  // main agent is left as it is, instead of being stopped with nothing started in its place. No provider: '' and
+  // nothing else runs (the config dir is passed lazily).
+  const customProviderEnv = mainCustomProviderLaunchEnv(() => ensureMainAgentIsolatedConfigDir())
   // Same rationale as the resume path: respawn-pane -k kills the parent claude
   // but leaves grandchild pollers alive, and two pollers on one bot token race
   // for getUpdates (409). Reap BEFORE respawning, never after.
@@ -933,6 +949,7 @@ export function respawnMainSessionFresh(): void {
     continueSession: false,
     isolatedConfigDir: ensureMainAgentIsolatedConfigDir(),
     fleetToken: hasFleetOauthToken(),
+    customProviderEnv,
   })
   execFileSync(TMUX, ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
   // Stamp IMMEDIATELY after the respawn, before the scheduling follow-ups.
@@ -978,6 +995,11 @@ export async function resumeMarveenSession(
 ): Promise<boolean> {
   const provider = getProvider(getMainAgentProvider())
   try {
+    // HOSTINGERRETEST1125 (upstream 4a777cc9 + Samu's review, ported): the custom provider env is decided FIRST,
+    // before the reaps below can kill the pane's claude. A provider that cannot be served throws here, and the running
+    // main agent is left as it is, instead of being stopped with nothing started in its place. No provider: '' and
+    // nothing else runs (the config dir is passed lazily).
+    const customProviderEnv = mainCustomProviderLaunchEnv(() => ensureMainAgentIsolatedConfigDir())
     // Reap any orphan bun/node poller BEFORE we respawn. tmux respawn-pane -k
     // kills the parent claude process but leaves grandchild pollers running -
     // see channel-poller-reap.ts. Without this, the freshly-respawned
@@ -1028,6 +1050,7 @@ export async function resumeMarveenSession(
       // preserving the prior shared-root behaviour.
       isolatedConfigDir: ensureMainAgentIsolatedConfigDir(),
       fleetToken: hasFleetOauthToken(),
+      customProviderEnv,
     })
     execFileSync(TMUX, ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
 
@@ -1273,6 +1296,11 @@ export function createMainChannelsSession(): MainSessionCreateResult {
 function respawnMarveenSessionFresh(): boolean {
   const provider = getProvider(getMainAgentProvider())
   try {
+    // HOSTINGERRETEST1125 (upstream 4a777cc9 + Samu's review, ported): the custom provider env is decided FIRST,
+    // before the reaps below can kill the pane's claude. A provider that cannot be served throws here, and the running
+    // main agent is left as it is, instead of being stopped with nothing started in its place. No provider: '' and
+    // nothing else runs (the config dir is passed lazily).
+    const customProviderEnv = mainCustomProviderLaunchEnv(() => ensureMainAgentIsolatedConfigDir())
     // Same first-run-picker guard as resumeMarveenSession.
     ensureSharedClaudeOnboarded()
     const claudeCmd = buildMainSessionRespawnCmd({
@@ -1287,6 +1315,7 @@ function respawnMarveenSessionFresh(): boolean {
       // itself or it 401s on the rotating macOS Keychain. null when off/no token.
       isolatedConfigDir: ensureMainAgentIsolatedConfigDir(),
       fleetToken: hasFleetOauthToken(),
+      customProviderEnv,
     })
     execFileSync(TMUX, ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
     logger.warn({ provider: provider.type }, 'Hard restart: marveen session respawned fresh (no --continue)')

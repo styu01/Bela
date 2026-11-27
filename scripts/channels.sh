@@ -710,6 +710,11 @@ if [ -n "$_node_bin" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
     fi
     if [ -n "$_cp_env" ]; then
       CUSTOM_PROVIDER_ENV="$_cp_env"
+      # The provider's model comes as ANTHROPIC_MODEL in the env above. A --model flag (from MAIN_AGENT_MODEL or
+      # .claude/settings.json) would override it and send the provider a model it may not serve, so with a custom
+      # provider the flag is dropped (the generic part of upstream 2992efdc HOSTINGERROUTER1122; the in-process
+      # respawns do the same in buildMainSessionRespawnCmd).
+      MODEL_FLAG=""
       echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: main-agent custom-provider env injected" >> "$INSTALL_DIR/store/channels-failures.log"
     fi
     unset _cp_env _cp_rc _cp_cfg_dir
