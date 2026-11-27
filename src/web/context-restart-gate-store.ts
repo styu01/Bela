@@ -25,6 +25,22 @@ export function readGateConfig(name: string): GateConfig {
   return name in raw ? normalizeGateConfig(raw[name]) : { ...DEFAULT_GATE_CONFIG }
 }
 
+/**
+ * Apply a PUT body to one agent's gate config: MERGE it over the stored config, then normalize (same contract as the
+ * context-guard and auto-restart PUTs since upstream 0382bb4d / 08bfe387, asked for by BELA msg 6130). An omitted key
+ * keeps its value; a malformed value is coerced to its default exactly as before; an agent with no row merges over
+ * the disabled default, so a partial PUT never arms a gate nobody enabled.
+ */
+export function mergeGateConfig(name: string, patch: unknown): GateConfig {
+  const raw = readConfigRaw()
+  const current = name in raw ? normalizeGateConfig(raw[name]) : { ...DEFAULT_GATE_CONFIG }
+  const fields = (patch && typeof patch === 'object' && !Array.isArray(patch)) ? patch as Record<string, unknown> : {}
+  const merged = normalizeGateConfig({ ...current, ...fields })
+  raw[name] = merged
+  atomicWriteFileSync(CONFIG_PATH, JSON.stringify(raw, null, 2))
+  return merged
+}
+
 export function writeGateConfig(name: string, cfg: unknown): GateConfig {
   const normalized = normalizeGateConfig(cfg)
   const raw = readConfigRaw()

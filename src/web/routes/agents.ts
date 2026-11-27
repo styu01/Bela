@@ -117,7 +117,7 @@ import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import { readContextGuardConfig, mergeContextGuardConfig } from '../context-guard-store.js'
 import { getContextGuardStatus } from '../context-guard-runner.js'
-import { readGateConfig, writeGateConfig } from '../context-restart-gate-store.js'
+import { readGateConfig, mergeGateConfig } from '../context-restart-gate-store.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import type { ContextGuardConfig } from '../../context-guard.js'
 // Derived from the DEFAULT config objects, not hand-listed: a field added to
@@ -1396,12 +1396,11 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // step exists or is needed. See context-restart-gate-runner-wiring.test.ts
   // for a direct proof that the store write reaches the live sweep.
   //
-  // PUT replaces the stored config wholesale (normalizeGateConfig fills any
-  // field the body omits from DEFAULT_GATE_CONFIG, it does not merge onto the
-  // agent's previously-stored values) -- same contract as auto-restart and
-  // context-guard above. A caller doing a partial update must GET first and
-  // send back the full object, or a prior non-default threshold silently
-  // reverts to default. See agent-put-fields.test.ts for the pinned case.
+  // PUT MERGES the body over the stored config (mergeGateConfig: an omitted key
+  // keeps its value, a malformed value is coerced to its default), the same
+  // contract as auto-restart and context-guard above (BELA msg 6130). It used
+  // to replace the row, so {"enabled": false} silently reset a custom threshold.
+  // See context-restart-gate-route.test.ts for the pinned case.
   const contextRestartGateMatch = path.match(/^\/api\/agents\/([^/]+)\/context-restart-gate$/)
   if (contextRestartGateMatch && (method === 'GET' || method === 'PUT')) {
     let name: string
@@ -1424,7 +1423,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       return true
     }
     setStoreWriteActor('dashboard')
-    const saved = writeGateConfig(name, data)
+    const saved = mergeGateConfig(name, data)
     json(res, { ok: true, contextRestartGate: saved })
     return true
   }

@@ -168,14 +168,9 @@ describe('GET/PUT /api/agents/:name/context-restart-gate', () => {
     expect(put.out.status).toBe(404)
   })
 
-  // Codex review point 3 (kanban 0d8bf173): PUT does not merge onto the
-  // stored config -- it replaces it wholesale, filling anything the body
-  // omits from DEFAULT_GATE_CONFIG. A caller sending {enabled:true} after a
-  // custom threshold was already saved LOSES that threshold. This is the
-  // documented, existing contract (matches auto-restart/context-guard), but
-  // it is exactly the kind of thing that "looks like partial update" and
-  // silently is not -- pinned here so the semantics cannot drift unnoticed.
-  it('a partial PUT is NOT a merge -- unspecified fields revert to default', async () => {
+  // Codex review point 3 (kanban 0d8bf173) pinned the old replace contract here. Since BELA msg 6130 the PUT MERGES,
+  // like the context-guard and auto-restart PUTs: a partial body keeps every key it leaves out.
+  it('a partial PUT is a merge -- unspecified fields keep their stored values', async () => {
     const full = fakeCtx(`/api/agents/${REAL_AGENT}/context-restart-gate`, 'PUT', {
       enabled: true, thresholdTokens: 111_111, staleCutoffMs: 111_111,
       retryIntervalMs: 111_111, persistentBlockAlertMs: 111_111,
@@ -188,11 +183,16 @@ describe('GET/PUT /api/agents/:name/context-restart-gate', () => {
     expect(partial.out.status).toBe(200)
     expect(partial.out.body).toEqual({
       ok: true,
-      contextRestartGate: { ...DEFAULT_GATE_CONFIG, enabled: false },
+      contextRestartGate: {
+        ...DEFAULT_GATE_CONFIG, enabled: false, thresholdTokens: 111_111, staleCutoffMs: 111_111,
+        retryIntervalMs: 111_111, persistentBlockAlertMs: 111_111,
+      },
     })
-    // explicitly: the custom threshold from the first PUT is GONE, not carried forward
-    expect((partial.out.body?.contextRestartGate as any).thresholdTokens).toBe(DEFAULT_GATE_CONFIG.thresholdTokens)
-    expect((partial.out.body?.contextRestartGate as any).thresholdTokens).not.toBe(111_111)
+    // a malformed value is still coerced to its default, not to the previous value
+    const bad = fakeCtx(`/api/agents/${REAL_AGENT}/context-restart-gate`, 'PUT', { thresholdTokens: -5 })
+    await tryHandleAgents(bad.ctx, PROJECT_ROOT)
+    expect((bad.out.body?.contextRestartGate as any).thresholdTokens).toBe(DEFAULT_GATE_CONFIG.thresholdTokens)
+    expect((bad.out.body?.contextRestartGate as any).staleCutoffMs).toBe(111_111)
   })
 
   it('rejects out-of-range values by falling back to default, at the HTTP layer too', async () => {
