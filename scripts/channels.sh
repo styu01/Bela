@@ -615,6 +615,7 @@ DEBUG_FLAG=""
 # prints nothing, CFG_ENV stays EMPTY and the agent keeps the shared ~/.claude --
 # strict no-op for existing installs (no setting, no fleet token, no dist build).
 CFG_ENV=""
+CUSTOM_PROVIDER_ENV=""
 mkdir -p "$INSTALL_DIR/store" 2>/dev/null || true
 _node_bin="$(command -v node || true)"
 if [ -n "$_node_bin" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
@@ -678,6 +679,42 @@ if [ -n "$_node_bin" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
       unset _guard_port
     fi
   fi
+  # Custom provider env for the main agent (e.g. LiteLLM/OpenCode endpoint).
+  # The helper reads the main agent's customProvider from agent-config.json,
+  # resolves the vault key, pre-stamps the x-api-key approval into .claude.json
+  # so the TUI gate never fires, then prints the shell export prefix to inject
+  # into the tmux launch command.
+  #
+  # Gate on dist/web/custom-providers.js (the key file the helper imports), NOT
+  # on dist/web/agent-process.js (the outer gate covers the CFG_ENV block above).
+  # If only agent-process.js is present but custom-providers.js is missing (e.g.
+  # a stale dist from a partially-applied update), the helper would hit a
+  # top-level import error and exit 1, causing an unconditional channel abort even
+  # when no customProvider is configured. Inner gate prevents that.
+  #
+  # Exit-code contract: exit 0 + empty = no customProvider (legitimate, carry on).
+  # exit 0 + non-empty = provider resolved, inject. exit 1 = customProvider IS
+  # configured but cannot be used (missing def/key/baseUrl). On exit 1 we ABORT
+  # rather than silently launching on the wrong (standard Claude/OAuth) backend.
+  if [ -f "$INSTALL_DIR/dist/web/custom-providers.js" ]; then
+    # Pass the isolated config dir only when it actually exists on disk, so the
+    # helper can stamp x-api-key approval into the right .claude.json. An empty
+    # arg makes it fall back to ~/.claude.json (the standard path).
+    _cp_cfg_dir=""
+    [ -d "${_cfg_dir:-}" ] && _cp_cfg_dir="${_cfg_dir:-}"
+    _cp_env="$("$_node_bin" "$INSTALL_DIR/scripts/main-agent-custom-provider.mjs" "$_cp_cfg_dir" 2>>"$INSTALL_DIR/store/channels-failures.log")"
+    _cp_rc=$?
+    if [ "$_cp_rc" -ne 0 ]; then
+      echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: main-agent-custom-provider exited $_cp_rc -- customProvider configured but broken; aborting to avoid silent wrong-backend launch (see channels-failures.log)" >> "$INSTALL_DIR/store/channels-failures.log"
+      exit "$_cp_rc"
+    fi
+    if [ -n "$_cp_env" ]; then
+      CUSTOM_PROVIDER_ENV="$_cp_env"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: main-agent custom-provider env injected" >> "$INSTALL_DIR/store/channels-failures.log"
+    fi
+    unset _cp_env _cp_rc _cp_cfg_dir
+  fi
+
   unset _cfg_line _cfg_mode _cfg_dir
 fi
 unset _node_bin
@@ -891,7 +928,7 @@ unset _auth_file
 # otherwise new-session below fails with "duplicate session".
 $TMUX kill-session -t "=$SESSION:" 2>/dev/null || true
 env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "${AUTH_PANE_ENV}${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+  "${AUTH_PANE_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
 $TMUX set-environment -g -u "$STATE_ENV_VAR" 2>/dev/null || true
@@ -992,7 +1029,7 @@ while [ "$SECONDS" -lt "$_boot_guard_deadline" ]; do
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
         env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
-          "${AUTH_PANE_ENV}${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+          "${AUTH_PANE_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}${EFFORT_FLAG}${DEBUG_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
         $TMUX set-option -t "=$SESSION:" remain-on-exit on 2>/dev/null || true
         unset _CHANNELS_STARTDIR
       fi

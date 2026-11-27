@@ -14,6 +14,7 @@ import { CLAUDE_MODEL_MIN_CLI, claudeSupportForCli, isModelUnsupportedByCli } fr
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
+import { listCustomProviders, loadCustomProvider } from '../custom-providers.js'
 import {
   agentDir,
   agentConfigRoot,
@@ -48,6 +49,8 @@ import {
   readAgentVoiceConfig,
   writeAgentVoiceConfig,
   KNOWN_VOICE_MODELS,
+  readAgentCustomProvider,
+  writeAgentCustomProvider,
   type AuthMode,
 } from '../agent-config.js'
 import { readClaudePlans, resolveAgentConfigDir } from '../claude-plans.js'
@@ -439,6 +442,7 @@ interface AgentSummary {
 
 interface AgentDetail extends AgentSummary {
   memoryIsolation: boolean
+  customProvider: string | null
   claudeMd: string
   soulMd: string
   mcpJson: string
@@ -549,6 +553,7 @@ function getAgentDetail(name: string): AgentDetail {
   return {
     ...summary,
     memoryIsolation: readAgentMemoryIsolation(name),
+    customProvider: readAgentCustomProvider(name),
     claudeMd,
     soulMd,
     mcpJson,
@@ -655,6 +660,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       // Feeds the "OpenRouter - kézi" optgroup in every agent's model dropdown.
       openrouterManual: hasOpenRouter ? loadCuratedManual() : [],
       openrouterConfigured: hasOpenRouter,
+      // Custom Anthropic-compatible providers defined in store/custom-providers.json.
+      customProviders: listCustomProviders(),
     })
     return true
   }
@@ -2146,6 +2153,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string
       authMode?: AuthMode; apiKey?: string; claudePlan?: string; memoryIsolation?: boolean
       modelProfile?: string | null
+      customProvider?: string | null
     }
 
     // Unknown fields are rejected rather than silently dropped -- see
@@ -2154,6 +2162,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (!fieldCheck.ok) {
       json(res, { error: fieldCheck.message, rejected: fieldCheck.rejected, writable: AGENT_PUT_WRITABLE_FIELDS }, 400)
       return true
+    }
+
+    // customProvider: null/'' clears it; otherwise it must name a provider that
+    // exists (and still validates) in store/custom-providers.json. Checked
+    // before the first write, so a refused body writes nothing; a non-string
+    // would otherwise reach writeAgentCustomProvider's .trim() as a 500 after
+    // the earlier fields were already written.
+    if (data.customProvider !== undefined && data.customProvider !== null && data.customProvider !== '') {
+      if (typeof data.customProvider !== 'string' || !loadCustomProvider(data.customProvider.trim())) {
+        json(res, { error: 'customProvider must be null or the id of an existing custom provider (Settings > Providers)' }, 400)
+        return true
+      }
     }
 
     if (data.memoryIsolation !== undefined) {
@@ -2179,6 +2199,17 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (data.model !== undefined) {
       const cliGate = await refuseIfCliCannotLaunch(String(data.model))
       if (cliGate) { json(res, cliGate, 422); return true }
+      // When a custom provider is being set (either in this same request or
+      // already persisted), validate the model id to prevent apostrophe/shell
+      // metacharacter breakout from the single-quoted `'${model}'` in the
+      // agent launch command. Allow: alphanumeric, dot, underscore, dash, colon, slash.
+      const incomingProvider = data.customProvider !== undefined ? (data.customProvider || null) : readAgentCustomProvider(name)
+      if (incomingProvider) {
+        if (!/^[a-zA-Z0-9._/:+-]+$/.test(data.model)) {
+          json(res, { error: 'Custom provider model id contains disallowed characters (allowed: a-z A-Z 0-9 . _ / : + -)' }, 400)
+          return true
+        }
+      }
       writeAgentModel(name, data.model)
     }
     // Card c755f4b2 Block B: optional generic capability tier. An unknown id
@@ -2203,6 +2234,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         json(res, { error: `modelProfile must be one of ${MODEL_PROFILE_IDS.join('|')}` }, 400)
         return true
       }
+    }
+    if (data.customProvider !== undefined) {
+      writeAgentCustomProvider(name, data.customProvider || null)
     }
     if (data.authMode !== undefined) {
       writeAgentAuthMode(name, data.authMode)
