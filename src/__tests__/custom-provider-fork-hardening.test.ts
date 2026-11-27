@@ -151,6 +151,33 @@ describe('PUT /api/agents/:name validates customProvider before the first write'
   })
 })
 
+describe('POST /api/agents refuses a non-string customProvider before anything is created', () => {
+  async function postAgent(body: unknown): Promise<{ status: number; body: any }> {
+    const req = new EventEmitter() as unknown as RouteContext['req']
+    ;(req as unknown as { headers: Record<string, string> }).headers = {}
+    const out: { status: number; body: any } = { status: 0, body: null }
+    const res = {
+      writeHead(status: number) { out.status = status; return res },
+      end(chunk?: string) { if (chunk) out.body = JSON.parse(chunk) },
+      setHeader() {},
+    }
+    const url = new URL('http://localhost:3420/api/agents')
+    process.nextTick(() => {
+      ;(req as unknown as EventEmitter).emit('data', Buffer.from(JSON.stringify(body)))
+      ;(req as unknown as EventEmitter).emit('end')
+    })
+    await tryHandleAgents({ req, res, path: url.pathname, method: 'POST', url, auth: { kind: 'token' } } as unknown as RouteContext, join(SANDBOX, 'web'))
+    return { status: out.status || 200, body: out.body }
+  }
+
+  it('an object customProvider is a 400 and no agent dir appears', async () => {
+    seedProviders([VALID])
+    const r = await postAgent({ name: 'newone', description: 'x', model: 'some-model', customProvider: { id: 'p1' } })
+    expect(r.status).toBe(400)
+    expect(existsSync(join(SANDBOX, 'agents', 'newone'))).toBe(false)
+  })
+})
+
 describe('agent-worker: a custom-endpoint worker carries no fleet OAuth token', () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../web/agent-worker.ts'), 'utf-8')
 

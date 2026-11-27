@@ -439,6 +439,12 @@ interface AgentSummary {
    *  drives the dashboard "reauth needed" badge + one-click /login button. */
   needsReauth: boolean
   reauthReason?: string
+  /** The custom provider id the agent is set to when that provider no longer exists (the agent will not start),
+   *  else null -- drives the warning on the agent card. */
+  missingCustomProvider: string | null
+  /** A model saved as the picker value ("custom:<id>") with no customProvider beside it: no model a provider knows,
+   *  and the provider is on no record (the new-agent wizard saved it so before it sent the two apart), else null. */
+  brokenCustomModel: string | null
 }
 
 interface AgentDetail extends AgentSummary {
@@ -527,6 +533,8 @@ function getAgentSummary(name: string): AgentSummary {
     contextTokens: running ? readContextTokensFromProjectDir(dir, resolveAgentConfigDir(name).configDir ?? undefined) : null,
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
+    missingCustomProvider: (() => { const id = readAgentCustomProvider(name); return id && !loadCustomProvider(id) ? id : null })(),
+    brokenCustomModel: typeof agentModelConfig.model === 'string' && agentModelConfig.model.startsWith('custom:') && !readAgentCustomProvider(name) ? agentModelConfig.model : null,
   }
 }
 
@@ -884,12 +892,22 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
+    // A custom provider is stored apart from the model id, as the editor's PUT does. The wizard used to send its
+    // picker value ("custom:<id>") as the model, so the agent ran that string as a model and the provider was on no
+    // record: its delete named no agent, and the agent could not start.
+    const customProvider = typeof data.customProvider === 'string' && data.customProvider.trim() ? data.customProvider.trim() : null
     const rawName = typeof data.name === 'string' ? data.name.trim() : ''
     const name = sanitizeAgentName(rawName)
     const model = resolveModelId(rawModel || DEFAULT_MODEL)
     const profileId = (rawProfile || 'default').trim() || 'default'
 
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
+    // Checked before anything is created: an agent on a missing provider would not start. A non-string
+    // customProvider is refused too (as in the PUT), not silently dropped into a provider-less "custom:" agent.
+    if (data.customProvider !== undefined && data.customProvider !== null && data.customProvider !== '' && !customProvider) {
+      json(res, { error: 'customProvider must be null or the id of an existing custom provider (Settings > Providers)' }, 400); return true
+    }
+    if (customProvider && !loadCustomProvider(customProvider)) { json(res, { error: `Unknown custom provider: ${customProvider}` }, 400); return true }
     const cliGate = await refuseIfCliCannotLaunch(model)
     if (cliGate) { json(res, cliGate, 422); return true }
     if (!description) { json(res, { error: 'Description is required' }, 400); return true }
@@ -897,6 +915,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
     scaffoldAgentDir(name)
     writeAgentModel(name, model)
+    if (customProvider) writeAgentCustomProvider(name, customProvider)
     writeAgentSecurityProfile(name, profileId)
     writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
     if (rawName && rawName !== name) writeAgentDisplayName(name, rawName)
@@ -2165,14 +2184,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       return true
     }
 
-    // customProvider: null/'' clears it; otherwise it must name a provider that
-    // exists (and still validates) in store/custom-providers.json. Checked
-    // before the first write, so a refused body writes nothing; a non-string
-    // would otherwise reach writeAgentCustomProvider's .trim() as a 500 after
-    // the earlier fields were already written.
+    // customProvider, as in the POST and before the first write (a refused body writes nothing): null/''
+    // clears it; otherwise it must name a provider that exists (and still validates) in
+    // store/custom-providers.json, since an agent set to a missing one would not start. A non-string is
+    // refused too: it would otherwise reach writeAgentCustomProvider's .trim() as a 500 after the earlier
+    // fields were already written.
     if (data.customProvider !== undefined && data.customProvider !== null && data.customProvider !== '') {
-      if (typeof data.customProvider !== 'string' || !loadCustomProvider(data.customProvider.trim())) {
+      if (typeof data.customProvider !== 'string') {
         json(res, { error: 'customProvider must be null or the id of an existing custom provider (Settings > Providers)' }, 400)
+        return true
+      }
+      if (!loadCustomProvider(data.customProvider.trim())) {
+        json(res, { error: `Unknown custom provider: ${data.customProvider.trim()}` }, 400)
         return true
       }
     }
