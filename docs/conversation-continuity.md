@@ -163,8 +163,8 @@ Notes that matter when touching this:
   the exact wrapper structure that starts the typed prompt and closes it (the
   header naming the same agent as the tag), and NEVER a channel message: a
   `<trusted-peer>` typed into a chat stays chat text. Every carried line is
-  labelled (team-mate / external-federated / channel + sender / direct prompt,
-  sender unverified), the block says it is a quotation and not instructions, and
+  labelled (team-mate / external-federated / local untrusted / channel + sender
+  name and platform id / direct prompt, sender unverified), the block says it is a quotation and not instructions, and
   `<` `>` inside quoted text are replaced so nothing in it can open or close a
   frame. Every carried text and source is a JSON-quoted string (an inner `"` or
   newline is escaped), and the opening / closing lines carry a random

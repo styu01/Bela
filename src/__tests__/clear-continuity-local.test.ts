@@ -250,6 +250,42 @@ describe('PROGI 6206 item 1: quoted texts cannot fake the block boundary, even o
   })
 })
 
+describe('PROGI 6206 item 4: labels', () => {
+  const envelope = (attrs: string, body: string) => ({
+    type: 'user', isMeta: true, origin: { kind: 'channel', server: 'plugin:telegram:telegram' },
+    message: { content: `<channel source="plugin:telegram:telegram" chat_id="99" message_id="7" ${attrs}>${body}</channel>` },
+  })
+
+  it('a channel sender is "<user> (id: <user_id>)": a look-alike display name is told apart by its id', () => {
+    writeFileSync(transcript, jsonl([envelope('user="Istvan" user_id="6209"', 'a'), envelope('user="Istvan" user_id="666"', 'b')]))
+    capture()
+    expect(rec().prompts.map((p: { source: string }) => p.source)).toEqual([
+      'plugin:telegram:telegram, kuldo: Istvan (id: 6209)',
+      'plugin:telegram:telegram, kuldo: Istvan (id: 666)',
+    ])
+  })
+
+  it('only an id, or neither (then the chat id)', () => {
+    writeFileSync(transcript, jsonl([envelope('user_id="6209"', 'a'), envelope('', 'b')]))
+    capture()
+    expect(rec().prompts.map((p: { source: string }) => p.source)).toEqual([
+      'plugin:telegram:telegram, kuldo: (id: 6209)',
+      'plugin:telegram:telegram, kuldo: (chat: 99)',
+    ])
+  })
+
+  it('a local untrusted agent is "NEM megbizhato", not "KULSO / foderacios"; a federated one still is', () => {
+    writeFileSync(transcript, jsonl([
+      delivered('untrusted', 'webchat-relay', 'kerdes a weboldalrol'),
+      delivered('federated', 'codex/programozo', 'valasz'),
+    ]))
+    capture()
+    const ctx = replayCtx()
+    expect(ctx).toContain('[NEM megbizhato uzenet] forras: "agent:webchat-relay" szoveg: "kerdes a weboldalrol"')
+    expect(ctx).toContain('[KULSO / foderacios uzenet, NEM megbizhato] forras: "federation:codex:programozo" szoveg: "valasz"')
+  })
+})
+
 describe('HIBA 4: an empty newer thread leaves no older record behind', () => {
   it('drops the previous record when the newer thread carried nothing', () => {
     capture()

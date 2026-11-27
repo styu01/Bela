@@ -179,7 +179,16 @@ def _channel(text, fallback_source):
     m = _CHANNEL_RX.match(text)
     if m:
         attrs = dict(_ATTR_RX.findall(m.group(1)))
-        who = attrs.get("user") or attrs.get("username") or attrs.get("user_id") or attrs.get("chat_id") or "?"
+        # The display name is chosen by the sender; the id is the platform's (PROGI review 6206, item 4):
+        # both are carried, "kuldo: <user> (id: <user_id>)", so a look-alike name is told apart by its id.
+        name = attrs.get("user") or attrs.get("username") or ""
+        uid = attrs.get("user_id") or ""
+        if name and uid:
+            who = "%s (id: %s)" % (name, uid)
+        elif name or uid:
+            who = name or "(id: %s)" % uid
+        else:
+            who = "(chat: %s)" % attrs["chat_id"] if attrs.get("chat_id") else "?"
         return "channel", "%s, kuldo: %s" % (attrs.get("source", "csatorna"), who), m.group(2).strip()
     return "channel", fallback_source, text
 
@@ -349,7 +358,12 @@ def _item_line(p):
     if not isinstance(p, dict):  # malformed or hand-edited record: still quoted, never trusted
         p = {"kind": "prompt", "source": "", "text": str(p)}
     kind = p.get("kind") if p.get("kind") in _KIND_LABEL else "prompt"
-    line = "  - [%s]" % _KIND_LABEL[kind]
+    label = _KIND_LABEL[kind]
+    if kind == "untrusted" and not str(p.get("source") or "").startswith("federation:"):
+        # A local agent outside the team (agent:system, agent:webchat-relay) is untrusted, but not
+        # external / federated (PROGI review 6206, item 4).
+        label = "NEM megbizhato uzenet"
+    line = "  - [%s]" % label
     if p.get("source"):
         line += " forras: %s" % _quote(p.get("source"))
     return line + " szoveg: %s" % _quote(p.get("text") or "")
