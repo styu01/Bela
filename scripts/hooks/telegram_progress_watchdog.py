@@ -239,7 +239,9 @@ def tmux_session_alive(session):
     if forced in ("0", "1"):
         return forced == "1"
     try:
-        return subprocess.run(["tmux", "has-session", "-t", session],
+        # Exact target (TMUXEXACT1771, PROGI review 6212): a bare -t NAME also matches a session whose name
+        # merely STARTS with NAME, so a dead agent-X with a live agent-X2 read as alive.
+        return subprocess.run(["tmux", "has-session", "-t", "=%s:" % session],
                               capture_output=True, timeout=5).returncode == 0
     except Exception:
         return True  # if tmux probe fails, assume alive (don't false-alarm)
