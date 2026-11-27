@@ -1,5 +1,5 @@
 import { spawn, execFile } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync } from 'node:fs'
 import { join, dirname, relative, isAbsolute, resolve, sep } from 'node:path'
 import { loadavg } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, WEB_PORT } from '../config.js'
@@ -300,6 +300,30 @@ export async function detectGitAnchor(root: string = PROJECT_ROOT, git: GitIo = 
   const top = await git.run(root, ['rev-parse', '--show-toplevel'])
   if (top) return canonical(top)
   if (exists(join(root, '.git'))) return canonical(root)
+  return null
+}
+
+// PROGI 6346 (G), BELA 6345: the anchor is a PATH taken at boot. Replacing the checkout under it (moved away and
+// another clone put there, a symlinked root re-pointed) left every later verdict judged against the NEW tree's
+// HEAD, which whoever replaced it controls, and the check said nothing. The anchor directory's identity
+// (device + inode) is taken at boot too; each pass compares it, and that PROJECT_ROOT still resolves to the
+// anchor. A change makes every gate 'unverifiable' on the one per-checkout key (BELA 6327), until a restart
+// takes the new tree as the anchor (an intended move is told once and cleared by the restart).
+export interface AnchorIdentity { dev: number; ino: number }
+export function anchorIdentity(path: string, stat: (p: string) => { dev: number; ino: number } = statSync): AnchorIdentity | null {
+  try { const st = stat(path); return { dev: st.dev, ino: st.ino } } catch { return null }
+}
+/** Why the boot anchor can no longer be trusted this pass, or null. Pure over its inputs. */
+export function anchorChangedReason(anchor: string, boot: AnchorIdentity, now: AnchorIdentity | null, rootReal: string): string | null {
+  // (The install root is the checkout's top here; one below the top of a larger checkout stays inside it.)
+  const rel = relative(anchor, rootReal)
+  if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
+    return `a telepites utja (PROJECT_ROOT) mar nem az inditaskori checkoutra mutat (${anchor}), hanem ide: ${rootReal}; a kapuk az inditaskori fahoz nem merhetok. Nezd meg: ls -la ${anchor}; ha szandekos volt, inditsd ujra a dashboardot`
+  }
+  if (!now) return `az inditaskori checkout konyvtara (${anchor}) nem erheto el (stat hiba); a kapuk nem merhetok. Nezd meg: ls -la ${anchor}`
+  if (now.dev !== boot.dev || now.ino !== boot.ino) {
+    return `az inditaskori checkout konyvtara (${anchor}) kicserelodott (mas eszkoz / inode, mint inditaskor): az uj fa HEAD-je barmihez igazithato. Nezd meg: ls -lid ${anchor}; ha szandekos volt (athelyezes, uj klon), inditsd ujra a dashboardot`
+  }
   return null
 }
 
@@ -668,6 +692,8 @@ export function reconcileGateEscalations(
 let running = false
 // BELA 6319 (B): set once by startGateSelfTest (dashboard start); undefined: not started (tests).
 let bootGitAnchor: Promise<string | null> | undefined
+// PROGI 6346 (G): the boot anchor directory's identity, taken with it.
+let bootAnchorIdentity: Promise<AnchorIdentity | null> | undefined
 
 /** One self-test pass. Exported for tests (targets, reader, alerter / sender and the re-run wait injectable). */
 export async function runGateSelfTest(opts: {
@@ -687,6 +713,12 @@ export async function runGateSelfTest(opts: {
   gitAnchor?: string | null
   /** BELA 6355: the settings files the integrity scan reads (default: settingsIntegrityFiles()). */
   settingsFiles?: SettingsFile[]
+  /** PROGI 6346 (G): the anchor directory's identity at boot (default: the one startGateSelfTest took; none
+   *  when an anchor is injected without it: no comparison). */
+  anchorIdentity?: AnchorIdentity | null
+  /** PROGI 6346 (G): the install root and the stat used for the comparison (injectable for tests). */
+  projectRoot?: string
+  stat?: (p: string) => { dev: number; ino: number }
 } = {}): Promise<GateRunResult[]> {
   if (running) return []
   running = true
@@ -699,7 +731,16 @@ export async function runGateSelfTest(opts: {
     // The boot detection is asynchronous now: a pass started before it settled waits for it.
     const anchor = opts.gitAnchor !== undefined ? opts.gitAnchor : ((await bootGitAnchor) ?? null)
     const verdicts = new Map<string, Promise<IntegrityVerdict | null>>()
+    // PROGI 6346 (G): the anchor's identity against boot, once per pass (and again with the re-run).
+    const bootId = opts.anchorIdentity !== undefined ? opts.anchorIdentity
+      : opts.gitAnchor !== undefined ? null : ((await bootAnchorIdentity) ?? null)
+    const anchorChange = (): string | null => (anchor != null && bootId != null
+      ? anchorChangedReason(anchor, bootId, anchorIdentity(anchor, opts.stat), canonical(opts.projectRoot ?? PROJECT_ROOT))
+      : null)
+    let changed = anchorChange()
+    if (changed) logger.error({ anchor, reason: changed }, 'gate self-test: the install checkout is no longer the one taken at boot')
     const integrity = git == null ? undefined : (script: string) => {
+      if (changed) return { ok: false, unverifiable: true, detail: changed }
       let v = verdicts.get(script)
       if (!v) { v = checkGateIntegrity(script, git, undefined, opts.exists, anchor); verdicts.set(script, v) }
       return v
@@ -714,6 +755,7 @@ export async function runGateSelfTest(opts: {
       logger.warn({ count: timed.length, load: loadavg() }, 'gate self-test: timeout-like or integrity gate failures, one re-run in 60 s before alerting')
       await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? GATE_SELF_TEST_RETRY_DELAY_MS))
       verdicts.clear()
+      changed = anchorChange()
       for (const i of timed) results[i] = await runGateCommand(results[i].entry, opts.port, integrity)
     }
     const d = diffGateStates(lastStates, results)
@@ -850,10 +892,12 @@ export function resetGateSelfTestState(): void {
   running = false
   prunedKeptAlerted.clear()
   bootGitAnchor = undefined
+  bootAnchorIdentity = undefined
 }
 
 export function startGateSelfTest(): NodeJS.Timeout {
   bootGitAnchor = detectGitAnchor().catch(() => null)
+  bootAnchorIdentity = bootGitAnchor.then((a) => (a ? anchorIdentity(a) : null))
   void bootGitAnchor.then((anchor) => logger.info({ anchor }, 'gate self-test: install checkout for the integrity check (null: not a git clone, skipped)'))
   setTimeout(() => { void runGateSelfTest().catch((err) => logger.warn({ err }, 'gate self-test failed')) }, GATE_SELF_TEST_INITIAL_DELAY_MS).unref()
   return setInterval(() => { void runGateSelfTest().catch((err) => logger.warn({ err }, 'gate self-test failed')) }, GATE_SELF_TEST_INTERVAL_MS)
