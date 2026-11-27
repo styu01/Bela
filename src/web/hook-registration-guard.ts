@@ -38,6 +38,9 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'channel-inbox-drain.py',
   'ledger-capture.py',
   'tool-log-capture.py',
+  // The /clear continuity pair: SessionEnd capture + SessionStart replay (upstream 7a47b24a).
+  'clear-capture.py',
+  'clear-replay.py',
 ]
 
 // Path fragment that marks a checkout as an agent worktree. Kept
