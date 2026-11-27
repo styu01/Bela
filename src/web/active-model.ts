@@ -172,15 +172,27 @@ export function readLastTurnActivityMs(workingDir: string, configDir?: string): 
     if (!existsSync(dir)) return null
     const newest = readdirSync(dir)
       .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs, size: statSync(join(dir, f)).size }))
+      .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime)[0]
     if (!newest) return null
-    const fd = openSync(join(dir, newest.f), 'r')
+    return lastTurnActivityFromFile(join(dir, newest.f))
+  } catch { /* fall through */ }
+  return null
+}
+
+// The same read for ONE known transcript (BELA msg 6197 item 4: the main agent's proven own file, not
+// the newest file of the shared project dir). Epoch ms of the last turn line in the tail; 0 when the
+// whole file was read and holds no turn (a fresh session: quiet, not unknown); null when unreadable or
+// when a file larger than the window holds no turn in its tail.
+export function lastTurnActivityFromFile(path: string): number | null {
+  try {
+    const size = statSync(path).size
+    const fd = openSync(path, 'r')
     let text: string
     try {
-      const len = Math.min(newest.size, TURN_TAIL_BYTES)
+      const len = Math.min(size, TURN_TAIL_BYTES)
       const buf = Buffer.alloc(len)
-      readSync(fd, buf, 0, len, newest.size - len)
+      readSync(fd, buf, 0, len, size - len)
       text = buf.toString('utf-8')
     } finally { closeSync(fd) }
     const lines = text.split('\n')
@@ -201,7 +213,7 @@ export function readLastTurnActivityMs(workingDir: string, configDir?: string): 
     // fall back to the file's mtime, which every hook-blocked command bumps,
     // so commands typed in a row kept each other "turn-active" (measured on
     // the test bot, 2026-09-23). A file larger than the window stays null.
-    if (newest.size <= TURN_TAIL_BYTES) return 0
+    if (size <= TURN_TAIL_BYTES) return 0
   } catch { /* fall through */ }
   return null
 }

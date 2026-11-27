@@ -15,7 +15,7 @@ import {
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation } from '../pane-state.js'
-import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readLastTurnActivityMs, readContextTokensFromFile, readActiveModelFromFile } from './active-model.js'
+import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readLastTurnActivityMs, readContextTokensFromFile, readActiveModelFromFile, lastTurnActivityFromFile } from './active-model.js'
 import { mainSessionTranscriptMtime, readOwnSessionTranscript, tmuxPanePid, provenMainSession, type OwnTranscript } from './main-session-transcript.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import {
@@ -366,6 +366,26 @@ export function readMainGuardFacts(deps: GuardReadDeps = LIVE_GUARD_READ_DEPS): 
   return { tokens: deps.tokensFromDir(PROJECT_ROOT, configDirFor(MAIN_AGENT_ID)), model: deps.modelFromDir(PROJECT_ROOT), source: 'dir' }
 }
 
+// BELA msg 6197 item 4 (PROGI 6196): the hard/act restart's "is a turn still running" check reads the
+// MAIN agent's own transcript too. From the shared dir's newest file, a foreign session (the owner's
+// CLI, an sdk-cli run) that wrote within RESTART_TURN_QUIET_MS held BELA's restart back (a delay, not a
+// miss -- the 100% net does not look at it). Proven own file -> it; not provable -> the old read;
+// sub-agents unchanged.
+export function guardLastTurnActivityMs(
+  name: string,
+  deps: { ownPath(): string | null; fromFile(p: string): number | null; fromDir(w: string, c?: string): number | null } = {
+    ownPath: () => LIVE_GUARD_READ_DEPS.ownPath(),
+    fromFile: (p) => lastTurnActivityFromFile(p),
+    fromDir: (w, c) => readLastTurnActivityMs(w, c),
+  },
+): number | null {
+  if (name === MAIN_AGENT_ID && workingDirFor(name) === PROJECT_ROOT) {
+    const own = deps.ownPath()
+    if (own) return deps.fromFile(own)
+  }
+  return deps.fromDir(workingDirFor(name), configDirFor(name))
+}
+
 /** Raw observed context size (tokens) for the idle-flush tier's absolute threshold. */
 function measureContextTokens(name: string): number | null {
   const tokens = name === MAIN_AGENT_ID && workingDirFor(name) === PROJECT_ROOT
@@ -565,7 +585,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   // transcript (null) keeps the decision: a wedged pane must still get the
   // restart that is its only way out. One tail read per restart decision.
   if (decision.action === 'restart' && !inputs.paneBusy) {
-    const turnAt = readLastTurnActivityMs(workingDirFor(name), configDirFor(name))
+    const turnAt = guardLastTurnActivityMs(name)
     if (turnAt !== null && nowMs - turnAt < RESTART_TURN_QUIET_MS) {
       const held = decideGuard(state, { ...inputs, paneBusy: true, paneIdle: false }, cfg)
       if (held.action !== 'restart') {
