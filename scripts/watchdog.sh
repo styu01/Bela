@@ -84,19 +84,57 @@ fi
 
 # Replays delivered-but-not-completed messages from the last 2 hours into
 # a freshly restarted agent session. Called after a confirmed restart.
+#
+# REPLAYOFF1127 (local; BELA msg 6167): the replay is OFF unless
+# MARVEEN_WATCHDOG_REPLAY=1. Measured 2026-11-27:
+#   - it has been dead since 2026-08-18: it asked /api/messages?to=..., `to` is
+#     not a known parameter there (400), curl without -f still exits 0, and the
+#     error JSON travelled on as data; logs/watchdog.log holds 10 "restarted OK"
+#     lines since 2026-06-29 and not one "replaying" line;
+#   - fixing only the parameter (upstream cca1e519) would REVIVE it, and here
+#     'delivered' does not mean "not processed": an agent marks nothing as done
+#     on most rows (4221 delivered vs 1930 done in agent_messages). One restart
+#     at the measuring moment would have replayed 12 already-handled messages
+#     into kisprogi, 10 into progi and 5 into bela.
+# Telling "delivered but never seen" from "seen" needs the server-side seen
+# state of upstream d4edb634 (message-seen-sweep, resume-queue-drain), which
+# this install does not have; that commit comes with that infrastructure, in a
+# later wave. Until then the restart path relies on the context-guard handoff /
+# TASK-FOLYTATAS reload, and this function only logs that it replayed nothing.
+# The code below the switch is kept CORRECT (agent= parameter, HTTP status,
+# list check, trailing ';' protection) so that turning it on later does not
+# resurrect the old bugs -- but turning it on without the seen state brings the
+# duplicate replays back.
 replay_unfinished_messages() {
   local AGENT_ID="$1"
   local SESSION_NAME="$2"
 
+  if [ "${MARVEEN_WATCHDOG_REPLAY:-0}" != "1" ]; then
+    echo "[watchdog] $AGENT_ID: ujrainditas utani replay kikapcsolva (nincs seen-allapot), 0 uzenet visszajatszva"
+    return
+  fi
+
   [ -z "$TOKEN" ] && return
 
-  local NOW CUTOFF RESPONSE TMPDATA
+  local NOW CUTOFF RESPONSE TMPDATA HTTP_CODE
   NOW=$(date +%s)
   CUTOFF=$(( NOW - 7200 ))
 
+  # `agent`, not `to`: /api/messages knows agent, status, limit, before and
+  # answers anything else with a 400. The HTTP status is checked explicitly:
+  # curl without -f exits 0 on a 400, so `|| return` alone lets an error body
+  # through as data. (Comments stay ABOVE the command: a comment between
+  # backslash-continued lines swallows the rest of the line.)
   RESPONSE=$(curl -s -m 5 \
     -H "Authorization: Bearer $TOKEN" \
-    "http://localhost:${WEB_PORT}/api/messages?to=${AGENT_ID}&limit=200" 2>/dev/null) || return
+    -w '\n%{http_code}' \
+    "http://localhost:${WEB_PORT}/api/messages?agent=${AGENT_ID}&limit=200" 2>/dev/null) || return
+  HTTP_CODE=$(printf '%s' "$RESPONSE" | tail -n1)
+  RESPONSE=$(printf '%s' "$RESPONSE" | sed '$d')
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo "[watchdog] $AGENT_ID: /api/messages HTTP $HTTP_CODE, replay kihagyva"
+    return
+  fi
 
   [ -z "$RESPONSE" ] || [ "$RESPONSE" = "[]" ] && return
 
@@ -104,17 +142,27 @@ replay_unfinished_messages() {
   echo "$RESPONSE" > "$TMPDATA"
 
   python3 - "$SESSION_NAME" "$AGENT_ID" "$CUTOFF" "$TMPDATA" <<'PYEOF' 2>/dev/null
-import json, sys, subprocess, time
+import json, os, sys, subprocess, time
 
 session_name, agent_id, cutoff_str, data_file = sys.argv[1:5]
 cutoff = int(cutoff_str)
+# Test seams (scripts/__tests__/watchdog-replay.test.sh): the tmux binary and the boot wait.
+tmux_bin = os.environ.get("WATCHDOG_TMUX_BIN") or "tmux"
+boot_wait = float(os.environ.get("WATCHDOG_REPLAY_BOOT_SEC") or 15)
 
 with open(data_file) as f:
     msgs = json.load(f)
 
+# A non-list body (an error object) must never be iterated: iterating a dict
+# walks its KEYS, which is how the 400 body used to reach this loop.
+if not isinstance(msgs, list):
+    print(f"[watchdog] {agent_id}: /api/messages body is not a list, replay kihagyva", flush=True)
+    sys.exit(0)
+
 pending = [
     m for m in msgs
-    if m.get('to_agent') == agent_id
+    if isinstance(m, dict)
+       and m.get('to_agent') == agent_id
        and m.get('status') == 'delivered'
        and m.get('completed_at') is None
        and m.get('created_at', 0) >= cutoff
@@ -124,7 +172,7 @@ if not pending:
     sys.exit(0)
 
 print(f"[watchdog] {agent_id}: replaying {len(pending)} unfinished message(s)", flush=True)
-time.sleep(15)  # let claude boot up and reach the prompt
+time.sleep(boot_wait)  # let claude boot up and reach the prompt
 
 for m in pending:
     content = m.get('content', '')
@@ -132,16 +180,31 @@ for m in pending:
     chunk_size = 990
     for i in range(0, len(full_msg), chunk_size):
         chunk = full_msg[i:i + chunk_size]
-        subprocess.run(['tmux', 'send-keys', '-t', session_name, '-l', chunk],
+        # tmux reads a trailing ';' of a send-keys argument as its own command
+        # separator and drops it, even with -l (upstream a067ed2d; PROGI review
+        # msg 6026 named this caller). Same rule as protectTrailingSemicolon()
+        # in src/web/tmux-keys.ts: escape only the LAST character.
+        if chunk.endswith(';'):
+            chunk = chunk[:-1] + '\\;'
+        subprocess.run([tmux_bin, 'send-keys', '-t', session_name, '-l', chunk],
                        timeout=5, capture_output=True)
-    subprocess.run(['tmux', 'send-keys', '-t', session_name, 'Enter'],
+    subprocess.run([tmux_bin, 'send-keys', '-t', session_name, 'Enter'],
                    timeout=5, capture_output=True)
-    time.sleep(2)
+    time.sleep(min(2, boot_wait))
 
 PYEOF
 
   rm -f "$TMPDATA"
 }
+
+# Self-test hook (like --resolve-provider above): run ONLY the restart replay for
+# one agent/session and print what it would log, without the dashboard check or
+# any restart. Lets scripts/__tests__/watchdog-replay.test.sh pin REPLAYOFF1127
+# against a stub dashboard and a fake tmux.
+if [ "${1:-}" = "--replay-only" ]; then
+  replay_unfinished_messages "${2:-}" "${3:-}"
+  exit 0
+fi
 
 # ── Dashboard ──────────────────────────────────────────────────────────────
 # HTTP ping, not a process-name grep: node always runs via its full NVM path
