@@ -244,6 +244,28 @@ export function ownerSessionUser(auth: RouteContext['auth'], req: http.IncomingM
   return null
 }
 
+/** APIAGENTWRITE1104 (upstream 7851da77, ported; BELA 6404): may this request make an owner-only change to an
+ *  agent (its instructions, MCP servers, provider, login, memory boundary, security profile, remote host, an
+ *  import over it) or to the custom providers? Yes for the owner: a dashboard login session, or the shared token
+ *  WITH a valid login session cookie beside it (ownerSessionUser). The bare shared token passes only before the
+ *  first dashboard user exists (disabled users count, so disabling every user does not reopen the token): until
+ *  then there is no owner login to ask for, and the install keeps working as it did (upstream's first-run
+ *  branch). Never a per-agent token, a device key (this fork's keys have no "full" scope, so upstream's
+ *  device-key-plus-cookie branch is not taken over), a federation peer or a public-listener caller without a
+ *  session. Every sub-agent can read the shared token, which is why it is not enough once a login exists. */
+export function mayActAsOwner(auth: RouteContext['auth'], req: http.IncomingMessage): boolean {
+  if (auth?.kind === 'session') return true
+  if (ownerSessionUser(auth, req) !== null) return true
+  if (auth?.kind !== 'token' || (auth as { tokenAgent?: unknown }).tokenAgent) return false
+  if (isPublicRequest(req)) return false
+  return countDashboardUsers(true) === 0
+}
+
+export const OWNER_SESSION_REQUIRED = {
+  error: 'This needs the dashboard login (an owner session). The access token can do it only before the first login exists; on the machine itself, npm run dashboard-user is the break-glass.',
+  code: 'owner_session_required',
+}
+
 function totpOwner(auth: RouteContext['auth'], req: http.IncomingMessage, res: http.ServerResponse): ReturnType<typeof getDashboardUser> | null {
   const name = ownerSessionUser(auth, req)
   const user = name ? getDashboardUser(name) : undefined

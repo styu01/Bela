@@ -73,7 +73,7 @@ Ez a fájl nem kerül be a gitbe (`.gitignore`).
 | `GET` | `/api/custom-providers/:id` | Egy provider adatai |
 | `DELETE` | `/api/custom-providers/:id` | Törlés |
 
-Minden végpont Bearer tokenes hitelesítést igényel (`store/.dashboard-token`), és föderált peerek számára nem elérhető.
+Minden végpont hitelesítést igényel, és föderált peerek számára nem elérhető. Az olvasás (`GET`) a megosztott tokennel (`store/.dashboard-token`) is megy; a létrehozás, módosítás és törlés (`POST`, `DELETE`), valamint egy ágens `customProvider` mezőjének írása (`PUT /api/agents/:name`) a tulajdonos dashboard-belépését kéri (böngészős munkamenet, vagy a token mellett érvényes munkamenet-süti). A megosztott tokent minden al-ágens olvashatja, ezért az első dashboard-felhasználó létrejötte után ez már nem elég; addig (első indítás) a token is átmegy, a nyilvános HTTPS-figyelőn át viszont soha.
 
 ---
 

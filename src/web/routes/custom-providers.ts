@@ -9,6 +9,7 @@ import {
   type AuthHeaderType,
 } from '../custom-providers.js'
 import type { RouteContext } from './types.js'
+import { mayActAsOwner, OWNER_SESSION_REQUIRED } from './auth.js'
 import { listAllAgentNames, readAgentCustomProvider } from '../agent-config.js'
 
 // The agents whose agent-config.json names each provider, hidden workers included: an agent whose provider is
@@ -40,6 +41,15 @@ export async function tryHandleCustomProviders(ctx: RouteContext): Promise<boole
   if (path === '/api/custom-providers' && method === 'GET') {
     const users = providerUsers()
     json(res, { providers: listCustomProviders().map((p) => ({ ...p, usedBy: users.get(p.id) ?? [] })) })
+    return true
+  }
+
+  // APIAGENTWRITE1104: a provider's baseUrl is where an agent's whole prompt is sent (the same class as the
+  // OLLAMA_URL setting, #2513), so adding, replacing or removing one needs the owner, not the shared access token.
+  // Reading the list stays as it was.
+  const writes = (path === '/api/custom-providers' && method === 'POST') || (/^\/api\/custom-providers\/[^/]+$/.test(path) && method === 'DELETE')
+  if (writes && !mayActAsOwner(ctx.auth, req)) {
+    json(res, { ...OWNER_SESSION_REQUIRED, error: 'Adding, changing or removing a custom provider needs the dashboard login (an owner session).' }, 403)
     return true
   }
 

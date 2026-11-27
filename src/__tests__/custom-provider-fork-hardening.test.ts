@@ -53,7 +53,8 @@ async function putAgent(name: string, body: unknown): Promise<{ status: number; 
     ;(req as unknown as EventEmitter).emit('end')
   })
   const handled = await tryHandleAgents(
-    { req, res, path: url.pathname, method: 'PUT', url, auth: { kind: 'token' } } as unknown as RouteContext,
+    // The owner's browser login: customProvider is an owner-only field since the APIAGENTWRITE1104 port.
+    { req, res, path: url.pathname, method: 'PUT', url, auth: { kind: 'session', user: 'owner' } } as unknown as RouteContext,
     join(SANDBOX, 'web'),
   )
   expect(handled).toBe(true)
