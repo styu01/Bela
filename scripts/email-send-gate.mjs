@@ -1369,7 +1369,11 @@ const MANAGE_EMAIL_SEND_OPS = new Set(['send', 'reply', 'replyall', 'forward'])
 // Stated limit: this is a name rule, not an access control. A copied/renamed script or another vault id read through
 // vault.js is not seen; the real control is restricting the vault value route to the main agent (separate task).
 // The bare name is enough: the replacement keeps any directory in front, and the send rules judge the basename.
-const MAILER_SCRIPT_RX = /(?:send-gmail|send_outreach|send_batch_daily)\.py(?![\w.-])/g
+// BELA msg 6415 (PROGI 6414 point 2): scripts/mio-feed-post.py posts PUBLICLY to marveen.io with an API key from the
+// same vault; outward and irreversible like a mail, so it joins this list for the sub-agents before the key exists.
+const MAILER_SCRIPT_RX = /(?:send-gmail|send_outreach|send_batch_daily|mio-feed-post)\.py(?![\w.-])/g
+// The public-post member of that list, for its own deny wording (it is not a mail).
+const PUBLIC_POST_SCRIPT_RX = /mio-feed-post\.py(?![\w.-])/
 // MAILCRED1127 fixup (PROGI msg 6134 (3), BELA msg 6135): this host holds TWO SMTP credentials in the vault -- the
 // Gmail app password and the woowebsite.eu mailbox password ("info@woowebsite.eu jelszo" with an accented o, the
 // default key of send_outreach.py). Both ids are matched in every spelling seen in commands: plain (the prefix up to
@@ -1402,7 +1406,9 @@ function mailIdChar(c) {
 }
 const mailIdSpelling = (id) => [...id].map((c) => (c === ' ' ? MAIL_ID_SPACE : mailIdChar(c))).join(MAIL_ID_GAP)
 // The second id stops at "jelsz": the accented o after it may be written in any way (backslash-u00f3, %C3%B3, \xc3\xb3).
-const MAIL_CREDENTIAL_IDS_RX = new RegExp(['gmail_kiss_i_god_app_pw', 'info@woowebsite.eu jelsz'].map(mailIdSpelling).join('|'), 'i')
+// BELA msg 6415: the marveen.io agent API key mio-feed-post.py reads (MARVEEN_IO_API_KULCS) is on the same list, in
+// every spelling, before it exists in the vault.
+const MAIL_CREDENTIAL_IDS_RX = new RegExp(['gmail_kiss_i_god_app_pw', 'info@woowebsite.eu jelsz', 'MARVEEN_IO_API_KULCS'].map(mailIdSpelling).join('|'), 'i')
 const MAIL_CREDENTIAL_RX = new RegExp(MAIL_CREDENTIAL_IDS_RX.source +
   /|(?:https?:\/\/|localhost|127\.0\.0\.1|\[::1\]|:\d{2,5})[^\s'"`]*\/api\/vault\/|\/api\/vault\/[A-Za-z0-9_%$.@{-]/.source, 'i')
 // 'sed -n 1,40p FILE...' only prints: sed is not a never-exec program for the name layer (its e/w commands run and
@@ -1413,7 +1419,7 @@ const SED_PRINT_RX = /(^|[;&|(\n]|\s)sed\s+-n\s+(['"]?)[\d,$]+p\2((?:[ \t]+[^\s;
 // substitution's OUTPUT may be run as a command (the documented open shell form "a substitution in command
 // position"), and reading a script never needs this shape -- so for these scripts it is refused outright
 // (PROGI msg 6122 probe: the only 2 of 22 forms that still passed). Mirrors nothing: MAILCRED is JS-gate only.
-const MAILER_IN_SUBST_RX = /\$\([^)]*(?:send-gmail|send_outreach|send_batch_daily)\.py|`[^`]*(?:send-gmail|send_outreach|send_batch_daily)\.py/
+const MAILER_IN_SUBST_RX = /\$\([^)]*(?:send-gmail|send_outreach|send_batch_daily|mio-feed-post)\.py|`[^`]*(?:send-gmail|send_outreach|send_batch_daily|mio-feed-post)\.py/
 export function runsMailerScript(cmd) {
   const s = String(cmd ?? '')
   if (!s.match(MAILER_SCRIPT_RX)) return false
@@ -1452,7 +1458,7 @@ export function gateDecision(toolName, toolInput) {
     const cmd = String(toolInput?.command ?? '')
     if (isSendInvocation(cmd)) return { deny: true }
     if (touchesMailCredential(cmd)) return { deny: true, kind: 'mail-credential' }
-    if (runsMailerScript(cmd)) return { deny: true }
+    if (runsMailerScript(cmd)) return PUBLIC_POST_SCRIPT_RX.test(cmd) ? { deny: true, kind: 'public-post' } : { deny: true }
   }
   return { deny: false }
 }
@@ -1473,6 +1479,15 @@ export function buildCredentialMsg(botName) {
     'A levelezo hitelesito adat (vault) es a levelkuldo szkriptek sub-agentbol tiltottak (governance hard-gate). ' +
     `Kimeno levelet csak ${botName} kuld: kuldd neki a tervezett levelet (CIMZETT + TARGY + TELJES SZOVEG) ` +
     'inter-agent uzenetben. Ha a vault-hozzaferes mas, nem levelezo celra kell, azt is neki jelezd.'
+  )
+}
+
+// BELA msg 6415: deny wording when a sub-agent runs the public marveen.io post sender (mio-feed-post.py).
+export function buildPublicPostMsg(botName) {
+  return (
+    'A nyilvanos marveen.io-posztolas (mio-feed-post.py) sub-agentbol tiltott (governance hard-gate). ' +
+    `Kifele posztot csak ${botName} kuld, a tulajdonos jovahagyasaval: kuldd neki a tervezett posztot ` +
+    '(CSATORNA + CIM + TELJES SZOVEG, es a csatolmany utja, ha van) inter-agent uzenetben.'
   )
 }
 
@@ -1566,7 +1581,8 @@ if (isInvokedDirectly()) {
     try { names = readBrandEnv() } catch { /* stock names */ }
     deny(decision.kind === 'draft-required' ? buildDraftOnlyMsg(names.ownerName)
       : decision.kind === 'mail-credential' ? buildCredentialMsg(names.botName)
-        : buildGateMsg(names.botName, names.ownerName))
+        : decision.kind === 'public-post' ? buildPublicPostMsg(names.botName)
+          : buildGateMsg(names.botName, names.ownerName))
   }
   allow()
 }

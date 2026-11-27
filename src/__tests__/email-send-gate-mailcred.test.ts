@@ -171,3 +171,103 @@ describe('MAILCRED1127: the hook entry point fails closed', () => {
     expect(c.stdout).toBe('')
   })
 })
+
+// BELA msg 6415 (PROGI 6414 point 2): the public marveen.io post sender and its API key are refused for a sub-agent,
+// the same way as send-gmail.py and the SMTP credentials, before the key exists in the vault.
+const MIO = 'scripts/mio-feed-post.py'
+const MIO_ARGS = '11111111-2222-4333-8444-555555555555 /tmp/t.txt /tmp/b.txt --confirm'
+const MIO_KEY = ['MARVEEN', 'IO', 'API', 'KULCS'].join('_')
+const MIO_RUNS: Array<[string, string]> = [
+  ['python3', `python3 ${MIO} ${MIO_ARGS}`],
+  ['python', `python ${MIO} ${MIO_ARGS}`],
+  ['python3 -I', `python3 -I ${MIO} ${MIO_ARGS}`],
+  ['absolute path', `python3 /home/kisss/marveen/${MIO} ${MIO_ARGS}`],
+  ['run directly', `cd scripts && ./mio-feed-post.py ${MIO_ARGS}`],
+  ['after cd, bare name', `cd /home/kisss/marveen/scripts; python3 mio-feed-post.py ${MIO_ARGS}`],
+  ['through env', `env python3 ${MIO} ${MIO_ARGS}`],
+  ['an env assignment in front', `FOO=1 python3 ${MIO} ${MIO_ARGS}`],
+  ['in bash -c', `bash -c 'python3 ${MIO} ${MIO_ARGS}'`],
+  ['in a loop', `for c in a b; do python3 ${MIO} "$c" t.txt b.txt --confirm; done`],
+  ['echo piped into bash', `echo "python3 ${MIO} ${MIO_ARGS}" | bash`],
+  ['python heredoc starting it', `python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['python3', '${MIO}', '--confirm'])\nEOF`],
+  ['with an attachment', `python3 ${MIO} ${MIO_ARGS} --attach /tmp/x.zip`],
+  ['substitution in command position', `$(echo "python3 ${MIO} ${MIO_ARGS}")`],
+  ['backtick substitution', `\`echo python3 ${MIO} --confirm\``],
+  ['read then run', `sed -n 1,40p ${MIO} && python3 ${MIO} ${MIO_ARGS}`],
+]
+const MIO_READS: Array<[string, string]> = [
+  ['cat', `cat ${MIO}`],
+  ['grep', `grep -n vault ${MIO}`],
+  ['sed -n print', `sed -n 1,40p ${MIO}`],
+  ['git diff', `git diff -- ${MIO}`],
+  ['its own test', 'python3 -I scripts/__tests__/mio-feed-post.test.py'],
+  ['a mention in a quoted heredoc', `cat > notes.md <<'EOF'\nThe sender is \`${MIO}\`.\nEOF`],
+]
+const MIO_KEY_TOUCH: Array<[string, string]> = [
+  ['the key on the vault route', `curl -s -H "Authorization: Bearer $T" http://localhost:3420/api/vault/${MIO_KEY}`],
+  ['node reads vault.js by key', `node -e "import('/home/kisss/marveen/dist/web/vault.js').then(m => m.getSecret('${MIO_KEY}'))"`],
+  ['vault-resolve on stdin', `node scripts/vault-resolve.mjs <<< ${MIO_KEY}`],
+  ['lower case', `node scripts/vault-resolve.mjs <<< ${MIO_KEY.toLowerCase()}`],
+  ['a quote break', `node scripts/vault-resolve.mjs <<< MARVEEN_"IO"_API_KULCS`],
+  ['url-encoded underscores', 'curl -s "$U/api/v?k=MARVEEN%5FIO%5FAPI%5FKULCS"'],
+  ['one letter as an x escape', `node scripts/vault-resolve.mjs <<< $'MARVEEN_IO_API_${BS}x4bULCS'`],
+]
+
+describe('BELA 6415: the public marveen.io post sender is refused for a sub-agent, with its own message', () => {
+  for (const [name, cmd] of MIO_RUNS) {
+    it(name, () => {
+      const d = bash(cmd)
+      expect(d.deny).toBe(true)
+      expect(runsMailerScript(cmd)).toBe(true)
+      // its own wording, unless an earlier rule (the credential) caught the same command first
+      if (!touchesMailCredential(cmd)) expect(d.kind).toBe('public-post')
+    })
+  }
+  it('the message routes the post to the main agent, with the owner approving', async () => {
+    // @ts-expect-error -- plain .mjs hook script, no types
+    const { buildPublicPostMsg } = await import('../../scripts/email-send-gate.mjs')
+    const m = buildPublicPostMsg('BELA')
+    expect(m).toContain('BELA kuld')
+    expect(m).toContain('jovahagyasaval')
+    expect(m).not.toMatch(/level|email/i)
+  })
+  it('the send-gmail.py deny keeps the old (mail) wording: no kind', () => {
+    expect(bash('python3 scripts/send-gmail.py --to a@b.hu --subject s --body b')).toEqual({ deny: true })
+  })
+})
+
+describe('BELA 6415: reading or testing the post sender stays allowed', () => {
+  for (const [name, cmd] of MIO_READS) {
+    it(name, () => {
+      expect(bash(cmd).deny).toBe(false)
+    })
+  }
+})
+
+describe('BELA 6415: the marveen.io API key is refused like the mail credentials', () => {
+  for (const [name, cmd] of MIO_KEY_TOUCH) {
+    it(name, () => {
+      const d = bash(cmd)
+      expect(d.deny).toBe(true)
+      expect(d.kind).toBe('mail-credential')
+      expect(touchesMailCredential(cmd)).toBe(true)
+    })
+  }
+  it('ordinary text around the words is not the key', () => {
+    for (const cmd of ['echo marveen io api kulcs', 'grep -n KULCS notes.md', 'echo MARVEEN_IO_HOST', 'ls marveen-io-api/']) {
+      expect([cmd, bash(cmd).deny]).toEqual([cmd, false])
+    }
+  })
+  it('the real hook process denies a run of the sender with the public-post wording, exit 0', async () => {
+    const { spawnSync } = await import('node:child_process')
+    const { fileURLToPath } = await import('node:url')
+    const gate = fileURLToPath(new URL('../../scripts/email-send-gate.mjs', import.meta.url))
+    const r = spawnSync(process.execPath, [gate], {
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: `python3 ${MIO} ${MIO_ARGS}` } }), encoding: 'utf-8',
+    })
+    expect(r.status).toBe(0)
+    const out = JSON.parse(r.stdout).hookSpecificOutput
+    expect(out.permissionDecision).toBe('deny')
+    expect(out.permissionDecisionReason).toContain('marveen.io')
+  })
+})
