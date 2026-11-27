@@ -13,10 +13,13 @@ import {
   sessionExistsOnHost,
   hasFleetOauthToken,
   FLEET_OAUTH_TOKEN_PATH,
+  answerFirstRunGates,
+  dismissResumeSummaryModalIfPresent,
+  dismissModelConsentDialogIfPresent,
 } from './agent-process.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
-import { detectPaneState } from '../pane-state.js'
+import { detectPaneState, detectsFirstRunGate, detectsResumeDialog, detectsModelConsentDialog } from '../pane-state.js'
 import { escalateToOwner } from './owner-escalation.js'
 import { exactTmuxTarget } from '../tmux-target.js'
 
@@ -264,11 +267,15 @@ export function buildWorkerPrompt(callerPrompt: string, outPath: string, donePat
  *  - 'modal': confirm/option-list chrome without an idle footer (e.g. the CC
  *    2.1.202 fullscreen-renderer upsell, or whatever first-run dialog a future
  *    CC ships) -- the self-heal target;
+ *  - 'dialog' (BELA 6227 item 6, PROGI 6226): a dialog on which Escape is NOT neutral -- the first-run
+ *    trust / bypass panels (Escape = "No, exit", the worker would quit and loop), the resume dialog and the
+ *    model usage-credit consent dialog (Escape = the fallback model). Answered from the pane by the shared
+ *    handlers, never Escaped;
  *  - 'empty': inconclusive (still booting);
  *  - 'unknown': text without any recognised marker -- also a self-heal target,
  *    because an unrecognised full-screen overlay hides the idle footer.
  */
-export type WorkerPaneClass = 'idle' | 'busy' | 'auth' | 'modal' | 'empty' | 'unknown'
+export type WorkerPaneClass = 'idle' | 'busy' | 'auth' | 'dialog' | 'modal' | 'empty' | 'unknown'
 
 export function classifyWorkerPane(pane: string | null): WorkerPaneClass {
   if (pane == null || pane.trim() === '') return 'empty'
@@ -277,6 +284,8 @@ export function classifyWorkerPane(pane: string | null): WorkerPaneClass {
   const st = detectPaneState(pane)
   if (st === 'busy') return 'busy'
   if (st === 'idle' || st === 'typing') return 'idle'
+  // Dialogs whose Escape is a real answer (exit / fallback model) are recognised BEFORE the generic modal.
+  if (detectsFirstRunGate(pane) != null || detectsResumeDialog(pane) != null || detectsModelConsentDialog(pane)) return 'dialog'
   // Modal chrome: a numbered option list or a confirm footer. Matches the
   // fullscreen-upsell dialog captured live on 2026-07-08 and the Trust-folder /
   // onboarding dialog family.
@@ -569,8 +578,20 @@ const WORKER_STUCK_ALERT_COOLDOWN_MS = 60 * 60 * 1000
  * the pane still is not healthy. Never touches a busy/idle/auth pane.
  * Returns true if it acted.
  */
-function selfHealWorkerOnce(ctx: WorkerCtx): boolean {
+async function selfHealWorkerOnce(ctx: WorkerCtx): Promise<boolean> {
   const cls = classifyWorkerPane(capturePane(ctx.session))
+  if (cls === 'dialog') {
+    // Answered from the pane by the shared handlers (re-checked before Enter, never by number, never Escape);
+    // an unrecognised shape sends nothing and the handler escalates. The worker config seeds the trust and
+    // the bypass consent (ensureWorkerConfig), so this is the case where that seed did not take.
+    const fr = await answerFirstRunGates(ctx.session)
+    if (fr === 'unchanged') {
+      await dismissResumeSummaryModalIfPresent(ctx.session)
+      await dismissModelConsentDialogIfPresent(ctx.session)
+    }
+    logger.warn({ session: ctx.session, firstRun: fr }, 'agent-worker: pane parked on a dialog whose Escape is not neutral -- answered from the pane, no Escape')
+    return true
+  }
   if (!shouldSelfHeal(cls)) return false
   logger.warn({ cls, session: ctx.session }, 'agent-worker: pane parked on unexpected chrome -- bounded Escape self-heal')
   for (let i = 0; i < WORKER_SELF_HEAL_MAX_ESCAPES; i++) {
@@ -628,7 +649,7 @@ async function ensureWorkerReady(ctx: WorkerCtx): Promise<boolean> {
     if (await isSessionReadyForPrompt(ctx.session)) return true
     if (!healed && Date.now() - start > WORKER_SELF_HEAL_GRACE_MS) {
       healed = true
-      try { selfHealWorkerOnce(ctx) } catch (err) { logger.warn({ err }, 'agent-worker: self-heal pass failed') }
+      try { await selfHealWorkerOnce(ctx) } catch (err) { logger.warn({ err }, 'agent-worker: self-heal pass failed') }
     }
     await sleepMs(2000)
   }

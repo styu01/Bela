@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { classifyWorkerPane, shouldSelfHeal } from '../web/agent-worker.js'
 
 // Layer-2 regression tests for the worker stuck-modal self-heal (card
@@ -62,8 +64,34 @@ describe('classifyWorkerPane', () => {
     expect(classifyWorkerPane(FULLSCREEN_UPSELL)).toBe('modal')
   })
 
-  it('classifies the trust-dialog family as modal', () => {
-    expect(classifyWorkerPane(TRUST_DIALOG)).toBe('modal')
+  it('classifies the trust-dialog family as a DIALOG, which is answered, never Escaped (BELA 6227 item 6)', () => {
+    // Escape on a trust / bypass panel is "No, exit": the worker would quit and respawn into the same panel.
+    expect(classifyWorkerPane(TRUST_DIALOG)).toBe('dialog')
+    expect(shouldSelfHeal('dialog')).toBe(false)
+  })
+
+  it('the 2.1.326 trust and bypass captures, the resume and the consent dialogs are dialogs too', () => {
+    const fx = (n: string) => readFileSync(join(__dirname, 'fixtures', 'pane-2.1.326', n), 'utf-8')
+    for (const n of ['first-run-trust-80x24.txt', 'first-run-bypass-80x24.txt']) expect(classifyWorkerPane(fx(n))).toBe('dialog')
+    const resume = ['Resume this conversation?', '', '  Resume', '❯ Start a new conversation', '  Resume from summary', '', 'Enter to confirm · Esc to resume'].join('\n')
+    expect(classifyWorkerPane(resume)).toBe('dialog')
+    const consent = [' Fable 5 now uses usage credits', '', ' ❯ Switch to Sonnet 5 and continue', '   Continue with Fable 5', '', ' Enter to confirm · Esc to cancel'].join('\n')
+    expect(classifyWorkerPane(consent)).toBe('dialog')
+    // the generic upsell modal stays a self-heal target
+    expect(classifyWorkerPane(FULLSCREEN_UPSELL)).toBe('modal')
+  })
+
+  it('selfHealWorkerOnce answers a dialog through the shared handlers and only Escapes the other classes', () => {
+    const src = readFileSync(join(__dirname, '..', 'web', 'agent-worker.ts'), 'utf-8')
+    const fn = src.slice(src.indexOf('async function selfHealWorkerOnce('), src.indexOf('/** Loud, rate-limited operator signal'))
+    const dialog = fn.indexOf("if (cls === 'dialog') {")
+    const escape = fn.indexOf("'Escape'")
+    expect(dialog).toBeGreaterThan(0)
+    expect(escape).toBeGreaterThan(dialog)
+    const branch = fn.slice(dialog, fn.indexOf('if (!shouldSelfHeal(cls)) return false'))
+    expect(branch).toContain('await answerFirstRunGates(ctx.session)')
+    expect(branch).not.toContain("'Escape'")
+    expect(src).toContain('try { await selfHealWorkerOnce(ctx) }')
   })
 
   it('never flags a healthy prompt or a live turn', () => {
@@ -93,5 +121,6 @@ describe('shouldSelfHeal', () => {
     expect(shouldSelfHeal('busy')).toBe(false)
     expect(shouldSelfHeal('auth')).toBe(false)
     expect(shouldSelfHeal('empty')).toBe(false)
+    expect(shouldSelfHeal('dialog')).toBe(false)
   })
 })
