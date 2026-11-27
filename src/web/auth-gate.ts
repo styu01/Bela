@@ -68,9 +68,22 @@ export function isFederationWireEndpoint(path: string, method: string): boolean 
 export function requiresAuth(path: string, method: string): boolean {
   if (path === '/api/auth/status' && method === 'GET') return false
   if (path === '/api/auth/login' && method === 'POST') return false
+  // DOCKERHTTPS1119: the second step of the login (the code after the password). Public like the login itself: it is
+  // authorised by the pending token the right password returned, and throttled like the login.
+  if (path === '/api/auth/login/totp' && method === 'POST') return false
   if (method === 'GET' && (path === '/api/marveen/avatar' || /^\/api\/agents\/[^/]+\/avatar$/.test(path))) return false
   if (path === '/.well-known/fleetq' && method === 'GET') return true
   return path.startsWith('/api/')
+}
+
+/** DOCKERHTTPS1119 port (BELA 6404): the dashboard login session riding on this request's cookie, or null. Used where an
+ *  owner action may also come with the bearer token beside the owner's own login cookie (the browser keeps the token
+ *  from ?token= and sends it on every call, so the auth result there is 'token' although the owner is signed in). */
+export function sessionUserFromCookie(req: http.IncomingMessage): string | null {
+  const cookieValue = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
+  if (!cookieValue) return null
+  const session = resolveSession(cookieValue)
+  return session ? session.username : null
 }
 
 export function resolveAuth(

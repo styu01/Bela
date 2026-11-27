@@ -21,7 +21,7 @@
 import type http from 'node:http'
 import { readBody, json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
-import { parseCookies, SESSION_COOKIE_NAME } from '../auth-gate.js'
+import { parseCookies, SESSION_COOKIE_NAME, sessionUserFromCookie } from '../auth-gate.js'
 import {
   hashPassword,
   verifyPassword,
@@ -54,9 +54,32 @@ import {
   countDashboardUsers,
   updateDashboardUserPassword,
   deleteDashboardUser,
+  setDashboardUserTotpEnabled,
   logConfigChange,
 } from '../../db.js'
 import { notifySecurityEvent } from '../../notify.js'
+import {
+  getTotpForUser,
+  saveTotpRecord,
+  removeTotpRecord,
+  createPendingLogin,
+  getPendingLogin,
+  consumePendingLogin,
+  setPendingSetup,
+  getPendingSetup,
+  clearPendingSetup,
+  PENDING_LOGIN_TTL_S,
+  PENDING_SETUP_TTL_S,
+  type TotpRecord,
+} from '../dashboard-totp.js'
+import {
+  matchTotp,
+  findBackupCode,
+  generateTotpSecret,
+  generateBackupCodes,
+  hashBackupCode,
+  otpauthUri,
+} from '../totp.js'
 import type { RouteContext } from './types.js'
 
 const LOGIN_BODY_MAX_BYTES = 8 * 1024
@@ -119,7 +142,7 @@ const DEVICE_KEY_MAX_EXPIRY_DAYS = 3650
 // authenticated keeps its exact old meaning for token callers (existing probes
 // parse only that field): a valid bearer -> authenticated:true. A device key is
 // an authenticated principal too (method:'device', device:<key name>).
-function statusPayload(auth: RouteContext['auth']) {
+function statusPayload(auth: RouteContext['auth'], req?: http.IncomingMessage) {
   const authenticated = auth?.kind === 'token' || auth?.kind === 'session' || auth?.kind === 'device'
   const method = authenticated ? auth!.kind : null
   const user = auth?.kind === 'session' ? auth.user ?? null : null
@@ -131,14 +154,94 @@ function statusPayload(auth: RouteContext['auth']) {
     device,
     login_available: countDashboardUsers(false) >= 1,
     setup_required: countDashboardUsers(true) === 0,
+    // DOCKERHTTPS1119 port: whether the owner's own login session rides on this call (a session, or the token with the
+    // login cookie beside it). The two-step sign-in settings show only then.
+    owner_session: req ? ownerSessionUser(auth, req) !== null : auth?.kind === 'session',
   }
+}
+
+// ---- DOCKERHTTPS1119: the optional second factor (TOTP) of the owner's password login ----------------------------
+//
+// Off by default (no record in store/.dashboard-totp.json, see ../dashboard-totp.ts). With it on, POST
+// /api/auth/login answers a right password with 401 totp_required and a pending token, and POST
+// /api/auth/login/totp takes that token and a code (6 digits, or a backup code) and issues the session exactly as the
+// password login would. Setup, enable and disable take the owner's session (ownerSessionUser: a login session, or the
+// bearer token with the login cookie beside it); never the bare token, a sub-agent token or a device key.
+
+export const TOTP_REQUIRED = { error: 'Two-step sign-in: enter the code from your authenticator app.', code: 'totp_required' }
+export const TOTP_INVALID = { error: 'Invalid code', code: 'totp_invalid' }
+export const TOTP_PENDING_EXPIRED = { error: 'The sign-in step expired. Sign in again with your password.', code: 'totp_pending_expired' }
+export const TOTP_STORE_UNAVAILABLE = { error: 'Two-step sign-in is unavailable: its store on the server cannot be read. Repair it on the machine (docs/dashboard-auth-recovery.md).', code: 'totp_store_unavailable' }
+export const TOTP_ALREADY_ENABLED = { error: 'Two-step sign-in is already on.', code: 'totp_already_enabled' }
+export const TOTP_NOT_ENABLED = { error: 'Two-step sign-in is off.', code: 'totp_not_enabled' }
+export const TOTP_SETUP_MISSING = { error: 'Start the setup first (or again: it expired).', code: 'totp_setup_missing' }
+export const TOTP_CODE_REQUIRED = { error: 'A code is required.', code: 'totp_code_required' }
+
+function noStoreJson(res: http.ServerResponse, body: unknown, status: number): void {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' })
+  res.end(JSON.stringify(body))
+}
+
+function tooManyAttempts(res: http.ServerResponse, retryAfterS: number): void {
+  res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': String(retryAfterS), 'Cache-Control': 'private, no-store' })
+  res.end(JSON.stringify({ error: 'Too many attempts', retry_after_s: retryAfterS }))
+}
+
+/** The end of every successful sign-in, with or without the second factor: the support-password locks end, any
+ *  presented session is revoked (fixation defence) and a fresh session cookie is issued. */
+function finishLogin(req: http.IncomingMessage, res: http.ServerResponse, user: { id: number; username: string }, body: Record<string, unknown>): void {
+  // Session fixation defence: if a (valid) session cookie accompanied the
+  // login, revoke it -- login always mints a fresh id.
+  const presented = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
+  if (presented) revokeSession(presented)
+  const token = createSession(
+    { userId: user.id, username: user.username },
+    { userAgent: str(req.headers['user-agent']) || null, remoteNote: isHttps(req) ? 'https' : 'loopback' },
+  )
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': sessionCookie(token, req), 'Cache-Control': 'private, no-store' })
+  res.end(JSON.stringify(body))
+}
+
+/** A TOTP code (strictly after the last accepted step, +-1 step) or an unused backup code. Returns the record to save
+ *  (last_step moved, or the backup code's hash removed), or null. Synchronous: no await between this and the save. */
+export function checkSecondFactor(rec: TotpRecord, rawCode: string, now: number = Date.now()): { rec: TotpRecord; backupUsed: boolean } | null {
+  const code = rawCode.replace(/\s/g, '')
+  if (/^\d{6}$/.test(code)) {
+    const step = matchTotp(rec.secret, code, now, rec.last_step)
+    return step === null ? null : { rec: { ...rec, last_step: step }, backupUsed: false }
+  }
+  const i = findBackupCode(rec.backup, code)
+  if (i < 0) return null
+  return { rec: { ...rec, backup: rec.backup.filter((_, j) => j !== i) }, backupUsed: true }
+}
+
+/** The owner's own dashboard user for the setup/enable/disable/status routes, or null after answering 403.
+ *  This fork (BELA 6404 port of DOCKERHTTPS1119, upstream mayActAsOwner): a dashboard login session, or the bearer token
+ *  WITH a valid login session cookie beside it (the browser keeps the token from ?token= and sends it on every call, so
+ *  the auth result is 'token' although the owner is signed in); the user is the cookie's. Never the bare token, a device
+ *  key, a sub-agent token or a federation peer: whoever holds only those is on the machine or the fleet, and the
+ *  break-glass there is `npm run dashboard-user -- totp:off`. */
+export function ownerSessionUser(auth: RouteContext['auth'], req: http.IncomingMessage): string | null {
+  if (auth?.kind === 'session') return auth.user ?? null
+  if (auth?.kind === 'token') return sessionUserFromCookie(req)
+  return null
+}
+
+function totpOwner(auth: RouteContext['auth'], req: http.IncomingMessage, res: http.ServerResponse): ReturnType<typeof getDashboardUser> | null {
+  const name = ownerSessionUser(auth, req)
+  const user = name ? getDashboardUser(name) : undefined
+  if (!user || user.disabled) {
+    noStoreJson(res, { error: 'Two-step sign-in can be changed only with the dashboard login (an owner session).', code: 'owner_session_required' }, 403)
+    return null
+  }
+  return user
 }
 
 export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, auth } = ctx
 
   if (path === '/api/auth/status' && method === 'GET') {
-    json(res, statusPayload(auth))
+    json(res, statusPayload(auth, req))
     return true
   }
 
@@ -180,16 +283,257 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
     }
 
     recordSuccess(usernameLc)
-    // Session fixation defence: if a (valid) session cookie accompanied the
-    // login, revoke it -- login always mints a fresh id.
-    const presented = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
-    if (presented) revokeSession(presented)
-    const token = createSession(
-      { userId: user.id, username: user.username },
-      { userAgent: str(req.headers['user-agent']) || null, remoteNote: isHttps(req) ? 'https' : 'loopback' },
-    )
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': sessionCookie(token, req), 'Cache-Control': 'private, no-store' })
-    res.end(JSON.stringify({ ok: true, user: user.username }))
+    // DOCKERHTTPS1119: with the second factor on, the right password gives no session, only a pending sign-in that
+    // POST /api/auth/login/totp completes with a code. A damaged store refuses (fail closed), never logs in on the
+    // password alone.
+    let totp: TotpRecord | undefined
+    try {
+      totp = getTotpForUser(user)
+    } catch (err) {
+      logger.error({ err: (err as Error).message }, 'login: the two-step sign-in store is unreadable, login refused')
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    if (totp) {
+      const pending = createPendingLogin(user.id, user.username)
+      noStoreJson(res, { ...TOTP_REQUIRED, pending, expires_in_s: PENDING_LOGIN_TTL_S }, 401)
+      return true
+    }
+    finishLogin(req, res, user, { ok: true, user: user.username })
+    return true
+  }
+
+  if (path === '/api/auth/login/totp' && method === 'POST') {
+    let body: Record<string, unknown>
+    try {
+      body = await parseJsonBody(req)
+    } catch {
+      json(res, { error: 'Invalid JSON' }, 400)
+      return true
+    }
+    const pendingToken = str(body.pending)
+    const pending = getPendingLogin(pendingToken)
+    if (!pending) {
+      noStoreJson(res, TOTP_PENDING_EXPIRED, 401)
+      return true
+    }
+    // The code guesses have their own bucket of the shared login throttle (the username plus ':totp', which no
+    // username can be: USERNAME_RE has no colon), and they count toward its global cap too.
+    const totpKey = pending.username.toLowerCase() + ':totp'
+    const throttle = checkThrottle(totpKey)
+    if (throttle.locked) {
+      if (throttle.global) logger.warn('login code: global failure cap reached -- all logins throttled')
+      tooManyAttempts(res, throttle.retryAfterS)
+      return true
+    }
+    const user = getDashboardUser(pending.username)
+    let rec: TotpRecord | undefined
+    try {
+      rec = user && !user.disabled && user.id === pending.userId ? getTotpForUser(user) : undefined
+    } catch (err) {
+      logger.error({ err: (err as Error).message }, 'login code: the two-step sign-in store is unreadable, login refused')
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    if (!user || !rec) {
+      // The user was removed or disabled, or turned the second factor off, after the password step: sign in again.
+      consumePendingLogin(pendingToken)
+      noStoreJson(res, TOTP_PENDING_EXPIRED, 401)
+      return true
+    }
+    const checked = checkSecondFactor(rec, str(body.code))
+    if (!checked) {
+      recordFailure(totpKey)
+      noStoreJson(res, TOTP_INVALID, 401)
+      return true
+    }
+    saveTotpRecord(user.id, checked.rec)
+    recordSuccess(totpKey)
+    consumePendingLogin(pendingToken)
+    finishLogin(req, res, user, {
+      ok: true,
+      user: user.username,
+      ...(checked.backupUsed ? { backup_code_used: true, backup_codes_left: checked.rec.backup.length } : {}),
+    })
+    return true
+  }
+
+  if (path === '/api/auth/totp' && method === 'GET') {
+    const user = totpOwner(auth, req, res)
+    if (!user) return true
+    let rec: TotpRecord | undefined
+    try {
+      rec = getTotpForUser(user)
+    } catch {
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    noStoreJson(res, { enabled: rec !== undefined, backup_codes_left: rec ? rec.backup.length : 0 }, 200)
+    return true
+  }
+
+  if (path === '/api/auth/totp/setup' && method === 'POST') {
+    const user = totpOwner(auth, req, res)
+    if (!user) return true
+    try {
+      if (getTotpForUser(user)) {
+        noStoreJson(res, TOTP_ALREADY_ENABLED, 409)
+        return true
+      }
+    } catch {
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    const secret = generateTotpSecret()
+    setPendingSetup(user.id, secret)
+    logger.info({ username: user.username }, 'two-step sign-in: setup started')
+    // The one response the secret is ever in (for the QR and for typing it in by hand).
+    noStoreJson(res, { secret, otpauth_uri: otpauthUri(user.username, secret), expires_in_s: PENDING_SETUP_TTL_S }, 200)
+    return true
+  }
+
+  if (path === '/api/auth/totp/enable' && method === 'POST') {
+    const user = totpOwner(auth, req, res)
+    if (!user) return true
+    let body: Record<string, unknown>
+    try {
+      body = await parseJsonBody(req)
+    } catch {
+      json(res, { error: 'Invalid JSON' }, 400)
+      return true
+    }
+    try {
+      if (getTotpForUser(user)) {
+        noStoreJson(res, TOTP_ALREADY_ENABLED, 409)
+        return true
+      }
+    } catch {
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    if (!getPendingSetup(user.id)) {
+      noStoreJson(res, TOTP_SETUP_MISSING, 409)
+      return true
+    }
+    // Dani 81107 B1: the current password too, under the login's own bucket (as disable and the password change do).
+    // A stolen session cookie alone must not turn the second factor on with the thief's secret: enabling signs out the
+    // owner's other sessions, and the owner could not sign in again without the thief's code.
+    const usernameLc = user.username.toLowerCase()
+    const pwThrottle = checkThrottle(usernameLc)
+    if (pwThrottle.locked) {
+      tooManyAttempts(res, pwThrottle.retryAfterS)
+      return true
+    }
+    if (!(await verifyPassword(str(body.password), user.password_hash))) {
+      recordFailure(usernameLc)
+      noStoreJson(res, INVALID_CREDENTIALS, 401)
+      return true
+    }
+    recordSuccess(usernameLc)
+    // Read again after the KDF await: a parallel enable may have finished, or the pending setup expired meanwhile.
+    try {
+      if (getTotpForUser(getDashboardUser(user.username) ?? user)) {
+        noStoreJson(res, TOTP_ALREADY_ENABLED, 409)
+        return true
+      }
+    } catch {
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    const secret = getPendingSetup(user.id)
+    if (!secret) {
+      noStoreJson(res, TOTP_SETUP_MISSING, 409)
+      return true
+    }
+    const step = matchTotp(secret, str(body.code).replace(/\s/g, ''), Date.now(), -1)
+    if (step === null) {
+      noStoreJson(res, TOTP_INVALID, 400)
+      return true
+    }
+    const backupCodes = generateBackupCodes()
+    // The file first, then the database flag: a failure between them leaves a record without the flag, which still
+    // reads as ON (getTotpForUser), never as off.
+    saveTotpRecord(user.id, { secret, last_step: step, backup: backupCodes.map(hashBackupCode), enabled_at: Math.floor(Date.now() / 1000) })
+    setDashboardUserTotpEnabled(user.id, true)
+    clearPendingSetup(user.id)
+    // The sessions signed in before the second factor existed did not pass it: end them, keep the caller's own.
+    revokeAllForUser(user.id, parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME] ?? undefined)
+    logConfigChange('security.totp_enable', null, user.username, auth!.kind)
+    logger.info({ username: user.username }, 'two-step sign-in: enabled')
+    // The one response the backup codes are ever in; only their hashes are kept.
+    noStoreJson(res, { ok: true, enabled: true, backup_codes: backupCodes }, 200)
+    return true
+  }
+
+  if (path === '/api/auth/totp/disable' && method === 'POST') {
+    const user = totpOwner(auth, req, res)
+    if (!user) return true
+    let body: Record<string, unknown>
+    try {
+      body = await parseJsonBody(req)
+    } catch {
+      json(res, { error: 'Invalid JSON' }, 400)
+      return true
+    }
+    let rec: TotpRecord | undefined
+    try {
+      rec = getTotpForUser(user)
+    } catch {
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    if (!rec) {
+      noStoreJson(res, TOTP_NOT_ENABLED, 409)
+      return true
+    }
+    const code = str(body.code)
+    if (!code.trim()) {
+      noStoreJson(res, TOTP_CODE_REQUIRED, 400)
+      return true
+    }
+    // The password, under the login's own bucket (as the password change does), then the code under ':totp'.
+    const usernameLc = user.username.toLowerCase()
+    const pwThrottle = checkThrottle(usernameLc)
+    if (pwThrottle.locked) {
+      tooManyAttempts(res, pwThrottle.retryAfterS)
+      return true
+    }
+    if (!(await verifyPassword(str(body.password), user.password_hash))) {
+      recordFailure(usernameLc)
+      noStoreJson(res, INVALID_CREDENTIALS, 401)
+      return true
+    }
+    recordSuccess(usernameLc)
+    const totpKey = usernameLc + ':totp'
+    const codeThrottle = checkThrottle(totpKey)
+    if (codeThrottle.locked) {
+      tooManyAttempts(res, codeThrottle.retryAfterS)
+      return true
+    }
+    // Re-read after the KDF await: a concurrent sign-in may have moved last_step or used a backup code.
+    try {
+      rec = getTotpForUser(user)
+    } catch {
+      noStoreJson(res, TOTP_STORE_UNAVAILABLE, 503)
+      return true
+    }
+    if (!rec) {
+      noStoreJson(res, TOTP_NOT_ENABLED, 409)
+      return true
+    }
+    if (!checkSecondFactor(rec, code)) {
+      recordFailure(totpKey)
+      noStoreJson(res, TOTP_INVALID, 401)
+      return true
+    }
+    recordSuccess(totpKey)
+    // The flag first, then the record: a failure between them leaves a record without the flag, which still reads as
+    // ON, never a flag without a record (that would be a 503 lockout).
+    setDashboardUserTotpEnabled(user.id, false)
+    removeTotpRecord(user.id)
+    logConfigChange('security.totp_disable', null, user.username, auth!.kind)
+    logger.info({ username: user.username }, 'two-step sign-in: disabled')
+    noStoreJson(res, { ok: true, enabled: false }, 200)
     return true
   }
 
@@ -422,6 +766,9 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
     }
     deleteDashboardUser(username)
     revokeAllForUser(user.id)
+    // DOCKERHTTPS1119: the removed login's second-factor secret goes with it. A damaged store is not a reason to
+    // keep the login: logged, the deletion stands.
+    try { removeTotpRecord(user.id) } catch (err) { logger.warn({ err: (err as Error).message }, 'dashboard user deleted, its two-step record could not be removed') }
     // Deleting the last user is the documented way to return to token-only mode.
     logger.info({ username, remaining: countDashboardUsers(true) }, 'dashboard user deleted')
     json(res, { ok: true })

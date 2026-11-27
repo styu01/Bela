@@ -1069,6 +1069,11 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`UPDATE dashboard_users SET is_owner = 1
            WHERE id = (SELECT id FROM dashboard_users ORDER BY id ASC LIMIT 1)
              AND NOT EXISTS (SELECT 1 FROM dashboard_users WHERE is_owner = 1)`)
+  // DOCKERHTTPS1119: whether the login's TOTP second factor is on. The secret lives in store/.dashboard-totp.json
+  // (0600); this flag is the record that it EXISTS, in a table the agent DB-write gate protects, so deleting or
+  // emptying that file cannot turn the second factor off: the login fails closed (503) instead.
+  const dashUserCols = (db.prepare('PRAGMA table_info(dashboard_users)').all() as { name: string }[]).map((c) => c.name)
+  if (!dashUserCols.includes('totp_enabled')) db.exec('ALTER TABLE dashboard_users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0')
   // Browser login sessions. NOT named `sessions` -- that table already maps
   // Telegram chats to Claude session ids. Only sha256(session_id) is stored, so
   // a DB leak does not hand out live sessions. Rows survive dashboard restarts;
@@ -1211,9 +1216,11 @@ export interface DashboardUser {
   updated_at: number
   disabled: number
   is_owner: number
+  /** DOCKERHTTPS1119: 1 while the TOTP second factor is on (the secret itself is in store/.dashboard-totp.json). */
+  totp_enabled: number
 }
 
-export type DashboardUserPublic = Omit<DashboardUser, 'password_hash'>
+export type DashboardUserPublic = Omit<DashboardUser, 'password_hash' | 'totp_enabled'>
 
 export function createDashboardUser(username: string, passwordHash: string): DashboardUser {
   const now = Math.floor(Date.now() / 1000)
@@ -1221,7 +1228,7 @@ export function createDashboardUser(username: string, passwordHash: string): Das
   const info = db
     .prepare('INSERT INTO dashboard_users (username, password_hash, created_at, updated_at, is_owner) VALUES (?, ?, ?, ?, ?)')
     .run(username, passwordHash, now, now, isOwner ? 1 : 0)
-  return { id: Number(info.lastInsertRowid), username, password_hash: passwordHash, created_at: now, updated_at: now, disabled: 0, is_owner: isOwner ? 1 : 0 }
+  return { id: Number(info.lastInsertRowid), username, password_hash: passwordHash, created_at: now, updated_at: now, disabled: 0, is_owner: isOwner ? 1 : 0, totp_enabled: 0 }
 }
 
 export function getDashboardUser(username: string): DashboardUser | undefined {
@@ -1254,6 +1261,12 @@ export function countDashboardUsers(includeDisabled = false): number {
 export function updateDashboardUserPassword(userId: number, passwordHash: string): void {
   db.prepare('UPDATE dashboard_users SET password_hash = ?, updated_at = ? WHERE id = ?')
     .run(passwordHash, Math.floor(Date.now() / 1000), userId)
+}
+
+/** DOCKERHTTPS1119: the record that the TOTP second factor is on for this user (see dashboard-totp.ts). */
+export function setDashboardUserTotpEnabled(userId: number, enabled: boolean): void {
+  db.prepare('UPDATE dashboard_users SET totp_enabled = ?, updated_at = ? WHERE id = ?')
+    .run(enabled ? 1 : 0, Math.floor(Date.now() / 1000), userId)
 }
 
 export function deleteDashboardUser(username: string): boolean {
