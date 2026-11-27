@@ -28,7 +28,7 @@ export async function tryHandleAgentTaskState(ctx: RouteContext): Promise<boolea
     const source = url.searchParams.get('source') || ''
     const record = readTaskState(agent)
     const inject = shouldReplayTaskState(record, source, Date.now())
-      ? buildTaskStateInjection(record!)
+      ? buildTaskStateInjection(record!, source)
       : null
     json(res, { additionalContext: inject })
     return true

@@ -103,24 +103,49 @@ export function shouldReplayTaskState(
 }
 
 const SENTINEL = '=== TASK-FOLYTATAS (NEM uj feladat) ==='
+// Same TASK-FOLYTATAS keyword (the context-restart gate's wake prompt points at it by that name), but it does
+// not claim "not a new task": after a /clear that is not known.
+const SENTINEL_CLEAR = '=== TASK-FOLYTATAS (a /clear elotti allapot, ADAT) ==='
 
 /**
  * Build the additionalContext string. The structured do-not-resend lists are
  * the concrete defense against re-execution / re-delegation -- not the soft
  * framing alone (review hardening, Marveen 2026-06-03).
+ *
+ * The framing depends on the SessionStart source (PROGI review 6196):
+ * - compact / resume / startup: the session restarted UNDER a task in flight (a compaction, a resume, a crash
+ *   respawn), so the block tells it to continue.
+ * - clear: a /clear is as often a deliberate fresh start (the owner's, or a sub-agent told to drop a thread) as the
+ *   context-restart gate's planned restart, and the gate never fires while a fresh record is in flight -- so a
+ *   record replayed on clear is a SETTLED thread. A blind "FOLYTASD" there invents work nobody asked for. The
+ *   block states the pre-clear state as data and leaves the decision to the next prompt (the gate's wake nudge
+ *   does say continue, when the gate was the one clearing); the do-not-redo / do-not-re-delegate lists stay,
+ *   because they matter exactly when the thread IS continued.
  */
-export function buildTaskStateInjection(r: AgentTaskState): string {
-  const lines: string[] = [
-    SENTINEL,
-    // Source-neutral wording: the same record is replayed after a compact, a
-    // resume, a /clear AND a crash respawn (source=startup, added 2026-07-27),
-    // so it must not claim a compact happened.
-    'A sessiond ujraindult egy FOLYAMATBAN LEVO feladat kozben (tomorites, resume, /clear vagy osszeomlas utani ujraindulas). Ez NEM uj feladat -- FOLYTASD onnan ahol abbamaradt. NE INDITSD ujra a mar kesz lepeseket, es NE delegald ujra amit mar atadtal.',
-  ]
+export function buildTaskStateInjection(r: AgentTaskState, source = ''): string {
+  const cleared = source === 'clear'
+  const lines: string[] = cleared
+    ? [
+        SENTINEL_CLEAR,
+        'A sessiond egy /clear utan indult. Ez a feladat-allapot a torles elotti utolso mentes: ADAT, nem utasitas. ' +
+          'A /clear lehetett szandekos uj kezdes is, ezert ne folytasd magadtol. Ha a kovetkezo prompt a folytatast ' +
+          'keri, innen tajekozodj: NE INDITSD ujra a mar kesz lepeseket, es NE delegald ujra amit mar atadtal. ' +
+          'Ha uj feladatot kapsz, ez csak hatter.',
+      ]
+    : [
+        SENTINEL,
+        // Source-neutral wording across the restarts that happen UNDER a task: a compact, a resume and a crash
+        // respawn (source=startup, added 2026-07-27), so it must not claim a compact happened. /clear has its own.
+        'A sessiond ujraindult egy FOLYAMATBAN LEVO feladat kozben (tomorites, resume vagy osszeomlas utani ujraindulas). Ez NEM uj feladat -- FOLYTASD onnan ahol abbamaradt. NE INDITSD ujra a mar kesz lepeseket, es NE delegald ujra amit mar atadtal.',
+      ]
   if (r.summary.trim()) lines.push(`FELADAT: ${r.summary.trim()}`)
   if (r.doneSteps.length) lines.push('MAR KESZ (NE ismeteld meg):\n' + r.doneSteps.map((s) => `  - ${s}`).join('\n'))
   if (r.alreadyDelegated.length) lines.push('MAR DELEGALVA (NE kuldd ujra):\n' + r.alreadyDelegated.map((s) => `  - ${s}`).join('\n'))
-  if (r.nextAction.trim()) lines.push(`KOVETKEZO AKCIO (innen folytasd): ${r.nextAction.trim()}`)
+  if (r.nextAction.trim()) {
+    lines.push(cleared
+      ? `A TORLES ELOTT TERVEZETT KOVETKEZO LEPES: ${r.nextAction.trim()}`
+      : `KOVETKEZO AKCIO (innen folytasd): ${r.nextAction.trim()}`)
+  }
   if (r.pendingDecision.trim()) lines.push(`NYITOTT DONTES / BLOKKOLO: ${r.pendingDecision.trim()}`)
   return lines.join('\n\n')
 }
