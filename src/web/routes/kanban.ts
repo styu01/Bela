@@ -516,6 +516,14 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
         json(res, { error: `"expected_fields" must be an object of { field: value } for these fields: ${KANBAN_VERSIONED_FIELDS.join(', ')}` }, 400)
         return true
       }
+      // PROGI review 6206 item 3: the check must cover EVERY field this body writes. A body like
+      // {description, expected_fields: {title}} would otherwise write the description unchecked while the
+      // caller believes it sent a guard. The dashboard form writes exactly the fields it checks.
+      const uncovered = Object.keys(data).filter((k) => !Object.hasOwn(expected_fields as object, k))
+      if (uncovered.length > 0) {
+        json(res, { error: `"expected_fields" must cover every field the body writes; missing: ${uncovered.join(', ')}` }, 400)
+        return true
+      }
       expectedFields = expected_fields as Record<string, unknown>
     }
     let recurringTemplateChanging = false

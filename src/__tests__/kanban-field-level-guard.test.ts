@@ -114,6 +114,52 @@ describe('expected_fields is validated, never silently ignored', () => {
   })
 })
 
+// PROGI review 6206 item 3: the check must cover every field the body writes.
+describe('expected_fields must cover every written field', () => {
+  it('{description, expected_fields: {title}} -> 400 naming description, nothing written', async () => {
+    createKanbanCard({ id: 'c1', title: 'Card', description: 'old' })
+    const r = await put('c1', { description: 'unchecked', expected_fields: { title: 'Card' } })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toContain('missing: description')
+    expect(getKanbanCard('c1')?.description).toBe('old')
+  })
+
+  it('two written fields, one covered -> 400 naming only the uncovered one', async () => {
+    createKanbanCard({ id: 'c2', title: 'Card', description: 'old' })
+    const r = await put('c2', { title: 'New', priority: 'high', expected_fields: { title: 'Card' } })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toContain('missing: priority')
+    expect(r.body.error).not.toContain('title,')
+    expect(getKanbanCard('c2')?.title).toBe('Card')
+  })
+
+  it('a partial body whose written fields are all covered -> 200 (the full form is not required)', async () => {
+    createKanbanCard({ id: 'c3', title: 'Card', description: 'old' })
+    const r = await put('c3', { description: 'new', expected_fields: { description: 'old' } })
+    expect(r.status).toBe(200)
+    expect(getKanbanCard('c3')?.description).toBe('new')
+  })
+
+  it('expected_fields may check MORE fields than it writes -> 200', async () => {
+    createKanbanCard({ id: 'c4', title: 'Card', description: 'old' })
+    const r = await put('c4', { description: 'new', expected_fields: { description: 'old', title: 'Card' } })
+    expect(r.status).toBe(200)
+  })
+
+  it('the dashboard form body (all 7 fields written, all 7 checked) still saves', async () => {
+    createKanbanCard({ id: 'c5', title: 'Card', description: 'old' })
+    const r = await put('c5', formSave(fresh('c5'), { description: 'new' }))
+    expect(r.status).toBe(200)
+    expect(getKanbanCard('c5')?.description).toBe('new')
+  })
+
+  it('without expected_fields nothing changes (a partial body is still last-writer-wins)', async () => {
+    createKanbanCard({ id: 'c6', title: 'Card', description: 'old' })
+    const r = await put('c6', { description: 'new' })
+    expect(r.status).toBe(200)
+  })
+})
+
 describe('web/app.js sends expected_fields from the fresh card the form was filled from', () => {
   const app = readFileSync(join(__dirname, '..', '..', 'web', 'app.js'), 'utf-8')
   it('the save builds expected_fields over CARD_FORM_FIELDS from cardEditBase', () => {
