@@ -414,6 +414,13 @@ export const IDLE_FLUSH_REASON_PREFIX = 'idle-flush'
  */
 export const STALE_REFRESH_REASON_PREFIX = 'stale-handoff-refresh'
 
+/**
+ * Reason for giving up on the resume injection: the restarted session did not
+ * become ready within READY_TIMEOUT_MS. The decision is action 'none', so the
+ * runner matches this constant to raise an alert instead of staying silent.
+ */
+export const RESUME_GIVE_UP_REASON = 'ready timeout -- giving up on resume injection'
+
 /** Slack between HANDOFF.md's mtime and the last transcript activity before
  *  the handoff counts as stale. The handoff-writing turn itself touches the
  *  transcript slightly AFTER the file write (tool result + closing reply), so
@@ -680,7 +687,7 @@ export function decideGuard(
         }
       }
       if (nowMs >= state.deadlineMs) {
-        return cooldown(nowMs, cfg, 'ready timeout -- giving up on resume injection')
+        return cooldown(nowMs, cfg, RESUME_GIVE_UP_REASON)
       }
       return none('waiting for restarted session')
     }

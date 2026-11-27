@@ -32,6 +32,8 @@ import {
   handoffStaleMinutes,
   IDLE_FLUSH_REASON_PREFIX,
   INITIAL_GUARD_STATE,
+  READY_TIMEOUT_MS,
+  RESUME_GIVE_UP_REASON,
   STALE_REFRESH_REASON_PREFIX,
   type GuardState,
   type HandoffStaleness,
@@ -291,6 +293,33 @@ function configDirFor(name: string): string | undefined {
   return name === MAIN_AGENT_ID ? undefined : (readAgentClaudeConfigDir(name) ?? undefined)
 }
 
+/** Operator notice for a resume give-up. Exported so the wording is pinned by a test. */
+export function resumeGiveUpNotice(name: string, handoffPath: string): string {
+  return `[CONTEXT-GUARD] A(z) "${name}" agent restartja utan a session ${READY_TIMEOUT_MS / 60_000} percen belul nem lett kesz, ` +
+    'ezert a folytatasi (resume) prompt NEM ment ki. Az agent vagy nem fut, vagy nem fogad promptot, vagy a handoff nelkul indult el. ' +
+    `Nezd meg a pane-t; ha all, add be neki kezzel a handoffot: ${handoffPath}`
+}
+
+/**
+ * The resume give-up is decided as action 'none', and the none-branch logs
+ * nothing, so the restarted agent could sit without its handoff pointer while
+ * nobody knew the resume path had failed. Warn, and tell the main agent.
+ *
+ * LOCAL ADAPTATION (upstream eb32a3d8 sends the MAIN agent's own give-up straight to the operator channel with
+ * notifyChannel): Istvan's standing rule (2026-08-29, restated 2026-09-02) is that the system's internal alerts go to
+ * BELA first, never straight to his Telegram. So the main agent's notice lands in its own inbox too: the router
+ * delivers it once that session takes prompts, which is exactly when it can act on it. No new direct-Telegram path.
+ */
+export async function reportResumeGiveUp(name: string): Promise<void> {
+  logger.warn({ name }, 'context-guard: resume give-up -- the restarted session never became ready, resume prompt not sent')
+  const text = resumeGiveUpNotice(name, handoffPathFor(name))
+  try {
+    createAgentMessage(name, MAIN_AGENT_ID, text, 'context-guard resume give-up notice')
+  } catch (err) {
+    logger.error({ err, name }, 'context-guard: FAILED TO RAISE the resume give-up notice')
+  }
+}
+
 /** Raw observed context size (tokens) for the idle-flush tier's absolute threshold. */
 function measureContextTokens(name: string): number | null {
   const tokens = readContextTokensFromProjectDir(workingDirFor(name), configDirFor(name))
@@ -507,6 +536,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
     dropPendingResume(name, decision.reason)
   }
   if (decision.action === 'none') {
+    if (decision.reason === RESUME_GIVE_UP_REASON) await reportResumeGiveUp(name)
     // Idle-flush non-decisions carry the measurement that blocked them
     // ("quiet for only 4m of 20m"), which is the only way to see the tier
     // failing to reach its threshold. It matters because the idle clock is the
