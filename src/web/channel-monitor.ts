@@ -311,6 +311,18 @@ export function onParkedState(session: string, parkedSig: string | null): void {
   if (parkedSig === null || parkedSig !== rec) clearMachineFragmentLeft(session)
 }
 
+/** PROGI 6263 / BELA 6264 (a): the restart guard judges the record by a FRESH signature of the parked box,
+ *  not by the tick's state.parkedSig. When the channel-monitor tick itself runs the failing clear, the state it
+ *  hands the guard carries the PRE-clear signature, which never equals the recorded leftover: the fresh record
+ *  was erased in the same tick and the long-wedge case deferred forever on that path. freshSig null (the box
+ *  could not be read this tick: busy, capture failed) says nothing about the box, so nothing is forgotten.
+ *  Returns the signature the guard should use. */
+export function guardFragmentSig(session: string, parked: boolean, freshSig: string | null, stateSig: string | null): string | null {
+  if (!parked) { onParkedState(session, null); return null }
+  if (freshSig !== null) onParkedState(session, freshSig)
+  return freshSig ?? stateSig
+}
+
 /** The signature of what a failed clear left in the box, or null when nothing readable is parked. */
 function leftoverSignature(session: string): string | null {
   const view = captureParkedInputView(session)
@@ -1411,7 +1423,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // next genuine wedge starts fresh (and a successful restart is not penalised).
   // STUCKFRAGMENT915: the empty box is reported BEFORE the early return, so it is
   // seen on every tick (the record's only forget point).
-  onParkedState(MAIN_CHANNELS_SESSION, state.parkedSig)
+  if (!parked) guardFragmentSig(MAIN_CHANNELS_SESSION, false, null, null)
   if (state.parkedSig === null) mainBusyCapAlertedSig = null
   if (!parked) { stuckRestartCount = 0; return }
   // Busy-guard: never hard-restart while the main pane is actively generating --
@@ -1439,6 +1451,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // Deadlock carve-out facts: read from the ghost-stripped parked view (same
   // view the soft recovery uses) so a dim autocomplete hint never counts.
   const parkedView = paneState === 'typing' ? captureParkedInputView(MAIN_CHANNELS_SESSION) : null
+  const fragmentSig = guardFragmentSig(MAIN_CHANNELS_SESSION, true, parkedView != null ? stuckInputSignature(parkedView) : null, state.parkedSig)
   const machineOriginByPrefix = parkedView != null && parkedMachineOriginInput(parkedView)
   // Fallback (card d8c16050, measured 2026-08-19): the prefix-anchored check
   // above only sees whatever is currently visible in the TUI's own bounded
@@ -1456,7 +1469,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
     && isKnownRecentInjection(MAIN_CHANNELS_SESSION, parkedFragment)
   const machineOrigin = resolveMachineOrigin(
     machineOriginByPrefix || machineOriginByRegistry,
-    hasMachineFragmentLeft(MAIN_CHANNELS_SESSION, state.parkedSig),
+    hasMachineFragmentLeft(MAIN_CHANNELS_SESSION, fragmentSig),
   )
   // Same registry fallback as machineOriginByRegistry above, applied to the
   // scheduledTaskBlock fact inside parkedMainInputHasRemedy (Kanban c4aef78c,
@@ -1475,7 +1488,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   ), { machineOrigin, softRemedy })
   if (action === 'skip' && shouldDeferKeepaliveRespawn(paneState)) {
     logger.info(
-      { paneState, attempts: state.attempts, machineOrigin, fragmentLeftByUs: hasMachineFragmentLeft(MAIN_CHANNELS_SESSION, state.parkedSig), softRemedy, scheduledTaskByRegistry },
+      { paneState, attempts: state.attempts, machineOrigin, fragmentLeftByUs: hasMachineFragmentLeft(MAIN_CHANNELS_SESSION, fragmentSig), softRemedy, scheduledTaskByRegistry },
       paneState === 'busy'
         ? 'Stuck-input restart deferred -- main pane is busy (working, not wedged)'
         : 'Stuck-input restart deferred -- parked input still recoverable or possibly a human draft',

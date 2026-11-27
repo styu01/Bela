@@ -9,6 +9,7 @@ import {
   hasMachineFragmentLeft,
   onClearResult,
   onParkedState,
+  guardFragmentSig,
   applyStuckRestartBusyGuard,
   decideStuckInputRestart,
 } from '../web/channel-monitor.js'
@@ -134,11 +135,51 @@ describe('the call sites', () => {
       expect(sliceCase(c)).toContain('onClearResult(session, cleared, cleared ? null : leftoverSignature(session))')
     }
   })
-  it('the restart guard reports the parked SIGNATURE before its early return, and reads the record by it', () => {
+  it('the restart guard forgets on an empty box before its early return, and judges the record by a FRESH signature', () => {
     const body = sliceFn('maybeRestartWedgedMainChannel')
-    const report = body.indexOf('onParkedState(MAIN_CHANNELS_SESSION, state.parkedSig)')
-    expect(report).toBeGreaterThan(0)
-    expect(report).toBeLessThan(body.indexOf('if (!parked)'))
-    expect(body).toMatch(/resolveMachineOrigin\(\s*machineOriginByPrefix \|\| machineOriginByRegistry,\s*hasMachineFragmentLeft\(MAIN_CHANNELS_SESSION, state\.parkedSig\),/)
+    const empty = body.indexOf('if (!parked) guardFragmentSig(MAIN_CHANNELS_SESSION, false, null, null)')
+    expect(empty).toBeGreaterThan(0)
+    expect(empty).toBeLessThan(body.indexOf('if (!parked) { stuckRestartCount = 0; return }'))
+    expect(body).toContain('const fragmentSig = guardFragmentSig(MAIN_CHANNELS_SESSION, true, parkedView != null ? stuckInputSignature(parkedView) : null, state.parkedSig)')
+    expect(body).toMatch(/resolveMachineOrigin\(\s*machineOriginByPrefix \|\| machineOriginByRegistry,\s*hasMachineFragmentLeft\(MAIN_CHANNELS_SESSION, fragmentSig\),/)
+  })
+})
+
+// PROGI 6263 / BELA 6264 (a): the failing clear run by the channel-monitor tick itself. The state handed to the
+// guard carries the PRE-clear signature; judged by it, the fresh record was erased in the same tick.
+describe('same-tick clear by the channel-monitor (PROGI sametick PoC turned around)', () => {
+  beforeEach(() => clearMachineFragmentLeft(MAIN))
+  function run(clearOnTick: number | null) {
+    const TH = { confirmMs: 90_000, dedupMs: 45_000, maxAttempts: 4 }
+    let st: StuckInputState = { parkedSig: null, firstSeenAt: null, lastRecoverAt: null, attempts: 0 }
+    let cleared = false
+    let restarts = 0
+    let recordAfterClearTick: boolean | null = null
+    for (let t = 0; t < 25; t++) {
+      const now = 1_000_000 + t * 60_000
+      const boxBefore = cleared ? 'FRAG' : 'FULL SCHEDULED BLOCK'
+      const d = decideStuckInputRecovery(boxBefore, st, now, TH)
+      st = d.next // the PRE-action signature, as recoverStuckInputForSession returns it
+      if (d.recover && clearOnTick !== null && t >= clearOnTick && !cleared) { onClearResult(MAIN, false, 'FRAG'); cleared = true }
+      const fresh = cleared ? 'FRAG' : 'FULL SCHEDULED BLOCK' // the guard's own capture after the action
+      const sig = guardFragmentSig(MAIN, st.parkedSig !== null, fresh, st.parkedSig)
+      if (cleared && recordAfterClearTick === null) recordAfterClearTick = hasMachineFragmentLeft(MAIN, sig)
+      const mo = resolveMachineOrigin(false, hasMachineFragmentLeft(MAIN, sig))
+      const a = applyStuckRestartBusyGuard('typing', decideStuckInputRestart(st.parkedSig !== null, st.attempts, TH.maxAttempts, now, -1e9, restarts, 600_000, 3), { machineOrigin: mo, softRemedy: false })
+      if (a === 'restart') restarts++
+    }
+    return { restarts, recordAfterClearTick }
+  }
+  it('the record survives the tick of its own clear, and the unchanged leftover escalates', () => {
+    const r = run(0)
+    expect(r.recordAfterClearTick).toBe(true)
+    expect(r.restarts).toBeGreaterThan(0)
+  })
+  it('an unreadable box this tick (fresh null) forgets nothing; an empty box forgets', () => {
+    noteMachineFragmentLeft(MAIN, 'FRAG')
+    expect(guardFragmentSig(MAIN, true, null, 'PRE')).toBe('PRE')
+    expect(hasMachineFragmentLeft(MAIN, 'FRAG')).toBe(true)
+    guardFragmentSig(MAIN, false, null, null)
+    expect(hasMachineFragmentLeft(MAIN, 'FRAG')).toBe(false)
   })
 })
