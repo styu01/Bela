@@ -115,6 +115,28 @@ _CURLISH = re.compile(r"^(curl|wget|http)$", re.I)
 # elszant kikerulot. A lenti exec-heurisztika a NAIV alakokat fedi (a kod
 # process-inditast ES kuldo-programnevet egyutt tartalmaz); ennel tobbet nem
 # allit, es nem is allithat.
+# KNOWN OPEN SHELL FORMS (BELA msg 6050, 2026-11-26; PROGI msgs 6034/6049; each measured with bash: it sends,
+# both gates allow it). Closing them needs a real shell parser and data-flow tracking; after the 2026-11-26 round
+# the gate work stops here by decision, and these stay open:
+#   - a compound command piped into a stdin shell: 'if ..; then echo X; fi | bash', 'for .. do echo X; done | bash',
+#     'f() { echo X; }; f | bash', '{ echo X; } 2>&1 | bash' (a redirection after the group);
+#   - 'eval $(echo X)' with the substitution unquoted, 'eval "$(cat <<EOF ... EOF)"' (a heredoc inside it);
+#   - a substitution in COMMAND position: '$(echo X)', '`echo X`', '"$(echo send...)" args';
+#   - a variable set without an assignment word: 'printf -v V ...', 'read V <<< ...'; 'local V=...' inside a
+#     function body; PS4='$(X)' with 'bash -x' / 'set -x';
+#   - heredoc search is not quote- or comment-aware: '<<X' after '#' or inside quotes with a space ('<<X y')
+#     starts a 'body' that hides the next lines;
+#   - and, as before: xargs -I{} sh -c '{}', a script written to a file and run later, a two-step git config,
+#     a name assembled at run time, python -c with an attached code argument (-c'...'; node refuses an attached -e).
+# These forms hide ANY command, not only a mailer binary: the explicit send.py / Resend / graph-mail rules of this
+# gate, and the Gmail-script / mail-credential rule MAILCRED1127, are bypassed the same way. Corrected 2026-11-27
+# (PROGI msg 6118 (e)): this host DOES have a configured, live mail path -- scripts/send-gmail.py and the outreach
+# scripts take a Gmail SMTP app password from the vault through GET /api/vault/<id> (src/web/routes/connectors.ts),
+# which hands any secret to any holder of the dashboard token, and every agent can read that token. MAILCRED1127
+# refuses running those scripts and touching that credential for a sub-agent, but it is a name rule; the real
+# control is restricting the vault value route to the main agent. Also measured: no mailer binary on PATH, /usr/sbin
+# or /usr/lib, and support-mail/send.py has no SUPPORT_* settings in .env.
+# Mirrored in the header of scripts/email-send-gate.mjs (STATED LIMIT).
 _CODE_SEND = re.compile(
     r"\bsmtplib\b|SMTP\s*\(|\bsendMail\s*\(|\bsendEmail\b|\bmail\.send\b", re.I
 )
