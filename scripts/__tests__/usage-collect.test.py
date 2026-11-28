@@ -1440,7 +1440,7 @@ class TestWeeklyOnlyAccount(unittest.TestCase):
     }
 
     def test_weekly_only_headers_parse_without_five_hour(self):
-        windows, err = uc._parse_claude_usage_headers(self.INFO_HEADERS)
+        windows, err = uc._parse_claude_usage_headers(self.INFO_HEADERS, "info")
         self.assertIsNone(err)
         self.assertEqual(set(windows), {"seven_day"})
         self.assertEqual(windows["seven_day"]["used_percent"], 35.0)
@@ -1450,11 +1450,11 @@ class TestWeeklyOnlyAccount(unittest.TestCase):
         msg = email.message.Message()
         for k, v in self.INFO_HEADERS.items():
             msg[k.title()] = v
-        windows, err = uc._parse_claude_usage_headers(msg)
+        windows, err = uc._parse_claude_usage_headers(msg, "info")
         self.assertIsNone(err)
         self.assertEqual(set(windows), {"seven_day"})
         msg["Anthropic-Ratelimit-Unified-5H-Status"] = "allowed"
-        windows, err = uc._parse_claude_usage_headers(msg)
+        windows, err = uc._parse_claude_usage_headers(msg, "info")
         self.assertIsNone(windows)
         self.assertIn("5h", err)
 
@@ -1465,22 +1465,22 @@ class TestWeeklyOnlyAccount(unittest.TestCase):
                       {"anthropic-ratelimit-unified-5h-utilization": "nan",
                        "anthropic-ratelimit-unified-5h-reset": "1795882200"}):
             with self.subTest(extra=extra):
-                windows, err = uc._parse_claude_usage_headers(dict(self.INFO_HEADERS, **extra))
+                windows, err = uc._parse_claude_usage_headers(dict(self.INFO_HEADERS, **extra), "info")
                 self.assertIsNone(windows)
                 self.assertEqual(err, "messages response missing or invalid 5h usage headers")
 
     def test_five_hour_claim_without_five_hour_headers_fails(self):
         headers = dict(self.INFO_HEADERS, **{"anthropic-ratelimit-unified-representative-claim": "five_hour"})
-        windows, err = uc._parse_claude_usage_headers(headers)
+        windows, err = uc._parse_claude_usage_headers(headers, "info")
         self.assertIsNone(windows)
         self.assertIn("5h", err)
 
     def test_weekly_window_is_never_optional(self):
         headers = {k: v for k, v in self.INFO_HEADERS.items() if "-7d-" not in k}
-        windows, err = uc._parse_claude_usage_headers(headers)
+        windows, err = uc._parse_claude_usage_headers(headers, "info")
         self.assertIsNone(windows)
         self.assertEqual(err, "messages response missing or invalid 7d usage headers")
-        windows, err = uc._parse_claude_usage_headers({})
+        windows, err = uc._parse_claude_usage_headers({}, "info")
         self.assertIsNone(windows)
 
     def test_collect_marks_absent_window_and_account(self):
@@ -1515,17 +1515,64 @@ class TestWeeklyOnlyAccount(unittest.TestCase):
         self.assertNotIn("windows_not_reported", result)
 
     def test_account_label(self):
+        """KISPROGI 6584 L1: a token matching neither account is "ismeretlen", never silently styu01."""
         with tempfile.TemporaryDirectory() as tmp:
             info = os.path.join(tmp, ".claude-oauth-token.info")
-            with patch.object(uc, "INFO_TOKEN_PATH", info):
-                self.assertEqual(uc._claude_account_label("abc"), "styu01")  # no info file
+            styu = os.path.join(tmp, ".claude-oauth-token.styu01")
+            backup = os.path.join(tmp, "backup-20261124", "claude-oauth-token.styu01")
+            os.makedirs(os.path.dirname(backup))
+            paths = (styu, os.path.join(tmp, "backup-*", "claude-oauth-token.styu01"))
+            with patch.object(uc, "INFO_TOKEN_PATH", info), patch.object(uc, "STYU01_TOKEN_PATHS", paths):
+                self.assertEqual(uc._claude_account_label("abc"), "ismeretlen")  # no account file at all
                 with open(info, "w") as f:
                     f.write("abc\n")
                 self.assertEqual(uc._claude_account_label("abc"), "info")
-                self.assertEqual(uc._claude_account_label("abd"), "styu01")
-                self.assertEqual(uc._claude_account_label(""), "styu01")
+                self.assertEqual(uc._claude_account_label("abd"), "ismeretlen")
+                self.assertEqual(uc._claude_account_label(""), "ismeretlen")
+                with open(backup, "w") as f:
+                    f.write("styu-token\n")
+                self.assertEqual(uc._claude_account_label("styu-token"), "styu01")  # the switch's backup copy
+                os.unlink(backup)
+                with open(styu, "w") as f:
+                    f.write("styu-token\n")
+                self.assertEqual(uc._claude_account_label("styu-token"), "styu01")
+                self.assertEqual(uc._claude_account_label("other"), "ismeretlen")
                 open(info, "w").close()
-                self.assertEqual(uc._claude_account_label("abc"), "styu01")  # empty info file
+                self.assertEqual(uc._claude_account_label("abc"), "ismeretlen")  # empty info file
+
+    def test_missing_five_hour_is_the_old_error_except_on_info(self):
+        """KISPROGI 6584 K1: only the info account (no 5-hour limit) may lack the 5h window."""
+        for account in ("styu01", "ismeretlen", None):
+            with self.subTest(account=account):
+                windows, err = uc._parse_claude_usage_headers(self.INFO_HEADERS, account)
+                self.assertIsNone(windows)
+                self.assertEqual(err, "messages response missing or invalid 5h usage headers")
+        headers = {k: v for k, v in self.INFO_HEADERS.items() if "representative-claim" not in k}
+        windows, err = uc._parse_claude_usage_headers(headers, "styu01")
+        self.assertIsNone(windows)
+
+    def test_collect_on_styu01_with_weekly_only_headers_is_not_authoritative(self):
+        cm = MagicMock()
+        cm.__enter__.return_value.headers = self.INFO_HEADERS
+        cm.__enter__.return_value.read.return_value = b"{}"
+        cm.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as tmp:
+            styu = os.path.join(tmp, ".claude-oauth-token.styu01")
+            with open(styu, "w") as f:
+                f.write("styu-token\n")
+            latest = os.path.join(tmp, "usage-latest.json")
+            with patch.object(uc, "INFO_TOKEN_PATH", os.path.join(tmp, "none")), \
+                 patch.object(uc, "STYU01_TOKEN_PATHS", (styu,)), patch.object(uc, "LATEST_PATH", latest), \
+                 patch.object(uc, "_claude_usage_headers_enabled", return_value=True), \
+                 patch.object(uc, "_read_claude_token", return_value=("styu-token", "fleet_token_file")), \
+                 patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+                 patch.object(uc, "_collect_claude_estimate", return_value={"files_scanned": 0}), \
+                 patch("urllib.request.urlopen", return_value=cm):
+                result = uc.collect_claude()
+        self.assertEqual(result["source"], "estimate")
+        self.assertEqual(result["account"], "styu01")
+        self.assertNotIn("windows_not_reported", result)
+        self.assertIn("5h usage headers", result["auth_error"])
 
     def _cached_run(self, cached_claude, current_account):
         with tempfile.TemporaryDirectory() as tmp:

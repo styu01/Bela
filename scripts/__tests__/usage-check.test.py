@@ -87,8 +87,8 @@ class TestUsageCheck(unittest.TestCase):
 
 
 class TestWeeklyOnlyAccount(unittest.TestCase):
-    """info@ account: the snapshot carries only seven_day plus an explicit
-    windows_not_reported marker (see usage-collect.py)."""
+    """Thresholds per account (owner decision 2026-11-28, BELA 6580): info (Ultra) has no 5-hour limit and is judged
+    on the weekly window at 90/96; styu01 keeps 5-hour 90/98, weekly 80/90."""
 
     def run_raw(self, claude, age_minutes=0):
         now = datetime.now(timezone.utc)
@@ -103,57 +103,87 @@ class TestWeeklyOnlyAccount(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def weekly(self, seven, **extra):
+    def weekly(self, seven, account="info", five=None, **extra):
         reset = datetime.now(timezone.utc).timestamp() + 86400
-        claude = {"account": "info", "windows_not_reported": ["five_hour"],
+        claude = {"account": account, "windows_not_reported": ["five_hour"],
                   "windows": {"seven_day": {"used_percent": seven, "resets_at": reset}}}
+        if five is not None:
+            claude["windows"]["five_hour"] = {"used_percent": five, "resets_at": reset - 3600}
+            del claude["windows_not_reported"]
         claude.update(extra)
         return claude
 
-    def test_weekly_only_is_measured_and_says_so(self):
+    def test_info_is_measured_and_says_it_has_no_5h_limit(self):
         result = self.run_raw(self.weekly(35), age_minutes=3)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(),
-                         "USAGE info Claude 5 órás keret=n/a (ez a fiók nem ad 5 órás ablakot) heti keret=35% friss(3p) OK")
+                         "USAGE info Claude 5 órás keret=n/a (ennél a fióknál nincs 5 órás keret) heti keret=35% friss(3p) OK")
 
-    def test_weekly_only_thresholds(self):
-        for seven, code, status in ((79.99, 0, "OK"), (80, 0, "FIGYELMEZTETÉS"), (89.99, 0, "FIGYELMEZTETÉS"), (90, 2, "STOP")):
+    def test_info_weekly_thresholds_90_96(self):
+        for seven, code, status in ((89.99, 0, "OK"), (90, 0, "FIGYELMEZTETÉS"), (95.99, 0, "FIGYELMEZTETÉS"), (96, 2, "STOP")):
             with self.subTest(seven=seven):
                 result = self.run_raw(self.weekly(seven))
                 self.assertEqual(result.returncode, code)
                 self.assertTrue(result.stdout.strip().endswith(status), result.stdout)
+                self.assertTrue(result.stdout.startswith("USAGE info Claude"), result.stdout)
 
-    def test_missing_five_hour_without_marker_is_unknown(self):
+    def test_info_ignores_a_5h_window_even_if_one_came(self):
+        result = self.run_raw(self.weekly(35, five=99))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("5 órás keret=n/a (ennél a fióknál nincs 5 órás keret)", result.stdout)
         claude = self.weekly(35)
         del claude["windows_not_reported"]
-        result = self.run_raw(claude)
-        self.assertEqual(result.returncode, 3)
-        self.assertIn("USAGE info Claude 5 órás/heti keret ISMERETLEN", result.stdout)
-        for bad in ("five_hour", ["seven_day"], None):
-            with self.subTest(bad=bad):
-                self.assertEqual(self.run_raw(self.weekly(35, windows_not_reported=bad)).returncode, 3)
+        self.assertEqual(self.run_raw(claude).returncode, 0)  # no marker needed: the account has no 5-hour limit
+
+    def test_styu01_keeps_the_fleet_rule(self):
+        for five, seven, code, status in ((89.99, 79.99, 0, "OK"), (90, 3, 0, "FIGYELMEZTETÉS"), (3, 80, 0, "FIGYELMEZTETÉS"),
+                                          (98, 3, 2, "STOP"), (3, 90, 2, "STOP")):
+            with self.subTest(five=five, seven=seven):
+                result = self.run_raw(self.weekly(seven, account="styu01", five=five))
+                self.assertEqual(result.returncode, code)
+                self.assertTrue(result.stdout.strip().endswith(status), result.stdout)
+                self.assertTrue(result.stdout.startswith("USAGE styu01 Claude"), result.stdout)
+        # weekly 90 STOPs styu01, while the same 90 is only a warning on info
+        self.assertEqual(self.run_raw(self.weekly(90, account="styu01", five=3)).returncode, 2)
+        self.assertEqual(self.run_raw(self.weekly(90)).returncode, 0)
+
+    def test_styu01_missing_5h_window_is_unknown_marker_or_not(self):
+        """KISPROGI 6584 K1: only info may lack the 5-hour window; on styu01 (and an unknown account) it is
+        ISMERETLEN even with a windows_not_reported marker."""
+        for account in ("styu01", "ismeretlen"):
+            with self.subTest(account=account):
+                result = self.run_raw(self.weekly(35, account=account))  # marked
+                self.assertEqual(result.returncode, 3)
+                self.assertIn(f"USAGE {account} Claude 5 órás/heti keret ISMERETLEN", result.stdout)
+                claude = self.weekly(35, account=account)
+                del claude["windows_not_reported"]
+                self.assertEqual(self.run_raw(claude).returncode, 3)
 
     def test_weekly_window_stays_required_and_fresh(self):
-        claude = self.weekly(35)
-        claude["windows"] = {}
-        self.assertEqual(self.run_raw(claude).returncode, 3)
+        for account in ("info", "styu01"):
+            claude = self.weekly(35, account=account)
+            claude["windows"] = {}
+            self.assertEqual(self.run_raw(claude).returncode, 3)
         result = self.run_raw(self.weekly(35), age_minutes=26)
         self.assertEqual(result.returncode, 3)
         self.assertIn("ISMERETLEN (nincs friss mérés)", result.stdout)
 
-    def test_account_label_defaults_to_styu01(self):
-        for account in (None, "other", 5):
+    def test_unknown_account_is_labelled_ismeretlen_with_the_fleet_rule(self):
+        """KISPROGI 6584 L1: no / an unknown account label is "ismeretlen" (never silently styu01), judged by the
+        stricter fleet rule with both windows required."""
+        for account in (None, "other", 5, "ismeretlen"):
             with self.subTest(account=account):
-                result = self.run_raw(self.weekly(35, account=account))
-                self.assertTrue(result.stdout.startswith("USAGE styu01 Claude"), result.stdout)
+                result = self.run_raw(self.weekly(85, account=account, five=3))
+                self.assertTrue(result.stdout.startswith("USAGE ismeretlen Claude"), result.stdout)
+                self.assertTrue(result.stdout.strip().endswith("FIGYELMEZTETÉS"), result.stdout)  # weekly 80
+                self.assertEqual(self.run_raw(self.weekly(85, account=account)).returncode, 3)  # no 5h window
 
     def test_output_has_no_dash_separators(self):
-        for claude in (self.weekly(35), self.weekly(95), dict(self.weekly(35), windows={})):
+        for claude in (self.weekly(35), self.weekly(97), dict(self.weekly(35), windows={})):
             out = self.run_raw(claude).stdout
             self.assertNotIn(" -- ", out)
             self.assertNotIn("\u2014", out)
             self.assertNotIn("\u2013", out)
-
 
 if __name__ == "__main__":
     unittest.main()

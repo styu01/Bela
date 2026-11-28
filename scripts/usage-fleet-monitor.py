@@ -29,12 +29,25 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent.parent
 AGENTS = ("progi", "okoska", "iris", "kisprogi")
 METRICS = ("five_hour", "seven_day")
-# An account whose API responses carry no 5-hour window (the collector marks it
-# explicitly in claude.windows_not_reported) is judged on the weekly window
-# alone. The weekly window is never optional.
-OPTIONAL_METRICS = ("five_hour",)
-WARN = {"five_hour": 90, "seven_day": 80}
-PAUSE_AT = {"five_hour": 98, "seven_day": 90}
+# Owner decision 2026-11-28 (Telegram 8728, BELA 6580): the thresholds belong to the ACCOUNT the collector measured
+# (snapshot claude.account; none = the default styu01), not to which headers the response carried. warn = caution
+# notice, pause = fleet pause; a pause is released only when every judged window is below its warn value.
+#   styu01: the fleet rule, 5-hour 90/98, weekly 80/90.
+#   info (Ultra): no 5-hour limit at all, weekly 90/96 (release below 90).
+#   ismeretlen (a token matching neither account, or no account in the snapshot): the fleet rule, both windows.
+# Every window an account has a threshold for must be in the snapshot (only info has no 5-hour one: KISPROGI 6584 K1).
+ACCOUNTS = ("styu01", "info", "ismeretlen")
+DEFAULT_ACCOUNT = "ismeretlen"
+THRESHOLDS = {
+    "styu01": {"warn": {"five_hour": 90, "seven_day": 80}, "pause": {"five_hour": 98, "seven_day": 90}},
+    "info": {"warn": {"seven_day": 90}, "pause": {"seven_day": 96}},
+    "ismeretlen": {"warn": {"five_hour": 90, "seven_day": 80}, "pause": {"five_hour": 98, "seven_day": 90}},
+}
+# The fleet rule's values, kept for the existing callers and tests.
+WARN = THRESHOLDS["styu01"]["warn"]
+PAUSE_AT = THRESHOLDS["styu01"]["pause"]
+# A remembered notice mark is kept when it is at or above the lowest pause value any account has for that window.
+_MIN_PAUSE = {m: min(t["pause"][m] for t in THRESHOLDS.values() if m in t["pause"]) for m in METRICS}
 LABELS = {"five_hour": "5 órás", "seven_day": "heti"}
 POLICY_VERSION = 2
 SOURCES = ("authoritative", "authoritative_cached", "authoritative_statusline")
@@ -202,7 +215,7 @@ def notice_marks(state):
     marks = state.get("notified_90")
     if not isinstance(marks, dict):
         return {}
-    return {m: marks[m] for m in METRICS if percent(marks.get(m)) and marks[m] >= PAUSE_AT[m]}
+    return {m: marks[m] for m in METRICS if percent(marks.get(m)) and marks[m] >= _MIN_PAUSE[m]}
 
 
 def snapshot(path, now):
@@ -221,11 +234,12 @@ def snapshot(path, now):
             if not number(collected) or not 0 <= now.timestamp() - collected <= MAX_AGE:
                 return None
         windows = claude["windows"]
-        absent = claude.get("windows_not_reported", [])
-        if not isinstance(absent, list):
-            return None
-        metrics = tuple(m for m in METRICS if not (
-            m in OPTIONAL_METRICS and m in absent and m not in windows))
+        account = claude.get("account")
+        account = account if isinstance(account, str) and account in ACCOUNTS else DEFAULT_ACCOUNT
+        limits = THRESHOLDS[account]["pause"]
+        # Exactly the windows this account has a limit for are judged, and all of them are required (info: weekly
+        # only, even if a 5-hour one came; styu01: a missing 5-hour window is stale, marker or not).
+        metrics = tuple(m for m in METRICS if m in limits)
         if "seven_day" not in metrics:
             return None
         if not all(percent(windows[m]["used_percent"]) for m in metrics):
@@ -236,7 +250,8 @@ def snapshot(path, now):
             # policy. Any numeric reset at/before now invalidates both windows.
             if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset <= now.timestamp():
                 return None
-        return {"source": source, "metrics": metrics,
+        return {"source": source, "metrics": metrics, "account": account,
+                "warn": THRESHOLDS[account]["warn"], "pause": THRESHOLDS[account]["pause"],
                 "windows": {m: dict(windows[m]) for m in metrics}}
     except (KeyError, TypeError, ValueError, OverflowError, OSError):
         return None
@@ -369,14 +384,14 @@ class Monitor:
     def event(self, kind, data, state, changed=None):
         metrics = data["metrics"]
         values = {m: data["windows"][m]["used_percent"] for m in metrics}
-        thresholds = PAUSE_AT if kind == "pause" else WARN
+        thresholds = data["pause"] if kind == "pause" else data["warn"]
         selected = [m for m in metrics if values[m] >= thresholds[m]]
         if kind in ("resume", "reassert"):
             selected = list(metrics)
         if not selected:
             selected = list(metrics)  # Legacy in-flight control decision still needs named windows.
         metric = max(changed or selected or metrics, key=lambda m: values[m])
-        detail = "; ".join(f"Claude {LABELS[m]} keret {pct(values[m])}%, reset: "
+        detail = "; ".join(f"Claude {LABELS[m]} keret {pct(values[m])}% ({data['account']} fiók), reset: "
                            f"{reset_time(data['windows'][m].get('resets_at'))}" for m in selected)
         if kind == "resume":
             content = f"Claude keret miatti szünet feloldva. {detail}. Folytathatjátok az új munkát."
@@ -392,7 +407,7 @@ class Monitor:
             telegram = f"{title}: {detail}. Új munka indítása leállítva."
         notices = notice_marks(state)
         for m in metrics:
-            if values[m] >= PAUSE_AT[m]:
+            if values[m] >= data["pause"][m]:
                 notices[m] = max(notices.get(m, 0), values[m])
         target = {"level": 0 if kind == "resume" else 80 if kind == "warning" else 90,
                   "metric": metric, "percent": values[metric], "source": data["source"],
@@ -549,8 +564,8 @@ class Monitor:
         if not valid_event(pending):
             pending = None
             state.pop("pending", None)
-        both_low = all(values[m] < WARN[m] for m in metrics)
-        at_pause = any(values[m] >= PAUSE_AT[m] for m in metrics)
+        both_low = all(values[m] < data["warn"][m] for m in metrics)
+        at_pause = any(values[m] >= data["pause"][m] for m in metrics)
         # In-flight pause counts as paused: some recipients may already have
         # stopped, including an ambiguous timeout without a saved receipt.
         was_paused = state["level"] == 90 or pause_exists or (
@@ -578,7 +593,7 @@ class Monitor:
                 return self.deliver(state, pending)
             # Escalation supersedes an incomplete warning.
         notices = notice_marks(state)
-        changed = [m for m in metrics if values[m] >= PAUSE_AT[m] and
+        changed = [m for m in metrics if values[m] >= data["pause"][m] and
                    (not percent(notices.get(m)) or values[m] >= notices[m] + REFIRE_DELTA)]
         if at_pause and (state["level"] < 90 or changed):
             return self.deliver(state, self.event("pause", data, state, changed))

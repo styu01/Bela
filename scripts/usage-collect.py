@@ -114,15 +114,24 @@ STATUSLINE_CACHE_PATH = os.path.join(STORE_DIR, "usage-statusline-latest.json")
 USAGE_HEADERS_DISABLED_PATH = os.path.join(STORE_DIR, ".usage-headers-disabled")
 STATE_PATH = os.path.join(STORE_DIR, "usage-alert-state.json")
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
-# The second Claude account's token (info@ account, "info keret"). The fleet
-# token file holds a copy of it while the fleet runs on that account; any other
-# token is the default styu01 account. Only compared, never printed.
+# The two Claude accounts' tokens, kept beside the fleet token file (which holds
+# a copy of the one the fleet runs on). The measured token is compared with them
+# (constant time, never printed): the info@ account (Ultra, "info keret"), the
+# styu01 account (its copy: store/.claude-oauth-token.styu01, or the backup the
+# account switch keeps in store/backup-*/claude-oauth-token.styu01). A token that
+# matches neither is "ismeretlen" (KISPROGI 6584 L1), never silently styu01.
 INFO_TOKEN_PATH = os.path.join(STORE_DIR, ".claude-oauth-token.info")
+STYU01_TOKEN_PATHS = (os.path.join(STORE_DIR, ".claude-oauth-token.styu01"),
+                      os.path.join(STORE_DIR, "backup-*", "claude-oauth-token.styu01"))
 ACCOUNT_DEFAULT = "styu01"
 ACCOUNT_INFO = "info"
-# Windows an account may legitimately not report. The weekly window is always
-# required; only the 5-hour one can be absent (see _parse_claude_usage_headers).
+ACCOUNT_UNKNOWN = "ismeretlen"
+ACCOUNTS = (ACCOUNT_DEFAULT, ACCOUNT_INFO, ACCOUNT_UNKNOWN)
+# Windows an account may legitimately not report: only the 5-hour one, and only
+# on the info account, which has no 5-hour limit (KISPROGI 6584 K1; see
+# _parse_claude_usage_headers). The weekly window is always required.
 OPTIONAL_CLAUDE_WINDOWS = ("five_hour",)
+ACCOUNTS_WITHOUT_5H = (ACCOUNT_INFO,)
 
 BUDAPEST = ZoneInfo("Europe/Budapest")
 
@@ -577,7 +586,7 @@ def _header_names(headers):
         return set()
 
 
-def _parse_claude_usage_headers(headers):
+def _parse_claude_usage_headers(headers, account=None):
     """Return quota windows from Messages response headers, or an error.
 
     Anthropic includes these headers on a 429 too; at the important boundary
@@ -587,9 +596,11 @@ def _parse_claude_usage_headers(headers):
     not every plan has one: measured 2026-11-28, the info@ account's responses
     carry only anthropic-ratelimit-unified-7d-* (and representative-claim
     seven_day), while the styu01 account's carry both 5h-* and 7d-*. A 5h window
-    is treated as "not reported" only when NO 5h header is present at all and
-    the representative claim does not name it; any partial or malformed 5h
-    header still fails the whole measurement (conservative).
+    is treated as "not reported" only on an account without a 5-hour limit
+    (account in ACCOUNTS_WITHOUT_5H: info), only when NO 5h header is present at
+    all and the representative claim does not name it; any partial or malformed
+    5h header still fails the whole measurement (conservative). On styu01 or an
+    unknown account a missing 5h window is the old error (KISPROGI 6584 K1).
     """
     def header_number(name):
         try:
@@ -601,7 +612,7 @@ def _parse_claude_usage_headers(headers):
     names = _header_names(headers)
     windows = {}
     for key, header_key in (("five_hour", "5h"), ("seven_day", "7d")):
-        if key in OPTIONAL_CLAUDE_WINDOWS:
+        if key in OPTIONAL_CLAUDE_WINDOWS and account in ACCOUNTS_WITHOUT_5H:
             prefix = f"anthropic-ratelimit-unified-{header_key}-"
             try:
                 claim = str(headers.get("anthropic-ratelimit-unified-representative-claim") or "").strip().lower()
@@ -623,18 +634,25 @@ def _parse_claude_usage_headers(headers):
     return windows, None
 
 
-def _claude_account_label(token):
-    """'info' when the token is the info@ account's, else the default account.
-
-    Constant-time comparison; neither token is logged or returned."""
+def _token_matches(path, token):
     try:
-        with open(INFO_TOKEN_PATH, "r", encoding="utf-8") as f:
-            info = f.read().strip()
+        with open(path, "r", encoding="utf-8") as f:
+            known = f.read().strip()
     except (OSError, UnicodeError):
-        info = ""
-    if info and token and hmac.compare_digest(info.encode("utf-8"), token.encode("utf-8")):
+        return False
+    return bool(known and token) and hmac.compare_digest(known.encode("utf-8"), token.encode("utf-8"))
+
+
+def _claude_account_label(token):
+    """'info' or 'styu01' when the token is that account's (see STYU01_TOKEN_PATHS),
+    else 'ismeretlen'. Constant-time comparison; no token is logged or returned."""
+    if _token_matches(INFO_TOKEN_PATH, token):
         return ACCOUNT_INFO
-    return ACCOUNT_DEFAULT
+    for pattern in STYU01_TOKEN_PATHS:
+        for path in sorted(glob.glob(pattern)):
+            if _token_matches(path, token):
+                return ACCOUNT_DEFAULT
+    return ACCOUNT_UNKNOWN
 
 
 def _not_reported_windows(windows):
@@ -651,8 +669,9 @@ def _collect_claude_usage_headers(context=None):
     token, token_source = _read_claude_token()
     if not token:
         return None, "no oauth token available", "no_token"
+    account = _claude_account_label(token)
     if context is not None:
-        context["account"] = _claude_account_label(token)
+        context["account"] = account
 
     body = json.dumps({
         "model": "claude-haiku-4-5-20251001",
@@ -675,14 +694,14 @@ def _collect_claude_usage_headers(context=None):
             headers = resp.headers
             resp.read()
     except urllib.error.HTTPError as e:
-        windows, parse_error = _parse_claude_usage_headers(e.headers)
+        windows, parse_error = _parse_claude_usage_headers(e.headers, account)
         if windows is not None:
             return windows, None, None
         kind = "permanent" if e.code in (401, 403) else "transient"
         return None, f"messages HTTP {e.code} ({token_source} token): {parse_error}", kind
     except Exception as e:
         return None, f"messages {type(e).__name__}", "transient"
-    windows, parse_error = _parse_claude_usage_headers(headers)
+    windows, parse_error = _parse_claude_usage_headers(headers, account)
     if windows is None:
         return None, parse_error, "transient"
     return windows, None, None
@@ -804,10 +823,10 @@ def _read_cached_claude_authoritative(max_age_minutes, now_utc=None, meta=None):
         return None, None
     if meta is not None:
         account = claude.get("account")
-        if isinstance(account, str) and account in (ACCOUNT_DEFAULT, ACCOUNT_INFO):
+        if isinstance(account, str) and account in ACCOUNTS:
             meta["account"] = account
         absent = claude.get("windows_not_reported")
-        if isinstance(absent, list) and absent and all(
+        if account in ACCOUNTS_WITHOUT_5H and isinstance(absent, list) and absent and all(
                 isinstance(k, str) and k in OPTIONAL_CLAUDE_WINDOWS and k not in windows for k in absent):
             meta["windows_not_reported"] = list(absent)
     return windows, age_minutes

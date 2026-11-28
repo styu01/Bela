@@ -989,9 +989,8 @@ class ReviewFixTests(unittest.TestCase):
 
 
 class WeeklyOnlyAccountTests(unittest.TestCase):
-    """An account whose API responses carry no 5-hour window (info@ account,
-    measured 2026-11-28): the collector writes only seven_day plus an explicit
-    windows_not_reported marker, and the monitor must act on the weekly window."""
+    """Thresholds per account (owner decision 2026-11-28, BELA 6580). info (Ultra): no 5-hour limit, weekly warning 90,
+    pause 96, release below 90. styu01: the fleet rule. The collector names the account in claude.account."""
 
     setUp = MonitorTests.setUp
     usage = MonitorTests.usage
@@ -999,64 +998,92 @@ class WeeklyOnlyAccountTests(unittest.TestCase):
     read = MonitorTests.read
     run_monitor = MonitorTests.run_monitor
 
-    def weekly_only(self, seven, marker=True, **kwargs):
+    def weekly_only(self, seven, marker=True, account="info", five=None, **kwargs):
         data = {"generated_at": NOW.isoformat(),
-                "claude": {"source": "authoritative", "account": "info", "windows": {
+                "claude": {"source": "authoritative", "account": account, "windows": {
                     "seven_day": {"used_percent": seven, "resets_at": NOW.timestamp() + 86400}}}}
-        if marker:
+        if five is not None:
+            data["claude"]["windows"]["five_hour"] = {"used_percent": five, "resets_at": NOW.timestamp() + 3600}
+        elif marker:
             data["claude"]["windows_not_reported"] = ["five_hour"]
         data["claude"].update(kwargs)
         self.write("usage-latest.json", data)
 
-    def test_marked_weekly_only_snapshot_is_measured_not_stale(self):
+    def test_info_snapshot_is_measured_not_stale(self):
         self.weekly_only(35)
         self.assertEqual(self.run_monitor(), "OK level=0 silent")
         state = self.read()
         self.assertEqual(state["last_known_percent_seven_day"], 35)
         self.assertIsNone(state["last_known_percent_five_hour"])
 
-    def test_weekly_only_warning_pause_and_release_name_only_the_weekly_window(self):
-        for value, expected in ((80, "SENT warning level=80"), (90, "SENT pause level=90"),
-                                (85, "UNCHANGED level=90"), (79, "SENT resume level=0")):
+    def test_info_thresholds_90_96_and_release_below_90(self):
+        for value, expected in ((89, "OK level=0 silent"), (90, "SENT warning level=80"), (96, "SENT pause level=90"),
+                                (92, "UNCHANGED level=90"), (90, "UNCHANGED level=90"), (85, "SENT resume level=0")):
             self.weekly_only(value)
-            self.assertEqual(self.run_monitor(), expected)
+            self.assertEqual(self.run_monitor(), expected, value)
         texts = [c for _, c in self.transport.sent]
         self.assertTrue(texts)
         for text in texts:
             self.assertIn("Claude heti keret", text)
+            self.assertIn("(info fiók)", text)
             self.assertNotIn("5 órás", text)
         self.assertFalse((self.store / um.PAUSE).exists())
 
-    def test_weekly_only_pause_file_names_the_weekly_metric(self):
-        self.weekly_only(91)
+    def test_info_pause_file_names_the_weekly_metric(self):
+        self.weekly_only(96)
         self.assertEqual(self.run_monitor(), "SENT pause level=90")
         self.assertEqual(self.read(um.PAUSE)["metric"], "seven_day")
 
-    def test_missing_five_hour_without_marker_stays_stale(self):
+    def test_info_ignores_a_5h_window_even_if_one_came(self):
+        self.weekly_only(35, five=99)
+        self.assertEqual(self.run_monitor(), "OK level=0 silent")
         self.weekly_only(35, marker=False)
+        self.assertEqual(self.run_monitor(), "OK level=0 silent")  # no marker needed on info
+        self.assertEqual(self.transport.sent, [])
+
+    def test_styu01_keeps_the_fleet_rule_and_names_the_account(self):
+        self.weekly_only(90, account="styu01", five=10)
+        self.assertEqual(self.run_monitor(), "SENT pause level=90")  # weekly 90 pauses styu01 (only warns on info)
+        self.assertIn("(styu01 fiók)", self.transport.sent[0][1])
+        self.weekly_only(79, account="styu01", five=10)
+        self.assertEqual(self.run_monitor(), "SENT resume level=0")
+
+    def test_styu01_missing_five_hour_stays_stale_marker_or_not(self):
+        """KISPROGI 6584 K1: only info may lack the 5-hour window."""
+        for account in ("styu01", "ismeretlen", None):
+            self.weekly_only(35, account=account)  # marked
+            self.assertEqual(self.run_monitor(), "STALE silent", account)
+        self.weekly_only(35, marker=False, account="styu01")
         self.assertEqual(self.run_monitor(), "STALE silent")
-        self.weekly_only(35, windows_not_reported="five_hour")
+        self.weekly_only(35, account="styu01", windows_not_reported="five_hour")
         self.assertEqual(self.run_monitor(), "STALE silent")
         self.assertEqual(self.transport.sent, [])
 
     def test_weekly_window_can_never_be_marked_absent(self):
-        data = {"generated_at": NOW.isoformat(), "claude": {
-            "source": "authoritative", "windows_not_reported": ["five_hour", "seven_day"],
-            "windows": {"five_hour": {"used_percent": 10, "resets_at": NOW.timestamp() + 3600}}}}
-        self.write("usage-latest.json", data)
-        self.assertEqual(self.run_monitor(), "STALE silent")
+        for account in ("info", "styu01"):
+            data = {"generated_at": NOW.isoformat(), "claude": {
+                "source": "authoritative", "account": account, "windows_not_reported": ["five_hour", "seven_day"],
+                "windows": {"five_hour": {"used_percent": 10, "resets_at": NOW.timestamp() + 3600}}}}
+            self.write("usage-latest.json", data)
+            self.assertEqual(self.run_monitor(), "STALE silent")
 
-    def test_marker_does_not_hide_a_reported_five_hour_window(self):
+    def test_marker_does_not_hide_a_reported_five_hour_window_on_styu01(self):
         self.usage(99, 10, windows_not_reported=["five_hour"])
         self.assertEqual(self.run_monitor(), "SENT pause level=90")
         self.assertEqual(self.read(um.PAUSE)["metric"], "five_hour")
 
-    def test_switch_from_two_windows_to_weekly_only_keeps_pause_logic(self):
-        self.usage(98, 50)
+    def test_switch_accounts_uses_the_new_accounts_release_rule(self):
+        self.usage(98, 50)  # styu01 (no account field = default): 5-hour pause
         self.assertEqual(self.run_monitor(), "SENT pause level=90")
+        self.weekly_only(92)  # info at 92: above its 90 release line, below its 96 pause
+        self.assertEqual(self.run_monitor(), "UNCHANGED level=90")
         self.weekly_only(50)
         self.assertEqual(self.run_monitor(), "SENT resume level=0")
 
+    def test_unknown_account_is_ismeretlen_with_the_fleet_rule(self):
+        self.weekly_only(90, account="other", five=10)
+        self.assertEqual(self.run_monitor(), "SENT pause level=90")
+        self.assertIn("(ismeretlen fiók)", self.transport.sent[0][1])
 
 if __name__ == "__main__":
     unittest.main()
