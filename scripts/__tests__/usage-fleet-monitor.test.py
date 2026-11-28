@@ -988,5 +988,75 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(len([r for r, _ in self.transport.attempted if r == "telegram"]), 3)
 
 
+class WeeklyOnlyAccountTests(unittest.TestCase):
+    """An account whose API responses carry no 5-hour window (info@ account,
+    measured 2026-11-28): the collector writes only seven_day plus an explicit
+    windows_not_reported marker, and the monitor must act on the weekly window."""
+
+    setUp = MonitorTests.setUp
+    usage = MonitorTests.usage
+    write = MonitorTests.write
+    read = MonitorTests.read
+    run_monitor = MonitorTests.run_monitor
+
+    def weekly_only(self, seven, marker=True, **kwargs):
+        data = {"generated_at": NOW.isoformat(),
+                "claude": {"source": "authoritative", "account": "info", "windows": {
+                    "seven_day": {"used_percent": seven, "resets_at": NOW.timestamp() + 86400}}}}
+        if marker:
+            data["claude"]["windows_not_reported"] = ["five_hour"]
+        data["claude"].update(kwargs)
+        self.write("usage-latest.json", data)
+
+    def test_marked_weekly_only_snapshot_is_measured_not_stale(self):
+        self.weekly_only(35)
+        self.assertEqual(self.run_monitor(), "OK level=0 silent")
+        state = self.read()
+        self.assertEqual(state["last_known_percent_seven_day"], 35)
+        self.assertIsNone(state["last_known_percent_five_hour"])
+
+    def test_weekly_only_warning_pause_and_release_name_only_the_weekly_window(self):
+        for value, expected in ((80, "SENT warning level=80"), (90, "SENT pause level=90"),
+                                (85, "UNCHANGED level=90"), (79, "SENT resume level=0")):
+            self.weekly_only(value)
+            self.assertEqual(self.run_monitor(), expected)
+        texts = [c for _, c in self.transport.sent]
+        self.assertTrue(texts)
+        for text in texts:
+            self.assertIn("Claude heti keret", text)
+            self.assertNotIn("5 órás", text)
+        self.assertFalse((self.store / um.PAUSE).exists())
+
+    def test_weekly_only_pause_file_names_the_weekly_metric(self):
+        self.weekly_only(91)
+        self.assertEqual(self.run_monitor(), "SENT pause level=90")
+        self.assertEqual(self.read(um.PAUSE)["metric"], "seven_day")
+
+    def test_missing_five_hour_without_marker_stays_stale(self):
+        self.weekly_only(35, marker=False)
+        self.assertEqual(self.run_monitor(), "STALE silent")
+        self.weekly_only(35, windows_not_reported="five_hour")
+        self.assertEqual(self.run_monitor(), "STALE silent")
+        self.assertEqual(self.transport.sent, [])
+
+    def test_weekly_window_can_never_be_marked_absent(self):
+        data = {"generated_at": NOW.isoformat(), "claude": {
+            "source": "authoritative", "windows_not_reported": ["five_hour", "seven_day"],
+            "windows": {"five_hour": {"used_percent": 10, "resets_at": NOW.timestamp() + 3600}}}}
+        self.write("usage-latest.json", data)
+        self.assertEqual(self.run_monitor(), "STALE silent")
+
+    def test_marker_does_not_hide_a_reported_five_hour_window(self):
+        self.usage(99, 10, windows_not_reported=["five_hour"])
+        self.assertEqual(self.run_monitor(), "SENT pause level=90")
+        self.assertEqual(self.read(um.PAUSE)["metric"], "five_hour")
+
+    def test_switch_from_two_windows_to_weekly_only_keeps_pause_logic(self):
+        self.usage(98, 50)
+        self.assertEqual(self.run_monitor(), "SENT pause level=90")
+        self.weekly_only(50)
+        self.assertEqual(self.run_monitor(), "SENT resume level=0")
+
+
 if __name__ == "__main__":
     unittest.main()

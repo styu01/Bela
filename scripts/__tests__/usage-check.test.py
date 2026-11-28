@@ -86,5 +86,74 @@ class TestUsageCheck(unittest.TestCase):
             os.unlink(path)
 
 
+class TestWeeklyOnlyAccount(unittest.TestCase):
+    """info@ account: the snapshot carries only seven_day plus an explicit
+    windows_not_reported marker (see usage-collect.py)."""
+
+    def run_raw(self, claude, age_minutes=0):
+        now = datetime.now(timezone.utc)
+        payload = {"generated_at": now.isoformat(), "claude": dict(
+            {"authoritative_collected_at_unix": (now - timedelta(minutes=age_minutes)).timestamp()}, **claude)}
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            json.dump(payload, f)
+            path = f.name
+        try:
+            env = dict(os.environ, USAGE_CHECK_LATEST_PATH=path)
+            return subprocess.run([sys.executable, SCRIPT], env=env, text=True, capture_output=True, check=False)
+        finally:
+            os.unlink(path)
+
+    def weekly(self, seven, **extra):
+        reset = datetime.now(timezone.utc).timestamp() + 86400
+        claude = {"account": "info", "windows_not_reported": ["five_hour"],
+                  "windows": {"seven_day": {"used_percent": seven, "resets_at": reset}}}
+        claude.update(extra)
+        return claude
+
+    def test_weekly_only_is_measured_and_says_so(self):
+        result = self.run_raw(self.weekly(35), age_minutes=3)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(),
+                         "USAGE info Claude 5 órás keret=n/a (ez a fiók nem ad 5 órás ablakot) heti keret=35% friss(3p) OK")
+
+    def test_weekly_only_thresholds(self):
+        for seven, code, status in ((79.99, 0, "OK"), (80, 0, "FIGYELMEZTETÉS"), (89.99, 0, "FIGYELMEZTETÉS"), (90, 2, "STOP")):
+            with self.subTest(seven=seven):
+                result = self.run_raw(self.weekly(seven))
+                self.assertEqual(result.returncode, code)
+                self.assertTrue(result.stdout.strip().endswith(status), result.stdout)
+
+    def test_missing_five_hour_without_marker_is_unknown(self):
+        claude = self.weekly(35)
+        del claude["windows_not_reported"]
+        result = self.run_raw(claude)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("USAGE info Claude 5 órás/heti keret ISMERETLEN", result.stdout)
+        for bad in ("five_hour", ["seven_day"], None):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.run_raw(self.weekly(35, windows_not_reported=bad)).returncode, 3)
+
+    def test_weekly_window_stays_required_and_fresh(self):
+        claude = self.weekly(35)
+        claude["windows"] = {}
+        self.assertEqual(self.run_raw(claude).returncode, 3)
+        result = self.run_raw(self.weekly(35), age_minutes=26)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("ISMERETLEN (nincs friss mérés)", result.stdout)
+
+    def test_account_label_defaults_to_styu01(self):
+        for account in (None, "other", 5):
+            with self.subTest(account=account):
+                result = self.run_raw(self.weekly(35, account=account))
+                self.assertTrue(result.stdout.startswith("USAGE styu01 Claude"), result.stdout)
+
+    def test_output_has_no_dash_separators(self):
+        for claude in (self.weekly(35), self.weekly(95), dict(self.weekly(35), windows={})):
+            out = self.run_raw(claude).stdout
+            self.assertNotIn(" -- ", out)
+            self.assertNotIn("\u2014", out)
+            self.assertNotIn("\u2013", out)
+
+
 if __name__ == "__main__":
     unittest.main()

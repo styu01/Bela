@@ -17,6 +17,10 @@ Reads current usage/quota status for two providers:
     ~/.claude/projects/*/*.jsonl transcripts when there's no usable
     cache: missing/expired token, a 403 (real scope problem), or a
     stale/absent cache.
+    The weekly window is required; the 5-hour window may be absent for an
+    account whose responses carry none (the info@ account, measured
+    2026-11-28). The snapshot then lists it in claude.windows_not_reported,
+    and claude.account names the measured account (styu01 or info).
 
 Default run prints a human-readable summary, prints any
 "ALERT: ..." lines (de-duplicated via store/usage-alert-state.json),
@@ -34,6 +38,7 @@ noted in the summary/snapshot instead of raising.
 
 import argparse
 import glob
+import hmac
 import json
 import math
 import os
@@ -109,6 +114,15 @@ STATUSLINE_CACHE_PATH = os.path.join(STORE_DIR, "usage-statusline-latest.json")
 USAGE_HEADERS_DISABLED_PATH = os.path.join(STORE_DIR, ".usage-headers-disabled")
 STATE_PATH = os.path.join(STORE_DIR, "usage-alert-state.json")
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
+# The second Claude account's token (info@ account, "info keret"). The fleet
+# token file holds a copy of it while the fleet runs on that account; any other
+# token is the default styu01 account. Only compared, never printed.
+INFO_TOKEN_PATH = os.path.join(STORE_DIR, ".claude-oauth-token.info")
+ACCOUNT_DEFAULT = "styu01"
+ACCOUNT_INFO = "info"
+# Windows an account may legitimately not report. The weekly window is always
+# required; only the 5-hour one can be absent (see _parse_claude_usage_headers).
+OPTIONAL_CLAUDE_WINDOWS = ("five_hour",)
 
 BUDAPEST = ZoneInfo("Europe/Budapest")
 
@@ -556,11 +570,26 @@ def _read_statusline_cache(max_age_minutes, max_age_overrides=None):
     return windows, max(ages)
 
 
+def _header_names(headers):
+    try:
+        return {str(k).lower() for k in headers.keys()}
+    except (AttributeError, TypeError):
+        return set()
+
+
 def _parse_claude_usage_headers(headers):
     """Return quota windows from Messages response headers, or an error.
 
     Anthropic includes these headers on a 429 too; at the important boundary
     the HTTP status must therefore not discard otherwise valid measurements.
+
+    The weekly (7d) window is required. The 5-hour window is optional, because
+    not every plan has one: measured 2026-11-28, the info@ account's responses
+    carry only anthropic-ratelimit-unified-7d-* (and representative-claim
+    seven_day), while the styu01 account's carry both 5h-* and 7d-*. A 5h window
+    is treated as "not reported" only when NO 5h header is present at all and
+    the representative claim does not name it; any partial or malformed 5h
+    header still fails the whole measurement (conservative).
     """
     def header_number(name):
         try:
@@ -569,8 +598,17 @@ def _parse_claude_usage_headers(headers):
             return None
         return value if math.isfinite(value) else None
 
+    names = _header_names(headers)
     windows = {}
     for key, header_key in (("five_hour", "5h"), ("seven_day", "7d")):
+        if key in OPTIONAL_CLAUDE_WINDOWS:
+            prefix = f"anthropic-ratelimit-unified-{header_key}-"
+            try:
+                claim = str(headers.get("anthropic-ratelimit-unified-representative-claim") or "").strip().lower()
+            except (AttributeError, TypeError):
+                claim = ""
+            if not any(n.startswith(prefix) for n in names) and claim != key:
+                continue
         utilization = header_number(f"anthropic-ratelimit-unified-{header_key}-utilization")
         resets_at = header_number(f"anthropic-ratelimit-unified-{header_key}-reset")
         # A slight value above one is a server-side rounding/saturation value,
@@ -585,15 +623,36 @@ def _parse_claude_usage_headers(headers):
     return windows, None
 
 
-def _collect_claude_usage_headers():
+def _claude_account_label(token):
+    """'info' when the token is the info@ account's, else the default account.
+
+    Constant-time comparison; neither token is logged or returned."""
+    try:
+        with open(INFO_TOKEN_PATH, "r", encoding="utf-8") as f:
+            info = f.read().strip()
+    except (OSError, UnicodeError):
+        info = ""
+    if info and token and hmac.compare_digest(info.encode("utf-8"), token.encode("utf-8")):
+        return ACCOUNT_INFO
+    return ACCOUNT_DEFAULT
+
+
+def _not_reported_windows(windows):
+    return [k for k in OPTIONAL_CLAUDE_WINDOWS if k not in windows]
+
+
+def _collect_claude_usage_headers(context=None):
     """Read Claude quota utilization from a minimal Messages API response.
 
     The usage is carried in response headers. Error text deliberately omits
-    both response bodies and credentials.
+    both response bodies and credentials. When a dict is passed as context,
+    context["account"] receives the measured account's label (never a token).
     """
     token, token_source = _read_claude_token()
     if not token:
         return None, "no oauth token available", "no_token"
+    if context is not None:
+        context["account"] = _claude_account_label(token)
 
     body = json.dumps({
         "model": "claude-haiku-4-5-20251001",
@@ -699,11 +758,14 @@ def _collect_claude_authoritative():
     return windows, None, None
 
 
-def _read_cached_claude_authoritative(max_age_minutes, now_utc=None):
+def _read_cached_claude_authoritative(max_age_minutes, now_utc=None, meta=None):
     """Return (windows_dict, age_minutes) from the last snapshot written to
     store/usage-latest.json IF its Claude entry was authoritative (or itself
     already authoritative_cached) and younger than max_age_minutes.
-    Returns (None, None) if there's no usable cache."""
+    Returns (None, None) if there's no usable cache. When a dict is passed as
+    meta, it receives the cached snapshot's "account" and
+    "windows_not_reported" (validated) so the cache keeps describing the same
+    account and the same deliberately absent windows."""
     if not os.path.exists(LATEST_PATH):
         return None, None
     try:
@@ -740,6 +802,14 @@ def _read_cached_claude_authoritative(max_age_minutes, now_utc=None):
         age_minutes = (now_utc - gen_dt).total_seconds() / 60.0
     if age_minutes < 0 or age_minutes > max_age_minutes:
         return None, None
+    if meta is not None:
+        account = claude.get("account")
+        if isinstance(account, str) and account in (ACCOUNT_DEFAULT, ACCOUNT_INFO):
+            meta["account"] = account
+        absent = claude.get("windows_not_reported")
+        if isinstance(absent, list) and absent and all(
+                isinstance(k, str) and k in OPTIONAL_CLAUDE_WINDOWS and k not in windows for k in absent):
+            meta["windows_not_reported"] = list(absent)
     return windows, age_minutes
 
 
@@ -804,11 +874,17 @@ def collect_claude():
     result = {"provider": "claude", "source": "estimate", "ok": True}
 
     headers_enabled = _claude_usage_headers_enabled()
+    context = {}
     if headers_enabled:
-        windows, err, err_kind = _collect_claude_usage_headers()
+        windows, err, err_kind = _collect_claude_usage_headers(context)
+        if context.get("account"):
+            result["account"] = context["account"]
         if windows is not None:
             result["source"] = "authoritative"
             result["windows"] = windows
+            absent = _not_reported_windows(windows)
+            if absent:
+                result["windows_not_reported"] = absent
             result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp()
             return result
         errors = [err] if err else []
@@ -858,12 +934,23 @@ def collect_claude():
     # enough. A missing token or a 403 (real scope problem) skips the cache
     # and goes straight to the estimate.
     if saw_transient:
+        cache_meta = {}
         cached_windows, age_minutes = _read_cached_claude_authoritative(
-            CONFIG["claude_authoritative_cache_max_age_min"] if headers_enabled else LEGACY_AUTHORITATIVE_CACHE_MAX_AGE_MIN
+            CONFIG["claude_authoritative_cache_max_age_min"] if headers_enabled else LEGACY_AUTHORITATIVE_CACHE_MAX_AGE_MIN,
+            meta=cache_meta,
         )
+        # After an account switch the cache describes the OTHER account's
+        # quota; it must not be presented as the current one.
+        if (cached_windows is not None and result.get("account") and cache_meta.get("account")
+                and cache_meta["account"] != result["account"]):
+            cached_windows = None
         if cached_windows is not None:
             result["source"] = "authoritative_cached"
             result["windows"] = cached_windows
+            if cache_meta.get("windows_not_reported"):
+                result["windows_not_reported"] = cache_meta["windows_not_reported"]
+            if cache_meta.get("account") and not result.get("account"):
+                result["account"] = cache_meta["account"]
             result["cache_age_minutes"] = round(age_minutes, 1)
             result["authoritative_collected_at_unix"] = datetime.now(timezone.utc).timestamp() - (age_minutes * 60)
             return result
@@ -932,7 +1019,8 @@ def render_summary(snapshot):
 
     lines.append("")
     claude = snapshot["claude"]
-    lines.append(f"Claude (source: {claude.get('source')}):")
+    account_txt = f", account: {claude['account']}" if claude.get("account") else ""
+    lines.append(f"Claude (source: {claude.get('source')}{account_txt}):")
     if not claude.get("ok"):
         lines.append(f"  error: {claude.get('error')}")
     elif claude.get("source") in ("authoritative", "authoritative_cached", "authoritative_statusline"):
@@ -959,6 +1047,11 @@ def render_summary(snapshot):
             lines.append(
                 f"  {names.get(label, label)} limit: {pct_str} used (reset: {local_str}, {rel})"
                 f"{_format_pace_suffix(pace)}"
+            )
+        for label in claude.get("windows_not_reported") or []:
+            lines.append(
+                f"  {names.get(label, label)} limit: not reported for this account "
+                "(the API response carries no such window)"
             )
     else:
         if claude.get("auth_error"):

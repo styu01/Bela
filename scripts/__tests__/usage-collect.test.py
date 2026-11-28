@@ -1422,5 +1422,156 @@ class TestCollectClaudeStatuslinePriority(unittest.TestCase):
         self.assertIn("claude_five_hour", scope_keys)
 
 
+class TestWeeklyOnlyAccount(unittest.TestCase):
+    """The info@ account's Messages responses carry only the 7d window
+    (measured 2026-11-28: 7d-utilization/7d-reset/7d-status and
+    representative-claim=seven_day, no 5h-* header at all). The styu01
+    account's carry both. A missing 5h window is accepted only in that exact
+    shape, and the snapshot says so explicitly."""
+
+    INFO_HEADERS = {
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-representative-claim": "seven_day",
+        "anthropic-ratelimit-unified-reset": "1795899600",
+        "anthropic-ratelimit-unified-7d-utilization": "0.35",
+        "anthropic-ratelimit-unified-7d-reset": "1795899600",
+        "anthropic-ratelimit-unified-7d-status": "allowed",
+        "anthropic-ratelimit-unified-fallback-percentage": "0.5",
+    }
+
+    def test_weekly_only_headers_parse_without_five_hour(self):
+        windows, err = uc._parse_claude_usage_headers(self.INFO_HEADERS)
+        self.assertIsNone(err)
+        self.assertEqual(set(windows), {"seven_day"})
+        self.assertEqual(windows["seven_day"]["used_percent"], 35.0)
+
+    def test_real_http_message_headers_are_case_insensitive(self):
+        import email.message
+        msg = email.message.Message()
+        for k, v in self.INFO_HEADERS.items():
+            msg[k.title()] = v
+        windows, err = uc._parse_claude_usage_headers(msg)
+        self.assertIsNone(err)
+        self.assertEqual(set(windows), {"seven_day"})
+        msg["Anthropic-Ratelimit-Unified-5H-Status"] = "allowed"
+        windows, err = uc._parse_claude_usage_headers(msg)
+        self.assertIsNone(windows)
+        self.assertIn("5h", err)
+
+    def test_any_partial_five_hour_header_still_fails(self):
+        for extra in ({"anthropic-ratelimit-unified-5h-status": "allowed"},
+                      {"anthropic-ratelimit-unified-5h-utilization": "0.1"},
+                      {"anthropic-ratelimit-unified-5h-reset": "1795882200"},
+                      {"anthropic-ratelimit-unified-5h-utilization": "nan",
+                       "anthropic-ratelimit-unified-5h-reset": "1795882200"}):
+            with self.subTest(extra=extra):
+                windows, err = uc._parse_claude_usage_headers(dict(self.INFO_HEADERS, **extra))
+                self.assertIsNone(windows)
+                self.assertEqual(err, "messages response missing or invalid 5h usage headers")
+
+    def test_five_hour_claim_without_five_hour_headers_fails(self):
+        headers = dict(self.INFO_HEADERS, **{"anthropic-ratelimit-unified-representative-claim": "five_hour"})
+        windows, err = uc._parse_claude_usage_headers(headers)
+        self.assertIsNone(windows)
+        self.assertIn("5h", err)
+
+    def test_weekly_window_is_never_optional(self):
+        headers = {k: v for k, v in self.INFO_HEADERS.items() if "-7d-" not in k}
+        windows, err = uc._parse_claude_usage_headers(headers)
+        self.assertIsNone(windows)
+        self.assertEqual(err, "messages response missing or invalid 7d usage headers")
+        windows, err = uc._parse_claude_usage_headers({})
+        self.assertIsNone(windows)
+
+    def test_collect_marks_absent_window_and_account(self):
+        cm = MagicMock()
+        cm.__enter__.return_value.headers = self.INFO_HEADERS
+        cm.__enter__.return_value.read.return_value = b"{}"
+        cm.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as tmp:
+            info = os.path.join(tmp, ".claude-oauth-token.info")
+            with open(info, "w") as f:
+                f.write("info-token\n")
+            with patch.object(uc, "INFO_TOKEN_PATH", info), \
+                 patch.object(uc, "_claude_usage_headers_enabled", return_value=True), \
+                 patch.object(uc, "_read_claude_token", return_value=("info-token", "fleet_token_file")), \
+                 patch("urllib.request.urlopen", return_value=cm):
+                result = uc.collect_claude()
+        self.assertEqual(result["source"], "authoritative")
+        self.assertEqual(result["account"], "info")
+        self.assertEqual(result["windows_not_reported"], ["five_hour"])
+        self.assertEqual(set(result["windows"]), {"seven_day"})
+        self.assertNotIn("info-token", json.dumps(result))
+        summary = uc.render_summary({"generated_at_local": "x", "codex": {"ok": True, "windows": {}}, "claude": result})
+        self.assertIn("account: info", summary)
+        self.assertIn("5-hour limit: not reported for this account", summary)
+        self.assertNotIn("info-token", summary)
+
+    def test_two_window_account_has_no_marker(self):
+        windows = {"five_hour": {"used_percent": 2, "resets_at": 1}, "seven_day": {"used_percent": 70, "resets_at": 2}}
+        with patch.object(uc, "_claude_usage_headers_enabled", return_value=True), \
+             patch.object(uc, "_collect_claude_usage_headers", return_value=(windows, None, None)):
+            result = uc.collect_claude()
+        self.assertNotIn("windows_not_reported", result)
+
+    def test_account_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = os.path.join(tmp, ".claude-oauth-token.info")
+            with patch.object(uc, "INFO_TOKEN_PATH", info):
+                self.assertEqual(uc._claude_account_label("abc"), "styu01")  # no info file
+                with open(info, "w") as f:
+                    f.write("abc\n")
+                self.assertEqual(uc._claude_account_label("abc"), "info")
+                self.assertEqual(uc._claude_account_label("abd"), "styu01")
+                self.assertEqual(uc._claude_account_label(""), "styu01")
+                open(info, "w").close()
+                self.assertEqual(uc._claude_account_label("abc"), "styu01")  # empty info file
+
+    def _cached_run(self, cached_claude, current_account):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = os.path.join(tmp, "usage-latest.json")
+            now = datetime.now(timezone.utc)
+            cached_claude = dict(cached_claude, authoritative_collected_at_unix=now.timestamp() - 300)
+            with open(latest, "w") as f:
+                json.dump({"generated_at": now.isoformat(), "claude": cached_claude}, f)
+
+            def failing(context=None):
+                if context is not None:
+                    context["account"] = current_account
+                return None, "messages URLError", "transient"
+            with patch.object(uc, "LATEST_PATH", latest), \
+                 patch.object(uc, "_claude_usage_headers_enabled", return_value=True), \
+                 patch.object(uc, "_collect_claude_usage_headers", side_effect=failing), \
+                 patch.object(uc, "_read_statusline_cache", return_value=(None, None)), \
+                 patch.object(uc, "_collect_claude_estimate", return_value={"files_scanned": 0}):
+                return uc.collect_claude()
+
+    def test_cache_keeps_marker_for_same_account(self):
+        cached = {"source": "authoritative", "account": "info", "windows_not_reported": ["five_hour"],
+                  "windows": {"seven_day": {"used_percent": 35, "resets_at": 1795899600}}}
+        result = self._cached_run(cached, "info")
+        self.assertEqual(result["source"], "authoritative_cached")
+        self.assertEqual(result["windows_not_reported"], ["five_hour"])
+        self.assertEqual(result["account"], "info")
+
+    def test_cache_from_the_other_account_is_not_reused(self):
+        cached = {"source": "authoritative", "account": "styu01",
+                  "windows": {"five_hour": {"used_percent": 1, "resets_at": 1795882200},
+                              "seven_day": {"used_percent": 34, "resets_at": 1796083200}}}
+        result = self._cached_run(cached, "info")
+        self.assertEqual(result["source"], "estimate")
+        self.assertEqual(result["account"], "info")
+
+    def test_cache_marker_cannot_hide_weekly_or_a_present_window(self):
+        for absent in (["seven_day"], ["five_hour"], "five_hour", [1]):
+            with self.subTest(absent=absent):
+                cached = {"source": "authoritative", "account": "info", "windows_not_reported": absent,
+                          "windows": {"five_hour": {"used_percent": 1, "resets_at": 1795882200},
+                                      "seven_day": {"used_percent": 34, "resets_at": 1796083200}}}
+                result = self._cached_run(cached, "info")
+                self.assertEqual(result["source"], "authoritative_cached")
+                self.assertNotIn("windows_not_reported", result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
