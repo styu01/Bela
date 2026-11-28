@@ -550,7 +550,8 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   // (tens of thousands of lines for autobot/iris), and its last transcript
   // could start a block clock that ends in a false persistent-block alert. Only
   // a POSITIVE stop skips (KISPROGI 6584 K2: tmux answered without the session,
-  // or exited with a status): a timeout / kill / spawn failure of the probe, a
+  // or exited with a status together with its own "no server" message, KISPROGI
+  // 6611 L; a bare exit 1 is not proof): a timeout / kill / spawn failure of the probe, a
   // running agent and a remote one keep the fail-closed path with their block
   // clock, and the main agent is never skipped here.
   if (name !== MAIN_AGENT_ID && agentPositivelyStopped(name)) {

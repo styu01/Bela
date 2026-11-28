@@ -1386,7 +1386,9 @@ export function isAgentRunning(name: string): boolean {
 
 /**
  * KISPROGI 6584 K2: true only when a LOCAL agent is positively not running: `tmux list-sessions` succeeded without its
- * session, or tmux exited with a numeric status (no tmux server). agentRunState() reads every local probe failure as
+ * session, or tmux exited with a numeric status AND its own "no server" message on stderr ("no server running on ..."
+ * or "error connecting to ... (No such file or directory)"; KISPROGI 6611 L, see localProbeFailureProvesStopped): any
+ * other non-zero exit is not proof. agentRunState() reads every local probe failure as
  * 'stopped', a 3 s timeout too; a caller that drops state for a stopped agent (the context-restart gate) must not do
  * so for an agent that is merely behind a stuck tmux. A remote agent is never "positively stopped" here.
  */

@@ -1018,6 +1018,100 @@ describe('auth-store-gate: KISPROGI 6624 (unknown-place store operands, mv -t, e
   })
 })
 
+// KISPROGI 6632: git command-valued config runs at the repository's top (V1), exported / assigned command variables in
+// the chain (V2), GIT_CONFIG_COUNT / GIT_CONFIG_PARAMETERS (V3), filter / diff / merge drivers (V4), a word ending in ';'
+// between multiplexer commands (V5), mv -ft / --targ= (V6), GNU long-option prefixes (V7), tools that remove or rewrite
+// their input (V8), ~- (V9), awk option values (V10), more exec forms (V11), rglob / ** (V12), npm / pnpm global options
+// before the subcommand (V13). Plus what turned up while fixing them (measured): a one-letter long prefix, awk's long
+// options, perl -M/-I beside -i, and a decompressor's output file.
+const R6632_DENY: string[] = [
+  `export GIT_PAGER='rm -rf store'; git log`, `declare -x GIT_EDITOR='rm -rf store'; git commit`,
+  `typeset -x PAGER='rm -rf store'; git log`, `GIT_PAGER='rm -rf store'; export GIT_PAGER; git log`,
+  `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='rm -rf store' git log`,
+  `GIT_CONFIG_PARAMETERS="'core.pager'='rm -rf store'" git log`,
+  `git -c filter.x.clean='rm -rf store' add .`, `git -c filter.x.process='rm -rf store' add .`,
+  `git -c diff.x.textconv='rm -rf store' diff`, `git -c merge.x.driver='rm -rf store' merge y`, `git config filter.x.smudge 'rm -rf store'`,
+  `tmux new -d sleep\\; run-shell 'rm -rf store'`, `tmux new -d 'true;' run-shell 'rm -rf store'`,
+  'mv -ft /tmp store', 'mv -fvt /tmp store', 'mv --target /tmp store', 'mv --targ=/tmp store',
+  `env --chd=${ROOT} rm store/claudeclaw.db`, `make --dir=${ROOT} --ev='x: ; rm -rf store' x`, 'tar -cf /tmp/x.tar --remove-f store',
+  'gzip store/claudeclaw.db', 'bzip2 store/claudeclaw.db', 'xz store/claudeclaw.db', 'zstd --rm store/claudeclaw.db', 'gzip -r store',
+  'tar -cf /tmp/x.tar --remove-files store', `gawk -i inplace '{print}' store/claudeclaw.db`, `perl -pi -e 's/a/b/' store/claudeclaw.db`,
+  `cd /tmp; cd ${ROOT}; cd /tmp; rm -rf ~-/store`, 'rm -rf ~-/store',
+  `awk -v x=1 '{print > FILENAME}' store/claudeclaw.db`, `awk -F: '{print > FILENAME}' store/claudeclaw.db`,
+  `gawk -e '{print > FILENAME}' store/claudeclaw.db`,
+  `python3 -c "import os; os.execlp('sh','sh','-c','rm -rf store')"`,
+  `python3 -c "import asyncio; asyncio.run(asyncio.create_subprocess_shell('rm -rf store'))"`,
+  `python3 -c "import os; a=['rm','-rf','store']; os.execvp(a[0], a)"`,
+  `python3 -c "import pathlib; [p.unlink() for p in pathlib.Path('.').rglob('claudeclaw.db')]"`,
+  `python3 -c "import glob,os; [os.remove(p) for p in glob.glob('**/claudeclaw.db', recursive=True)]"`,
+  'npm --prefix x exec -- rm -rf store', 'pnpm --dir x exec rm -rf store', `npm -w pkg exec -- sh -c 'rm -rf store'`,
+  // found while fixing it (measured): any unambiguous long prefix (env --c=DIR, mv --t DIR), awk's long options with
+  // "=", perl -i in a switch bundle, a decompressor's output (the name without its suffix, -o, lz4 IN OUT)
+  `env --c=${ROOT} rm store/claudeclaw.db`, 'mv --t /tmp store', 'tar -cf /tmp/x.tar --rem store',
+  `gawk --source='{print > FILENAME}' store/claudeclaw.db`, `gawk --incl inplace '{print}' store/claudeclaw.db`,
+  `perl -ni -e 'print' store/claudeclaw.db`, `perl -i.bak -pe 's/a/b/' store/claudeclaw.db`,
+  'gunzip -f store/claudeclaw.db.gz', 'gunzip -k store/claudeclaw.db.gz', 'xz -d store/claudeclaw.db.xz',
+  'zstd -d /tmp/x.zst -o store/claudeclaw.db', 'lz4 -d /tmp/x.lz4 store/claudeclaw.db',
+  'zip -m /tmp/x.zip store/claudeclaw.db', 'zip --move /tmp/x.zip store/claudeclaw.db', 'zip -rm /tmp/x.zip store',
+  'rsync -a --remove-source-files store/claudeclaw.db /tmp/x/', 'git --config-env=filter.x.clean=X add .',
+  // only the V12 / V2 "later" / V11 argv rules decide these
+  `python3 -c "import pathlib; [p.unlink() for p in pathlib.Path('.').rglob('*.db')]"`,
+  `python3 -c "import glob,os; [os.remove(p) for p in glob.glob('**/*.db', recursive=True)]"`,
+  `export EDITOR='rm -rf store'`, `python3 -c "import os; os.execlp('rm','rm','-rf','store')"`,
+]
+const R6632_PASS: string[] = [
+  'GIT_PAGER=cat git log', 'export EDITOR=vim', 'export GIT_PAGER=cat; git log', `export PAGER='less -R'; git log`,
+  'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git log',
+  `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0='rm -rf store' git log`,
+  `git config filter.lfs.clean 'git-lfs clean -- %f'`, 'git -c diff.x.textconv=cat diff', `git config alias.lg 'log --oneline --graph'`,
+  `tmux new -d 'echo a;' display-message hi`, 'mv -ft /tmp a.txt', 'mv --targ=/tmp a.txt', 'env --chd=/tmp rm -f a.txt',
+  `make --dir=/tmp/x --ev='x: ; rm -rf store2' x`,
+  'gzip -k store/claudeclaw.db', 'zstd store/claudeclaw.db', 'gzip a.log', `perl -pi -e 's/a/b/' a.txt`, `gawk -i inplace '{print}' a.txt`,
+  'tar -cf /tmp/x.tar src', 'rm -rf ~-/foo.tmp', `awk -v x=1 '{print}' store/a.log`, `awk -F: '{print $1}' /etc/passwd`,
+  `python3 -c "import os; os.execlp('ls','ls','-l')"`, `python3 -c "import asyncio; asyncio.run(asyncio.create_subprocess_exec('ls','-l'))"`,
+  `python3 -c "import pathlib; print(list(pathlib.Path('.').rglob('*.py')))"`, 'npm --prefix x exec vitest', 'pnpm --dir x exec vitest run',
+  'mv --t /tmp a.txt', `gawk --source='{print}' store/claudeclaw.db`, `perl -Mstrict -ne 'print' store/claudeclaw.db`,
+  `perl -I/tmp/lib -ne 'print' store/claudeclaw.db`, 'gunzip -c store/claudeclaw.db.gz', 'gunzip -t store/claudeclaw.db.gz',
+  'gunzip store/a.log.gz', 'zstd -d /tmp/x.zst -o /tmp/y', 'gzip -c store/claudeclaw.db',
+  'zip -m /tmp/x.zip a.txt', 'zip -r /tmp/x.zip store/a.log', 'rsync -a --remove-source-files store/a.log /tmp/x/',
+  'git --config-env=user.name=X log', `export EDITOR='rm -rf build'`,
+  `python3 -c "import pathlib; print(sorted(pathlib.Path('.').rglob('*.db')))"`,
+]
+const HAS = (tool: string) => spawnSync('sh', ['-c', `command -v ${tool}`]).status === 0
+const R6632_REAL: Array<[string, 'leaks' | 'db', boolean]> = [
+  ['gzip store/claudeclaw.db', 'db', false], ['tar -cf x.tar --remove-files store', 'db', false],
+  [`perl -pi -e 's/D/X/' store/claudeclaw.db`, 'db', false], [`awk -v x=1 '{print > FILENAME}' store/claudeclaw.db`, 'db', false],
+  ['mkdir -p x && mv -ft x store', 'db', false], ['mkdir -p x && mv --targ=x store', 'db', false],
+  [`python3 -c "import os; os.execlp('sh','sh','-c','rm -rf store')"`, 'db', false],
+  [`python3 -c "import asyncio; asyncio.run(asyncio.create_subprocess_shell('rm -rf store'))"`, 'db', false],
+  [`python3 -c "import pathlib; [p.unlink() for p in pathlib.Path('.').rglob('claudeclaw.db')]"`, 'db', false],
+  ['mkdir -p x && mv --t x store', 'db', false],
+  [`python3 -c "import pathlib; [p.unlink() for p in pathlib.Path('.').rglob('*.db')]"`, 'db', false], [`gawk --source='{print > FILENAME}' store/claudeclaw.db`, 'db', false],
+  [`perl -ni -e 'print "X"' store/claudeclaw.db`, 'db', false],
+  ['echo NEW | gzip > n.gz && mv n.gz store/x.gz && cd store && mv x.gz claudeclaw.db.gz && gunzip -f claudeclaw.db.gz', 'db', false],
+  ...(HAS('xz') ? [['xz store/claudeclaw.db', 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('bzip2') ? [['bzip2 store/claudeclaw.db', 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('zstd') ? [['zstd -q --rm store/claudeclaw.db', 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('zip') ? [['zip -qm x.zip store/claudeclaw.db', 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('rsync') ? [['mkdir -p x && rsync -a --remove-source-files store/claudeclaw.db x/', 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('gawk') ? [[`gawk -i inplace '{print "X"}' store/claudeclaw.db`, 'db', false] as [string, 'db', boolean]] : []),
+]
+
+describe('auth-store-gate: KISPROGI 6632 (git commands at the repository top, exported command variables, git drivers, mv -ft, long-option prefixes, removing compressors, ~-, awk options, exec forms, rglob, npm options)', () => {
+  for (const c of R6632_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6632_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('an alias or a command key of git runs at the repository top, so a subfolder of the install counts as the install root', () => {
+    const sub = join(ROOT, 'scripts', 'hooks')
+    for (const c of [`git -c alias.x='!rm -rf store' x`, `git -c core.pager='rm -rf store' log`, `git config alias.x '!rm -rf store'`])
+      expect(bash(c, sub), c).toBe('DENY')
+    for (const c of [`git -c alias.x='!ls' x`, 'git -c core.pager=cat log', `git config alias.lg 'log --oneline'`])
+      expect(bash(c, sub), c).toBe('pass')
+  })
+  it.skipIf(!BWRAP)('every refused form above that is relative really hits the DB (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6632_REAL) realRun(cmd, effect, cc)
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')
