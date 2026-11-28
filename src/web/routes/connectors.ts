@@ -16,6 +16,8 @@ import { readBody, json } from '../http-helpers.js'
 import { shellEscape } from '../sanitize.js'
 import { getExternalProjectPaths, addExternalProjectPath, removeExternalProjectPath, getGitHubRepos, installGitHubRepo, removeGitHubRepo, updateGitHubRepo, detectRequiredEnvVars } from '../dashboard-settings.js'
 import { listSecrets, setSecret, getSecret, deleteSecret } from '../vault.js'
+import { guardProtectedVault } from '../vault-guard.js'
+import { isProtectedVaultId, protectedVaultIdUsable } from '../vault-protected.js'
 import {
   getBindings, addBinding, removeBinding, removeBindingsForSecret,
   syncSecret, syncAllBindings, scanMcpConfigs, unsyncBinding,
@@ -125,6 +127,9 @@ export function vaultAndBindEnvSecretsMultiTarget(
   for (const [key, value] of Object.entries(envSecrets)) {
     if (!value) continue
     const vaultId = `${slugifyMcp(serverName)}-${key.toLowerCase()}`
+    if (isProtectedVaultId(vaultId) && !protectedVaultIdUsable(vaultId, `mcp install ${serverName}`)) {
+      throw new Error(`MCP env ${key}: its vault id "${vaultId}" is a protected entry; rename the server`)
+    }
     setSecret(vaultId, `${key} (${serverName})`, value)
     const existing = getBindings().find(b => b.vaultSecretId === vaultId && b.envVar === key)
     const merged = [...(existing?.targets ?? [])]
@@ -1131,6 +1136,8 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { id, label, value } = JSON.parse(body.toString()) as { id: string, label: string, value: string }
     if (!id?.trim() || !value) { json(res, { error: 'id and value required' }, 400); return true }
+    // VAULTMAINONLY: overwriting a protected entry would break its mailer silently (integrity): main / owner only
+    if (!guardProtectedVault(ctx, [id], 'write')) return true
     setSecret(id.trim(), label || id.trim(), value)
     const syncResult = syncSecret(id.trim())
     json(res, { ok: true, synced: syncResult.updated })
@@ -1146,6 +1153,8 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   const isVaultSubroute = vaultMatch && ['bindings', 'sync', 'scan', 'import', 'ssh-servers', 'ssh-keys'].includes(vaultMatch[1])
   if (vaultMatch && !isVaultSubroute && method === 'GET') {
     const id = decodeURIComponent(vaultMatch[1])
+    // VAULTMAINONLY (KISPROGI 6431, BELA 6432): a protected entry's value only to the main agent or the owner's session
+    if (!guardProtectedVault(ctx, [id], 'read')) return true
     const val = getSecret(id)
     if (val === null) { json(res, { error: 'Not found' }, 404); return true }
     json(res, { id, value: val })
@@ -1154,6 +1163,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   if (vaultMatch && !isVaultSubroute && method === 'DELETE') {
     const id = decodeURIComponent(vaultMatch[1])
+    if (!guardProtectedVault(ctx, [id], 'delete')) return true
     if (!deleteSecret(id)) { json(res, { error: 'Not found' }, 404); return true }
     removeBindingsForSecret(id)
     json(res, { ok: true })
@@ -1185,6 +1195,8 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'vaultSecretId and (envVar or headerName) required' }, 400)
       return true
     }
+    // a binding writes the value into an MCP config file anyone can read: never for a protected entry
+    if (!guardProtectedVault(ctx, [data.vaultSecretId], 'binding', { never: true })) return true
 
     let targets = data.targets || []
     if (data.serverName && targets.length === 0) {
@@ -1266,6 +1278,10 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
         targets: Array<{ mcpFilePath: string, serverName: string }>
       }>
     }
+    if (!Array.isArray(importRequests)) { json(res, { error: 'imports required' }, 400); return true }
+    // VAULTMAINONLY: an import writes the entries (main / owner only for a protected one) and may bind them (never)
+    if (!guardProtectedVault(ctx, importRequests.map(i => i?.vaultId), 'import')) return true
+    if (!guardProtectedVault(ctx, importRequests.filter(i => i?.createBinding).map(i => i?.vaultId), 'import binding', { never: true })) return true
     let imported = 0
     let bound = 0
     const errors: string[] = []

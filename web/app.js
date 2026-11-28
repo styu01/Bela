@@ -9417,12 +9417,20 @@ async function loadVault() {
       item.querySelector('button').addEventListener('click', async () => {
         if (!confirm(`Torlod: ${s.label}?`)) return
         const res = await fetch(`/api/vault/${encodeURIComponent(s.id)}`, { method: 'DELETE' })
-        if (!res.ok) { showToast('Törlés sikertelen'); return }
+        if (!res.ok) { if (!vaultProtectedRefusal(res, await res.json().catch(() => null))) showToast('Törlés sikertelen'); return }
         loadVault()
       })
       list.appendChild(item)
     }
   } catch { /* ignore */ }
+}
+
+// VAULTMAINONLY (KISPROGI 6431): a protected entry's value (mail, web host, Claude credential) goes only to the main
+// agent or the signed-in owner; a 403 says so instead of failing silently (e.g. a token-only page without a login).
+const VAULT_PROTECTED_MSG = 'Védett kulcs: csak a fő ágens vagy a bejelentkezett tulajdonos olvashatja vagy módosíthatja. Jelentkezz be a dashboardra.'
+function vaultProtectedRefusal(res, data) {
+  if (res.status === 403 && data && data.code === 'vault_protected') { showToast(VAULT_PROTECTED_MSG); return true }
+  return false
 }
 
 ;(function wireVault() {
@@ -10119,6 +10127,7 @@ function renderVaultGrid(secrets) {
       if (existing) { existing.remove(); btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> ${t('vault.btn.show')}`; return }
       const res = await fetch(`/api/vault/${encodeURIComponent(id)}`)
       const data = await res.json()
+      if (vaultProtectedRefusal(res, data)) return
       if (data.value) {
         const valEl = document.createElement('div')
         valEl.className = 'vault-card-value'
@@ -10138,6 +10147,7 @@ function renderVaultGrid(secrets) {
       card.querySelector('.vault-card-value')?.remove()
       const res = await fetch(`/api/vault/${encodeURIComponent(id)}`)
       const data = await res.json()
+      if (vaultProtectedRefusal(res, data)) return
       if (!data.value) return
       const form = document.createElement('div')
       form.className = 'vault-card-edit-form'
@@ -10160,7 +10170,7 @@ function renderVaultGrid(secrets) {
         })
         if (!res.ok) {
           const e = await res.json().catch(() => ({}))
-          showToast('Frissítés sikertelen: ' + (e.error || res.status))
+          if (!vaultProtectedRefusal(res, e)) showToast('Frissítés sikertelen: ' + (e.error || res.status))
           saveBtn.disabled = false
           saveBtn.textContent = 'Mentés'
           return
@@ -10181,7 +10191,7 @@ function renderVaultGrid(secrets) {
       const id = btn.getAttribute('data-id')
       if (!confirm(`Torlod: ${id}?`)) return
       const res = await fetch(`/api/vault/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      if (!res.ok) { showToast('Törlés sikertelen'); return }
+      if (!res.ok) { if (!vaultProtectedRefusal(res, await res.json().catch(() => null))) showToast('Törlés sikertelen'); return }
       loadVaultPage()
       loadVault()
     })

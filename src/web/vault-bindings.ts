@@ -8,6 +8,7 @@ import { getSecret, listSecrets } from './vault.js'
 import { getExternalProjectPaths } from './dashboard-settings.js'
 import { shellEscape } from './sanitize.js'
 import { logger } from '../logger.js'
+import { protectedVaultIdUsable } from './vault-protected.js'
 
 const BINDINGS_PATH = join(PROJECT_ROOT, 'store', 'vault-bindings.json')
 const VAULT_WRAPPER_PATH = join(PROJECT_ROOT, 'scripts', 'vault-env-wrapper.sh')
@@ -276,6 +277,11 @@ function applyHeadersHelper(serverCfg: any, headerBindings: VaultBinding[]): voi
 export function syncSecret(vaultSecretId: string): SyncResult {
   const bindings = getBindings().filter(b => b.vaultSecretId === vaultSecretId)
   if (bindings.length === 0) return { updated: 0, errors: [] }
+  // VAULTMAINONLY: a binding writes the value into an MCP config file every agent can read; a protected entry
+  // (vault-protected.ts) is never written there, whichever route made the binding
+  if (!protectedVaultIdUsable(vaultSecretId, 'binding sync')) {
+    return { updated: 0, errors: [`Vault secret "${vaultSecretId}" is protected: it is never written into an MCP config`] }
+  }
 
   const secret = getSecret(vaultSecretId)
   if (secret === null) return { updated: 0, errors: [`Vault secret "${vaultSecretId}" not found`] }
