@@ -135,14 +135,21 @@ export function classifyRunStateFromExit(
 }
 
 /**
- * KISPROGI 6584 K2: whether a FAILED local `tmux list-sessions` probe PROVES the session is not there. Only an exit
- * with a numeric status does (typically 1, "no server running"). A timeout or a kill (status null, a signal set) and a
- * spawn failure (no status at all) prove nothing: a running agent may simply be behind a stuck tmux. Pure.
+ * KISPROGI 6584 K2, 6611 L: whether a FAILED local `tmux list-sessions` probe PROVES the session is not there. Only a
+ * numeric exit status (no signal) WITH tmux's own "no server" message does: "no server running on ..." or "error
+ * connecting to ... (No such file or directory)". tmux also exits 1 for other reasons (a client/server protocol
+ * mismatch after an upgrade, a socket it may not open), and a timeout, a kill or a spawn failure prove nothing: a
+ * running agent may simply be behind a stuck or mismatched tmux. Pure.
  */
+const NO_TMUX_SERVER_RX = /no server running|error connecting to .*\(No such file or directory\)/i
 export function localProbeFailureProvesStopped(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false
-  const e = err as { status?: unknown; signal?: unknown }
-  return typeof e.status === 'number' && Number.isFinite(e.status) && (e.signal === undefined || e.signal === null)
+  const e = err as { status?: unknown; signal?: unknown; stderr?: unknown }
+  if (!(typeof e.status === 'number' && Number.isFinite(e.status) && (e.signal === undefined || e.signal === null))) return false
+  const stderr = typeof e.stderr === 'string' ? e.stderr
+    : (e.stderr && typeof (e.stderr as { toString?: unknown }).toString === 'function' && typeof e.stderr === 'object')
+      ? String(e.stderr) : ''
+  return NO_TMUX_SERVER_RX.test(stderr)
 }
 
 /**

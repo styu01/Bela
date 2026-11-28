@@ -29,9 +29,13 @@ describe('agentPositivelyStopped (KISPROGI 6584 K2)', () => {
     h.behaviour = () => 'agent-iris\nbela-channels\n'
     expect(agentPositivelyStopped('iris')).toBe(false)
   })
-  it('tmux exited with a status (no server running): stopped', () => {
-    h.behaviour = () => fail({ status: 1, signal: null })
+  it('tmux exited with a status and its "no server" message: stopped; another exit-1 reason: not proof', () => {
+    h.behaviour = () => fail({ status: 1, signal: null, stderr: 'no server running on /tmp/tmux-1000/default\n' })
     expect(agentPositivelyStopped('iris')).toBe(true)
+    h.behaviour = () => fail({ status: 1, signal: null, stderr: 'protocol version mismatch (client 8, server 7)\n' })
+    expect(agentPositivelyStopped('iris')).toBe(false)
+    h.behaviour = () => fail({ status: 1, signal: null })
+    expect(agentPositivelyStopped('iris')).toBe(false)
   })
   it('a timed-out, killed or unspawnable probe proves nothing', () => {
     h.behaviour = () => fail({ status: null, signal: 'SIGTERM', code: 'ETIMEDOUT' })

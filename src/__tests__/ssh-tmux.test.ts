@@ -110,9 +110,15 @@ describe('sessionInList', () => {
 
 // KISPROGI 6584 K2: only a numeric exit status of a failed local probe proves the session is gone.
 describe('localProbeFailureProvesStopped', () => {
-  it('a numeric exit status (no tmux server) proves it', () => {
-    expect(localProbeFailureProvesStopped({ status: 1, signal: null })).toBe(true)
-    expect(localProbeFailureProvesStopped({ status: 1 })).toBe(true)
+  it('a numeric exit status WITH tmux\'s "no server" message proves it (KISPROGI 6611 L)', () => {
+    expect(localProbeFailureProvesStopped({ status: 1, signal: null, stderr: 'no server running on /tmp/tmux-1000/default\n' })).toBe(true)
+    expect(localProbeFailureProvesStopped({ status: 1, stderr: 'error connecting to /tmp/tmux-1000/default (No such file or directory)\n' })).toBe(true)
+    expect(localProbeFailureProvesStopped({ status: 1, stderr: Buffer.from('no server running on /tmp/x\n') })).toBe(true)
+  })
+  it('exit 1 for another reason (protocol mismatch, socket permission) or without a message proves nothing', () => {
+    expect(localProbeFailureProvesStopped({ status: 1, signal: null })).toBe(false)
+    expect(localProbeFailureProvesStopped({ status: 1, stderr: 'protocol version mismatch (client 8, server 7)\n' })).toBe(false)
+    expect(localProbeFailureProvesStopped({ status: 1, stderr: 'error connecting to /tmp/tmux-1000/default (Permission denied)\n' })).toBe(false)
   })
   it('a timeout, a kill or a spawn failure proves nothing', () => {
     expect(localProbeFailureProvesStopped({ status: null, signal: 'SIGTERM', code: 'ETIMEDOUT' })).toBe(false)

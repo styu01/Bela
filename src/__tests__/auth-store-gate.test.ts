@@ -970,6 +970,54 @@ describe('auth-store-gate: KISPROGI 6609 (interpreter aliases and indirection, m
   })
 })
 
+// KISPROGI 6624: a store / ancestor operand in a place not known here (U1), mv -t and rsync --remove-source-files (U2),
+// exec/spawn lists, globs, the store as the code's folder, awk print > FILENAME (N1), chained / nested multiplexer
+// commands, script's options after its file, command-valued environment variables, stored git config, npm exec,
+// screen (N2).
+const R6624_DENY: string[] = [
+  'cd "$D"; rm -rf store', 'cd "$D" && rm -rf ./store', 'cd "$D" && rm -rf store/', 'cd -; rm -rf store', 'cd "$D"; mv store /tmp/x',
+  'source <(echo cd x); rm -rf store', 'cd "$D" && rm -rf .', 'cd "$D" && rm -rf ../x', 'cd "$D" && rm -rf st*',
+  'mv -t /tmp store', 'mv --target-directory=/tmp store', 'mv -t/tmp store', 'rsync -a --remove-source-files store/ /tmp/x/',
+  `python3 -c "import os; os.spawnlp(os.P_WAIT, 'rm', 'rm', 'store/claudeclaw.db')"`, `python3 -c "import os; os.execvp('rm', ['rm', 'store/claudeclaw.db'])"`,
+  `python3 -c "import os,glob; [os.remove(f) for f in glob.glob('*/*.db')]"`, `python3 -c "import os,glob; [os.remove(f) for f in glob.glob('st*/*.db')]"`,
+  `cd store && python3 -c "import os; [os.remove(f) for f in os.listdir('.')]"`, `awk '{print > FILENAME}' store/claudeclaw.db`,
+  `tmux new -d true \\; run-shell 'rm store/claudeclaw.db'`, `tmux if-shell 'true' 'run-shell "rm store/claudeclaw.db"'`,
+  `script /dev/null -c 'rm store/claudeclaw.db'`, `script -q /dev/null --command 'rm -rf store'`,
+  `GIT_EDITOR='rm store/claudeclaw.db' git commit`, `GIT_PAGER='rm store/claudeclaw.db' git log`, `env GIT_SSH_COMMAND='rm -rf store' git fetch`,
+  `PAGER='rm store/claudeclaw.db' man ls`, `git config alias.x '!rm store/claudeclaw.db'`, `git config --global core.pager 'rm store/claudeclaw.db'`,
+  `git config set alias.y '!rm -rf store'`, 'git --config-env=core.pager=X log', `npm exec -c 'rm store/claudeclaw.db'`,
+  `npm exec -- tsx -e "require('fs').unlinkSync('store/claudeclaw.db')"`, `pnpm dlx tsx -e "require('fs').unlinkSync('store/claudeclaw.db')"`,
+  `screen -dm sh -c 'rm store/claudeclaw.db'`,
+]
+const R6624_PASS: string[] = [
+  'cd "$D" && rm -rf build dist node_modules', 'cd "$W" && rm -f out.txt', 'cd "$X" && mv a.txt b.txt', 'mv -t /tmp a.txt',
+  'rsync -a --remove-source-files /tmp/a/ /tmp/b/', "cd store && awk 'NR>=10 && NR<=20' a.log", `awk '{print > "/tmp/out.txt"}' store/a.log`,
+  `python3 -c "import glob; print(glob.glob('*/*.db'))"`, 'GIT_PAGER=cat git log -1', 'PAGER=less git log', `git config alias.lg 'log --oneline'`,
+  'git config core.pager cat', 'git config --get core.pager', 'npm exec -- vitest run', 'screen -ls', `script -q /dev/null -c 'ls -la'`,
+  `tmux new -d true \\; run-shell 'echo hi'`,
+]
+const R6624_REAL: Array<[string, 'leaks' | 'db', boolean]> = [
+  ['D=.; cd "$D" && rm -rf store', 'db', false], ['mkdir -p x && mv -t x store', 'db', false],
+  ['mkdir -p x && rsync -a --remove-source-files store/ x/', 'db', false],
+  [`python3 -c "import os; os.execvp('rm', ['rm', 'store/claudeclaw.db'])"`, 'db', false],
+  [`cd store && python3 -c "import os; [os.remove(f) for f in os.listdir('.')]"`, 'db', false],
+  [`awk '{print > FILENAME}' store/claudeclaw.db`, 'db', false], [`script /dev/null -c 'rm store/claudeclaw.db'`, 'db', false],
+]
+
+describe('auth-store-gate: KISPROGI 6624 (unknown-place store operands, mv -t, exec lists, chained multiplexer commands, env and stored git commands)', () => {
+  for (const c of R6624_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6624_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it("a respawned pane runs where it was started (a place not known here) unless -c names one", () => {
+    const sub = join(ROOT, 'scripts')
+    for (const c of [`tmux respawn-pane -k -t main 'rm -rf store'`, `tmux respawn-window -k -t agent-x 'rm -rf store'`])
+      expect(bash(c, sub), c).toBe('DENY')
+    expect(bash(`tmux respawn-pane -k -t agent-x -c /tmp 'rm -rf store'`, sub)).toBe('pass')
+  })
+  it.skipIf(!BWRAP)('every refused form above that is relative really hits the DB (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6624_REAL) realRun(cmd, effect, cc)
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')

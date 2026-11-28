@@ -201,6 +201,8 @@ WRAPPER_SPECS = {
                                      "--logging-format", "--output-limit"},
                    shell_s="c", shell_l={"--command"}, no_command=True),
     "npx": dict(sv="pc", lv={"--package", "--call"}, shell_s="c", shell_l={"--call"}),
+    # KISPROGI 6624 N2: screen runs its program (-dm sh -c '...'); -X sends a screen command (no shell here)
+    "screen": dict(sv="SctThpesX", lv=set()),
     "bunx": {}, "pnpx": {},
     "then": {}, "do": {}, "else": {}, "if": {}, "while": {}, "until": {}, "!": {}, "{": {}, "(": {}, "elif": {},
 }
@@ -240,6 +242,10 @@ def _unwrap(words):
             i = len(words)
             break
         spec = WRAPPER_SPECS.get(os.path.basename(w))
+        if os.path.basename(w) in ("npm", "pnpm", "yarn") and i + 1 < len(words) and _unmark(words[i + 1]) in ("exec", "x", "dlx"):
+            # KISPROGI 6624 N2: npm exec / npm x / pnpm exec / pnpm dlx / yarn dlx run a package binary like npx
+            spec = WRAPPER_SPECS["npx"]
+            i += 1  # the subcommand; the name itself is passed below
         if spec is None:
             break
         out["wrappers"].append(os.path.basename(w))
@@ -340,7 +346,32 @@ def _unwrap(words):
         if spec.get("home") and not moved:
             out["chdirs"].append(None)
         if spec.get("no_command"):
-            out["writes"] += [_unmark(x) for x in words[i:] if not _unmark(x).startswith("-")]
+            # KISPROGI 6624 N2: script /dev/null -c '...': options may follow its positional file
+            rest_ = [_unmark(x) for x in words[i:]]
+            k = 0
+            while k < len(rest_):
+                o = rest_[k]
+                if o.startswith("--") and len(o) > 2:
+                    name, eq, val = o.partition("=")
+                    if name in lv:
+                        if not eq and k + 1 < len(rest_):
+                            k += 1
+                            val = rest_[k]
+                        if kind_of(long=name) == "shell":
+                            out["shells"].append(val)
+                elif o.startswith("-") and len(o) > 1:
+                    for j in range(1, len(o)):
+                        if o[j] in sv:
+                            val = o[j + 1:]
+                            if not val and k + 1 < len(rest_):
+                                k += 1
+                                val = rest_[k]
+                            if kind_of(letter=o[j]) == "shell":
+                                out["shells"].append(val)
+                            break
+                else:
+                    out["writes"].append(o)
+                k += 1
             i = len(words)
             break
         if spec.get("joins_shell") and not exec_seen and i < len(words):
@@ -358,9 +389,28 @@ def _unwrap_tmux(args, out) -> None:
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in ("-L", "-S", "-f") else 1
-    if i >= len(args) or args[i] not in TMUX_SHELL_SUBCOMMANDS:
+    _unwrap_tmux_commands(args[i:], out, 0)
+
+
+def _unwrap_tmux_commands(args, out, depth: int) -> None:
+    """KISPROGI 6624 N2: one or more multiplexer commands, chained with an escaped ";" (tmux new -d x \\; run-shell
+    '...'); if-shell's later words are multiplexer commands of their own."""
+    if depth > 4:
         return
-    sub, letters, i = args[i], TMUX_SHELL_SUBCOMMANDS[args[i]], i + 1
+    cmd = []
+    for a in list(args) + [";"]:
+        if a in (";", "\\;"):
+            if cmd:
+                _unwrap_tmux_one(cmd, out, depth)
+            cmd = []
+        else:
+            cmd.append(a)
+
+
+def _unwrap_tmux_one(args, out, depth: int) -> None:
+    if not args or args[0] not in TMUX_SHELL_SUBCOMMANDS:
+        return
+    sub, letters, i = args[0], TMUX_SHELL_SUBCOMMANDS[args[0]], 1
     folder = None
     while i < len(args) and args[i].startswith("-") and args[i] != "-":
         o = args[i]
@@ -383,6 +433,15 @@ def _unwrap_tmux(args, out) -> None:
         out["chdirs"].append(folder)
     elif sub not in ("new-session", "new"):
         out["chdirs"].append(None)
+    if sub in ("if-shell", "if"):
+        if i < len(args):
+            out["shells"].append(args[i])
+        for nested in args[i + 1:]:
+            try:
+                _unwrap_tmux_commands(shlex.split(nested), out, depth + 1)
+            except ValueError:
+                out["shells"].append(nested)
+        return
     if i < len(args):
         out["shells"].append(" ".join(args[i:]))
 
@@ -683,9 +742,29 @@ def _is_store_or_ancestor(path: str, cwd: str) -> bool:
     return _any_variant(_is_store_or_ancestor1, path, cwd)
 
 
+def _unknown_place_may_be_store(path: str) -> bool:
+    """KISPROGI 6624 U1: a relative path used in a place not known here (after cd "$D", cd -, source <(...), in a
+    multiplexer pane's own folder) may be the store or a folder holding it when its components can be the TAIL of
+    one of those paths (store, ./store, store/, marveen/store, marveen, s*), or when it is "." or climbs with "..".
+    A plain other name (build, /tmp/x) cannot."""
+    p = os.path.normpath(path.rstrip("/") or ".")
+    if p in (".", "") or p == ".." or p.startswith("../") or "/../" in p:
+        return True
+    parts = [c for c in p.split("/") if c and c != "."]
+    for target in _store_and_ancestors():
+        tparts = [c for c in target.split(os.sep) if c]
+        if 0 < len(parts) <= len(tparts) and all(
+                fnmatch.fnmatchcase(t, q) and not (t.startswith(".") and not q.startswith((".", "[")))
+                for t, q in zip(tparts[-len(parts):], parts)):
+            return True
+    return False
+
+
 def _is_store_or_ancestor1(path: str, cwd: str) -> bool:
     if re.search(r"[$`{]|__SUBST\d+__", path):
         return False
+    if cwd == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(path)) and not path.startswith("~"):
+        return _unknown_place_may_be_store(path)
     if re.search(r"[*?\[]", path):
         return _glob_names_dir(path, cwd, _store_and_ancestors())
     real = _resolve(path, cwd).rstrip(os.sep) or os.sep
@@ -753,7 +832,9 @@ _CODE_DELETE_RX = re.compile(
 _CODE_DELETE_BARE_RX = re.compile(r"(?<![\w$@%.>:-])(?:unlink|rmtree|remove_tree|rename|truncate)\s+(?=['\"]|glob\b)")
 _CODE_TCL_DELETE_RX = re.compile(r"\bfile\s+(?:delete|rename)\s+(?:-force\s+)?(?:--\s+)?")
 _CODE_SHELL_NAMES = ("system|exec|execSync|execFile|execFileSync|spawn|spawnSync|popen|Popen|check_call|check_output|"
-                     "getoutput|getstatusoutput|shell_exec|passthru|proc_open|pcntl_exec|capture2|capture2e|capture3|popen3")
+                     "getoutput|getstatusoutput|shell_exec|passthru|proc_open|pcntl_exec|capture2|capture2e|capture3|popen3|"
+                     # KISPROGI 6624 N1: os.execvp(...), os.spawnlp(...), posix_spawn: program + argument list
+                     "exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?")
 _CODE_SHELL_RX = re.compile(
     _CODE_PREFIX + r"(?:" + _CODE_SHELL_NAMES + r")\b\s*(?=[(\s'\"])"
     r"|(?<![\w$-])(?:subprocess|sp|os|Open3|IO|io|Kernel|child_process|cp|Process|Bun|Deno|Runtime)\s*(?:\.|::)\s*"
@@ -887,14 +968,23 @@ def _strictly_protected_literal(lit: str, places) -> bool:
     cand = cand.strip()
     if not cand or _DOT_ONLY_RX.match(cand) or _unknown_place(cand) or "\n" in cand or len(cand) > 400:
         return False
-    return any(_is_store_dir(cand, c) for c in places)
+    # a glob the code expands (glob("*/*.db"), glob("st*/claudeclaw*")) that reaches the DB or the second factor counts
+    return any(_is_store_dir(cand, c) or (re.search(r"[*?\[]", cand) and (_is_live_db_path(cand, c)
+               or _is_live_totp_word(cand, c))) for c in places if c != UNKNOWN_CWD)
 
 
 def _code_protected_shape(text: str, code: str, places, lang: str) -> bool:
     """KISPROGI 6609 N1, N3 (see _CODE_DESTRUCTIVE_ANY_RX)."""
     lits = [_code_literal(m) for m in _CODE_LITERAL_RX.finditer(text)]
     protected = [x for x in lits if _strictly_protected_literal(x, places)]
+    # KISPROGI 6624 N1: code running IN the store folder (cd store && python3 -c "... os.listdir('.') ...") reaches
+    # the DB with no protected string at all: a deleting name is enough there
     if not protected:
+        # only a deleting name counts there: an awk comparison (NR>=10) or a script reading files must stay allowed
+        if any(c != UNKNOWN_CWD and _is_store_dir(".", c) for c in places):
+            assigned0 = {m.group(1) for m in re.finditer(r"(?<![\w.$])([A-Za-z_]\w*)\s*[-+*/|&]?=(?!=)", code)}
+            return any(not (m.group(0) in assigned0 and not code[:m.start()].rstrip()[-2:].endswith((".", ":", "->")))
+                       for m in _CODE_DESTRUCTIVE_ANY_RX.finditer(code))
         return False
     # a local variable the code itself assigns (move = [...]; move += ...) is no call; as an attribute (os.remove,
     # f = os.remove) the name still counts
@@ -2466,6 +2556,10 @@ def _pax_to_stdout_reads_store(args, cwd: str) -> bool:
 
 
 _MAKE_STDIN = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+# KISPROGI 6624 N2: environment variables whose value a program runs as a command line
+_ENV_COMMAND_VARS = {"GIT_EDITOR", "GIT_PAGER", "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_SSH", "GIT_ASKPASS",
+                     "GIT_SEQUENCE_EDITOR", "GIT_PROXY_COMMAND", "PAGER", "EDITOR", "VISUAL", "MANPAGER", "LESSOPEN",
+                     "LESSCLOSE", "BROWSER", "SSH_ASKPASS", "SYSTEMD_PAGER"}
 # KISPROGI 6609 N2: git config keys whose value git runs as a shell command line
 _GIT_COMMAND_KEYS = {"core.pager", "core.editor", "core.sshcommand", "core.fsmonitor", "core.askpass", "diff.external",
                      "sequence.editor", "gpg.program", "gpg.ssh.program", "gpg.x509.program", "web.browser",
@@ -2605,6 +2699,13 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
                 if depth < 4:
                     check_bash(joined, cwd, depth + 1)
             continue
+        if re.fullmatch(r"[gmn]?awk", head or "") and args:
+            # KISPROGI 6624 N1: awk writing (print > / >>, or a pipe) while a protected file is one of its inputs
+            # ('{print > FILENAME}' store/claudeclaw.db truncates the file it reads)
+            code_words = [a for a in (_unmark(x) for x in args) if not a.startswith("-")]
+            if code_words and re.search(r"[>|]", _mask_literals(code_words[0])) and any(
+                    _is_live_db_path(f, cwd) or _is_live_totp_word(f, cwd) for f in code_words[1:]):
+                _deny("awk iras (print >) mikozben a dashboard adatbazisa vagy a masodik faktor tara a bemenete")
         if is_interp:
             for a in (_unmark(a) for a in args):
                 if _totp_word(a):
@@ -2643,8 +2744,17 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             gone = pos_args
         elif head == "mv":
             gone = pos_args[:-1]  # the store (or a folder holding it) moved away; moving INTO the root is fine
+            # KISPROGI 6624 U2: with -t DIR / --target-directory DIR every positional word is a source
+            words_ = [_unmark(a) for a in args]
+            for k, a in enumerate(words_):
+                if a in ("-t", "--target-directory") and k + 1 < len(words_):
+                    gone = [x for j, x in enumerate(words_) if not x.startswith("-") and j != k + 1]
+                elif a.startswith("--target-directory=") or (re.fullmatch(r"-[A-Za-z]*t.+", a) and not a.startswith("--")):
+                    gone = [x for x in words_ if not x.startswith("-")]
         elif head == "rsync" and any(a.startswith("--delete") for a in args):
             gone = pos_args[-1:]
+        if head == "rsync" and any(_unmark(a) in ("--remove-source-files", "--remove-sent-files") for a in args):
+            gone = gone + pos_args[:-1]  # KISPROGI 6624 U2: the sources are deleted after the copy
         for d in gone:
             if _is_store_or_ancestor(d, cwd):
                 _deny(f"a store mappa (benne a dashboard adatbazisaval) a(z) {head} celjakent")
@@ -2659,6 +2769,43 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
         if head == "git" and _git_clean_on_store(args, cwd):
             _deny("git clean -x/-X a store mappara (a gitignore-olt store-t, benne a dashboard adatbazisat torolne)")
+        if depth < 4:
+            # KISPROGI 6624 N2: an environment variable whose value a program runs as a command line (GIT_EDITOR,
+            # GIT_PAGER, GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND, PAGER, EDITOR, ...), set before the command or by env
+            for name, val in _unwrap([t for t in pipeline[idx] if t not in REDIRS])["assigns"]:
+                if name in _ENV_COMMAND_VARS and val:
+                    check_bash(val, cwd, depth + 1)
+        if head == "git" and depth < 4:
+            # KISPROGI 6624 N2: git config [--global ...] KEY VALUE stores an alias or a command key for later calls
+            # (also "git config set KEY VALUE"); --config-env takes a command key from a variable (not known here)
+            gp = _program_options("git", args)
+            for name, val, _k in gp["opts"]:
+                if name == "--config-env" and val and "=" in val:
+                    key = val.split("=", 1)[0].strip().lower()
+                    if key.startswith("alias.") or key in _GIT_COMMAND_KEYS or key.startswith("pager."):
+                        _deny("git --config-env egy parancsot futtato kulcshoz (alias, pager, editor...): a futtatott szoveg itt nem lathato")
+            rest_ = gp["rest"]
+            if rest_[:1] == ["config"]:
+                cw = [w for w in rest_[1:]]
+                if cw[:1] in (["set"], ["--add"], ["--replace-all"]):
+                    cw = cw[1:]
+                vals, k = [], 0
+                while k < len(cw):
+                    if cw[k] in ("-f", "--file", "--blob", "--type", "--default", "--comment") and k + 1 < len(cw):
+                        k += 2
+                        continue
+                    if cw[k].startswith("-"):
+                        k += 1
+                        continue
+                    vals.append(cw[k])
+                    k += 1
+                if len(vals) >= 2:
+                    key, cmdline = vals[0].strip().lower(), vals[1]
+                    if key.startswith("alias.") and cmdline.startswith("!"):
+                        check_bash(cmdline[1:], cwd, depth + 1)
+                    elif key in _GIT_COMMAND_KEYS or key.startswith("pager.") or (
+                            key.startswith("credential.") and key.endswith("helper") and cmdline.startswith("!")):
+                        check_bash(cmdline.lstrip("!"), cwd, depth + 1)
         if head == "git" and depth < 4:
             # KISPROGI 6609 N2: git -c KEY=VALUE where git runs VALUE as shell: an alias starting with "!", or a
             # command-valued key (pager, editor, ssh command, fsmonitor, external diff, credential helper, ...)
