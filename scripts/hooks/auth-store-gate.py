@@ -228,11 +228,30 @@ def _long_option(name: str, known) -> str:
     make --dir=, tar --remove-f; measured: env --c=DIR and mv --t DIR work too). Any prefix ("--" and at least one
     letter) naming exactly one of the known options is that option; anything else stays as written. The known options
     are real ones, so a prefix the program accepts and that matches one known option means that option (an exact name
-    is matched first)."""
+    is matched first).
+    KISPROGI 6651 R1: a REAL option missing from the known set whose full name is a prefix of a known one (tar
+    --checkpoint vs --checkpoint-action) is that real option for the program, not the known one: read as the known
+    option it would swallow the next word as its value. Every mapped prefix is recorded in _ABBREVIATED, and
+    check_bash checks the pipeline a second time without those words (the flag reading); either reading refusing
+    refuses."""
     if name in known or len(name) < 3:
         return name
     hits = [k for k in known if k.startswith(name)]
-    return hits[0] if len(hits) == 1 else name
+    if len(hits) == 1:
+        _ABBREVIATED.append(name)
+        return hits[0]
+    return name
+
+
+# KISPROGI 6651 R1: the long-option prefixes _long_option mapped while one pipeline was checked (see there)
+_ABBREVIATED: list = []
+# gawk's long options (KISPROGI 6632 V10): with a value / without one. A module constant so the self-test can compare
+# it with the real program's option list.
+AWK_LONG_VALUE = {"--source", "--include", "--load", "--file", "--assign", "--field-separator", "--exec"}
+AWK_LONG_FLAGS = {"--lint", "--posix", "--traditional", "--sandbox", "--re-interval", "--characters-as-bytes", "--debug",
+                  "--dump-variables", "--profile", "--pretty-print", "--optimize", "--version", "--help", "--copyright",
+                  "--bignum", "--csv", "--gen-pot", "--lint-old", "--no-optimize", "--non-decimal-data", "--trace",
+                  "--use-lc-numeric"}
 
 
 def _unwrap(words):
@@ -488,7 +507,9 @@ PROGRAM_SPECS = {
                                        "--blocking-factor", "--record-size", "--starting-file", "--checkpoint-action",
                                        "--strip-components", "--newer-mtime", "--atime-preserve", "--sparse-version"},
                 cd_s="C", cd_l={"--directory"}, old_style=True,
-                flags_l={"--remove-files", "--create", "--extract", "--list", "--append", "--update", "--to-stdout",
+                # KISPROGI 6651 R1: --checkpoint / --sparse are real options (their value only with "="), not prefixes
+                # of --checkpoint-action / --sparse-version
+                flags_l={"--checkpoint", "--sparse", "--remove-files", "--create", "--extract", "--list", "--append", "--update", "--to-stdout",
                          "--verbose", "--gzip", "--bzip2", "--xz", "--zstd", "--auto-compress", "--keep-old-files"}),
     "make": dict(sv="CfIoWjl", lv={"--directory", "--file", "--makefile", "--include-dir", "--old-file", "--assume-old",
                                   "--what-if", "--new-file", "--assume-new", "--eval", "--jobs", "--load-average"},
@@ -2331,17 +2352,32 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
             if cands is None:
                 continue
             for c in cands:
-                # KISPROGI 6539 Q4: env -C, tar -C, git -C, make -C run the command (or read its paths) elsewhere
-                for place in [c] + [d for d in _pipeline_chdirs(pipeline, c) if d != c]:
-                    try:
-                        _check_pipeline(pipeline, place, depth, bodies, sub_text)
-                    except Deny as d:
-                        if len(cands) > 1 and c != cands[-1] and c != UNKNOWN_CWD and "cd MAPPA &&" not in str(d):
-                            raise Deny(f"{d}; ha egy korabbi cd nem sikerul, ez a(z) {c} mappaban futna (cd MAPPA && "
-                                       "PARANCS alakban csak a cd celjaban fut)") from None
-                        raise
+                mark = len(_ABBREVIATED)
+                _check_pipeline_at(pipeline, c, cands, depth, bodies, sub_text)
+                # KISPROGI 6651 R1: a long-option prefix was read as a known option; the program may have a real option
+                # of exactly that name (tar --checkpoint) that takes no value: check the flag reading too (the words
+                # dropped, so the word after them is an option or an operand again)
+                seen = set(_ABBREVIATED[mark:])
+                del _ABBREVIATED[mark:]
+                if seen:
+                    alt = [[t for t in cmd_ if _unmark(t) not in seen] for cmd_ in pipeline]
+                    if alt != pipeline:
+                        _check_pipeline_at(alt, c, cands, depth, bodies, sub_text)
+                        del _ABBREVIATED[mark:]
     finally:
         _HD_STACK.pop()
+
+
+def _check_pipeline_at(pipeline, c, cands, depth: int, bodies, sub_text) -> None:
+    # KISPROGI 6539 Q4: env -C, tar -C, git -C, make -C run the command (or read its paths) elsewhere
+    for place in [c] + [d for d in _pipeline_chdirs(pipeline, c) if d != c]:
+        try:
+            _check_pipeline(pipeline, place, depth, bodies, sub_text)
+        except Deny as d:
+            if len(cands) > 1 and c != cands[-1] and c != UNKNOWN_CWD and "cd MAPPA &&" not in str(d):
+                raise Deny(f"{d}; ha egy korabbi cd nem sikerul, ez a(z) {c} mappaban futna (cd MAPPA && "
+                           "PARANCS alakban csak a cd celjaban fut)") from None
+            raise
 
 
 def _cwd_sets(pipes, ends, start, cmd: str, sub_text, bodies, depth: int):
@@ -2859,15 +2895,12 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             # give the program; V8: -i inplace rewrites every input file
             words_ = [_unmark(x) for x in args]
             prog, files, k, inplace, from_file = None, [], 0, False, False
-            awk_long = {"--source", "--include", "--load", "--file", "--assign", "--field-separator", "--exec"}
+            awk_long = AWK_LONG_VALUE
             while k < len(words_):
                 a = words_[k]
                 if a.startswith("--") and len(a) > 2:
                     lname, leq, lval = a.partition("=")
-                    lname = _long_option(lname, awk_long | {"--lint", "--posix", "--traditional", "--sandbox",
-                                                           "--re-interval", "--characters-as-bytes", "--debug",
-                                                           "--dump-variables", "--profile", "--pretty-print",
-                                                           "--optimize", "--version", "--help", "--copyright"})
+                    lname = _long_option(lname, awk_long | AWK_LONG_FLAGS)
                     if lname in awk_long:
                         if not leq:
                             lval = words_[k + 1] if k + 1 < len(words_) else ""

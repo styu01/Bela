@@ -1112,6 +1112,71 @@ describe('auth-store-gate: KISPROGI 6632 (git commands at the repository top, ex
   })
 })
 
+// KISPROGI 6651 R1 (review 6646): the V7 long-option prefix read an EXACT real option that is a prefix of a known one as
+// the known one (tar --checkpoint -> --checkpoint-action, --sparse -> --sparse-version), which swallowed the next word:
+// three forms the production gate refused passed (DB-GONE in the sandbox). Pinned here, plus the option tables checked
+// against the installed programs' own --help (no real option may be a proper prefix of a known one).
+const R6651_R1_DENY: string[] = [
+  `tar --checkpoint --checkpoint-action=exec='rm -rf store' -cf /tmp/x.tar /etc/hostname`,
+  `tar --sparse --checkpoint-action=exec='rm -rf store' -cf /tmp/x.tar /etc/hostname`,
+  `tar --checkpoint --to-command='rm -rf store' -xf /tmp/a.tar`,
+  'tar --checkpoint --remove-files -cf /tmp/x.tar store', 'tar --sparse --remove-files -cf /tmp/x.tar store',
+  'tar --remove-files -cf /tmp/x.tar --checkpoint store', 'tar --remove-files -cf /tmp/x.tar --sparse store',
+]
+const R6651_R1_PASS: string[] = [
+  'tar --checkpoint -cf /tmp/x.tar src', 'tar --checkpoint=100 -cf /tmp/x.tar src', 'tar --sparse -cf /tmp/x.tar src',
+  `tar --checkpoint --checkpoint-action=dot -cf /tmp/x.tar src`, 'env --chd /tmp ls',
+]
+const R6651_R1_REAL: Array<[string, 'leaks' | 'db', boolean]> = [
+  [`yes | head -c 400000 > big && tar --checkpoint --checkpoint-action=exec='rm -rf store' -cf x.tar big`, 'db', false],
+  ['tar --checkpoint --remove-files -cf x.tar store', 'db', false],
+]
+// the option tables against the real programs (only those installed; --help only)
+const OPTION_TABLE_AUDIT = `
+import importlib.util, re, shutil, subprocess, sys, json
+s = importlib.util.spec_from_file_location("g", sys.argv[1]); g = importlib.util.module_from_spec(s); s.loader.exec_module(g)
+tables = [(n, sp, ("lv", "lv2", "lv3", "opt_l", "cd_l", "root_l", "split_l", "shell_l", "here", "exec_flags"))
+          for n, sp in g.WRAPPER_SPECS.items()]
+tables += [(n, sp, ("lv", "flags_l", "cd_l")) for n, sp in g.PROGRAM_SPECS.items()]
+tables += [("gawk", {"a": g.AWK_LONG_VALUE | g.AWK_LONG_FLAGS}, ("a",))]
+bad, seen = [], 0
+for name, spec, keys in tables:
+    known = set()
+    for k in keys:
+        v = spec.get(k) if isinstance(spec, dict) else None
+        if isinstance(v, (set, frozenset, list, tuple)):
+            known |= {x for x in v if isinstance(x, str) and x.startswith("--")}
+    exe = shutil.which(name)
+    if not known or not exe:
+        continue
+    try:
+        p = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+    except Exception:
+        continue
+    real = set(re.findall(r"(?<![\\w-])(--[a-z][a-z0-9-]+)", p.stdout + p.stderr))
+    seen += 1
+    for r in sorted(real - known):
+        clash = [k for k in known if k.startswith(r) and k != r]
+        if clash:
+            bad.append(f"{name}: {r} is a real option and a prefix of {clash}")
+print(json.dumps({"bad": bad, "seen": seen}))
+`
+
+describe('auth-store-gate: KISPROGI 6651 R1 (an exact real long option that is a prefix of a known one)', () => {
+  for (const c of R6651_R1_DENY) it(`refuses: ${c.slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6651_R1_PASS) it(`passes: ${c.slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('no option table lists a known long option that an installed program has a shorter real option for', () => {
+    const r = spawnSync('python3', ['-I', '-c', OPTION_TABLE_AUDIT, GATE], { encoding: 'utf-8', timeout: 120_000 })
+    expect(r.status, r.stderr).toBe(0)
+    const out = JSON.parse(r.stdout) as { bad: string[]; seen: number }
+    expect(out.bad).toEqual([])
+    expect(out.seen).toBeGreaterThan(0)
+  })
+  it.skipIf(!BWRAP)('the refused forms really hit the DB (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6651_R1_REAL) realRun(cmd, effect, cc)
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')
