@@ -180,6 +180,24 @@ describe('auth-store-gate: path tools (BELA 6410)', () => {
     expect(decide('Write', { file_path: 'store/claudeclaw.db-wal', content: 'x' })).toBe('DENY')
     expect(decide('Grep', { pattern: 'x', path: join(ROOT, 'store'), glob: '.dashboard-*' })).toBe('DENY')
   })
+  // KISPROGI 6483 M1: the Grep tool runs rg --hidden; an explicit path in the store reads its hidden file too.
+  it('Grep in the live store folder (or below, or with no path from there) needs a glob that cannot match the file', () => {
+    mkdirSync(join(ROOT, 'store', 'logs'), { recursive: true })
+    const store = join(ROOT, 'store')
+    expect(decide('Grep', { pattern: 'secret', path: store })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: 'store' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: join(store, 'logs') })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret' }, store)).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.json' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '{a,b}.log' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '!*.log' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.log' })).toBe('pass')
+    expect(decide('Grep', { pattern: 'secret', path: join(store, 'logs'), glob: 'logs/*.txt' })).toBe('pass')
+    expect(decide('Grep', { pattern: 'x', path: ROOT, glob: '*.md' })).toBe('pass')
+    expect(decide('Grep', { pattern: 'x', path: ROOT, glob: '.dashboard-*' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'x' })).toBe('pass')
+  })
+
   it("a script's text is not checked (the install's own sources hold these names); reading the DB passes", () => {
     expect(decide('Edit', { file_path: join(ROOT, 'src', 'db.ts'), old_string: 'a', new_string: "db.prepare('UPDATE dashboard_users SET totp_enabled = ? WHERE username = ?')" })).toBe('pass')
     expect(decide('Write', { file_path: '/tmp/x.md', content: 'UPDATE dashboard_users SET a=1; .dashboard-totp.json' })).toBe('pass')

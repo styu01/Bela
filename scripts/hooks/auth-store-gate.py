@@ -24,8 +24,12 @@ Data positions pass, so a message or a note that QUOTES such a command is not a 
 tee, unless the same pipeline feeds an interpreter.
 
 A text brake, not an OS boundary (the same user can always build the name or the SQL at run time, e.g. from
-variables or base64). It closes the direct and the accidental routes; the dashboard itself writes these files as
-before. Matched against a fixed vocabulary only: anything else passes. Unparsable Bash that mentions one of the
+variables, base64 or string concatenation). It closes the direct and the accidental routes; the dashboard itself
+writes these files as before. Known routes it does not close (KISPROGI 6483): a recursive grep from the install root or
+above (grep -rn x . reads the store's hidden file; it cannot be told from everyday searches), a copy of the whole store
+folder read afterwards (cp -r store /tmp/s, then /tmp/s/.d*), a script written in one call and run in a later one, and
+sqlite3 .restore / Connection.backup() INTO the live DB (it replaces the whole DB; the direction cannot be told from a
+legitimate backup in text). Matched against a fixed vocabulary only: anything else passes. Unparsable Bash that mentions one of the
 protected names is refused (fail closed); unparsable Bash without them passes.
 
 Protocol: JSON on stdin ({tool_name, tool_input, cwd}); a refusal is a PreToolUse deny decision on stdout, exit 0.
@@ -630,6 +634,17 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
 # Path tools
 # --------------------------------------------------------------------------------------------------------------
 
+def _grep_glob_may_match_totp(g: str) -> bool:
+    """Whether an rg glob (its last segment) can match the store's file name; braces and anything unparsable count."""
+    last = g.strip().split("/")[-1]
+    if not last or "{" in last or last.startswith("!"):
+        return True
+    try:
+        return fnmatch.fnmatchcase(TOTP_NAME, last)
+    except re.error:
+        return True
+
+
 def check_path_tool(tool: str, ti: dict, cwd: str) -> None:
     """Path checks only. A script file's TEXT is not checked: the install's own sources (db.ts, dashboard-totp.ts,
     their tests) legitimately hold these names and this SQL, worktrees sit outside the live root, and writing a
@@ -640,13 +655,18 @@ def check_path_tool(tool: str, ti: dict, cwd: str) -> None:
     if path and _is_totp_path(path, cwd):
         _deny(f"{tool} a masodik faktor taran")
     if tool == "Grep":
+        # KISPROGI 6483 M1: the Grep tool runs rg --hidden (Claude Code 2.1.326), and with an explicit path in the store
+        # it reads the git-ignored hidden second-factor store too, printing the matching line. So a search in the live
+        # store folder (or below it; no path = the cwd) is refused unless a glob narrows it to names the store's file
+        # cannot have. From the install root rg skips the git-ignored store; a glob naming the file is refused there.
         g = ti.get("glob")
-        if isinstance(g, str) and g and path and _resolve(path, cwd) in (os.path.realpath(STORE), os.path.realpath(ROOT)):
-            try:
-                if fnmatch.fnmatchcase(TOTP_NAME, g.split("/")[-1]):
-                    _deny("Grep a masodik faktor tarara illo mintaval")
-            except re.error:
-                _deny("Grep nem ertelmezheto mintaval a store mappan (fail-closed)")
+        target = _resolve(path or ".", cwd)
+        store = os.path.realpath(STORE)
+        if target == store or target.startswith(store + os.sep):
+            if not (isinstance(g, str) and g.strip() and not _grep_glob_may_match_totp(g)):
+                _deny("Grep a store mappaban (a rejtett masodik faktor tarat is olvasna); szukitsd egy ra nem illo globbal")
+        elif target in (os.path.realpath(ROOT),) and isinstance(g, str) and g and _grep_glob_may_match_totp(g):
+            _deny("Grep a masodik faktor tarara illo mintaval")
         return
     if tool == "Read":
         return

@@ -63,5 +63,8 @@ The second factor protects against a remote attacker who knows the password. It 
 of the same OS user on this machine. The agents are fenced by a narrow PreToolUse gate (`scripts/hooks/auth-store-gate.py`,
 every agent, BELA 6410): `store/.dashboard-totp.json` in any agent tool call (reading too), an SQL write on the
 `dashboard_users` table in text a program runs, and the `store/claudeclaw.db` file as a write target. It is a text
-brake, not an OS boundary: a file name or an SQL statement assembled at run time (variables, encoding), a script
-written first and run in a later call, or any process outside an agent tool call is not stopped by it.
+brake, not an OS boundary: a file name or an SQL statement assembled at run time (variables, encoding, string
+concatenation), a script written first and run in a later call, or any process outside an agent tool call is not
+stopped by it. Known routes it does not close: a recursive grep from the install root (it reads the store's hidden
+file too), a copy of the whole store folder read afterwards, and `sqlite3 .restore` / `Connection.backup()` into the
+live database (indistinguishable in text from a legitimate backup).
