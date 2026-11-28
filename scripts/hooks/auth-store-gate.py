@@ -46,19 +46,26 @@ TOTP_RX = re.compile(r"\.dashboard-totp", re.I)
 DB_NAMES = ("claudeclaw.db", "claudeclaw.db-wal", "claudeclaw.db-shm", "claudeclaw.db-journal")
 DB_RX = re.compile(r"claudeclaw\.db(?:-wal|-shm|-journal)?\b", re.I)
 
-_TABLE = r"(?:(?:main|temp)\s*\.\s*)?[\"`\[]?dashboard_users[\"`\]]?"
+# KISPROGI 6483 H (measured in real SQLite, every one rewrote the row): an alias (AS u), NOT INDEXED / INDEXED BY, a
+# comment in place of the white space, a line comment, a single-quoted identifier, and ATTACH with any schema prefix all
+# passed the first version. Now: any schema prefix, ' as well as " ` [ ] (an optional backslash before it, for raw code
+# text), no SET required after UPDATE <table>, a word boundary after the name (dashboard_users_archive passes), and the
+# text is matched with its SQL comments cut out as well as as it stands.
+_Q = r"\\?[\"`\['\]]?"
+_TABLE = r"(?:" + _Q + r"\w+" + _Q + r"\s*\.\s*)?" + _Q + r"dashboard_users" + _Q + r"(?!\w)"
+_SCHEMA_TABLE = r"(?:" + _Q + r"\w+" + _Q + r"\s*\.\s*)?" + _Q + r"sqlite_(?:temp_)?(?:master|schema)\b"
 SQL_WRITE_RXS = [
     re.compile(r"\binsert\s+(?:or\s+\w+\s+)?into\s+" + _TABLE, re.I),
     re.compile(r"\breplace\s+into\s+" + _TABLE, re.I),
-    re.compile(r"\bupdate\s+(?:or\s+\w+\s+)?" + _TABLE + r"\s+set\b", re.I),
+    re.compile(r"\bupdate\s+(?:or\s+\w+\s+)?" + _TABLE, re.I),
     re.compile(r"\bdelete\s+from\s+" + _TABLE, re.I),
     re.compile(r"\bdrop\s+table\s+(?:if\s+exists\s+)?" + _TABLE, re.I),
     re.compile(r"\balter\s+table\s+" + _TABLE, re.I),
     re.compile(r"\bcreate\s+(?:temp\w*\s+)?trigger\b[\s\S]{0,400}?\bon\s+" + _TABLE, re.I),
     re.compile(r"\bwritable_schema\b", re.I),
-    re.compile(r"\b(?:insert\s+(?:or\s+\w+\s+)?into|update(?:\s+or\s+\w+)?|delete\s+from|replace\s+into)\s+"
-               r"(?:(?:main|temp)\s*\.\s*)?[\"`\[]?sqlite_(?:temp_)?(?:master|schema)\b", re.I),
+    re.compile(r"\b(?:insert\s+(?:or\s+\w+\s+)?into|update(?:\s+or\s+\w+)?|delete\s+from|replace\s+into)\s+" + _SCHEMA_TABLE, re.I),
 ]
+_SQL_COMMENT = re.compile(r"/\*[\s\S]*?(?:\*/|$)|--[^\n]*")
 # Interpreter code that hands the DB file to a file-writing call (R3 inside a script): the name inside the call's
 # arguments, or a Path(...claudeclaw.db...) with a writing method. A bare sqlite3 connect is not a file write.
 _DBN = r"claudeclaw\.db(?:-wal|-shm|-journal)?"
@@ -212,7 +219,8 @@ def _totp_word(word: str) -> bool:
 
 
 def _sql_write(text: str) -> bool:
-    return any(rx.search(text) for rx in SQL_WRITE_RXS)
+    cut = _SQL_COMMENT.sub(" ", text)
+    return any(rx.search(cut) or rx.search(text) for rx in SQL_WRITE_RXS)
 
 
 def _code_text_checks(text: str, where: str, cwd: str, depth: int) -> None:

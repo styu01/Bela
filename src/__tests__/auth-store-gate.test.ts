@@ -118,6 +118,59 @@ describe('auth-store-gate: Bash (BELA 6410)', () => {
   })
 })
 
+// KISPROGI 6483 H: six forms that rewrote the row in real SQLite and passed the first version, plus variants.
+const SQL_BYPASSES: string[] = [
+  'UPDATE dashboard_users AS u SET totp_enabled=0',
+  'UPDATE dashboard_users NOT INDEXED SET totp_enabled=0',
+  'UPDATE dashboard_users INDEXED BY ix SET totp_enabled=0',
+  'UPDATE/**/dashboard_users/**/SET totp_enabled=0',
+  'DELETE--x\nFROM dashboard_users',
+  "UPDATE 'dashboard_users' SET totp_enabled=0",
+  "ATTACH 'other.db' AS m; DELETE FROM m.dashboard_users",
+  'UPDATE `main`.`dashboard_users` SET totp_enabled=0',
+  "INSERT INTO m . 'dashboard_users' (id) VALUES (9)",
+]
+const SQL_CONTROLS: string[] = [
+  'SELECT * FROM dashboard_users', 'UPDATE dashboard_users_archive SET a=1', 'DELETE FROM dashboard_users2', 'UPDATE kanban_cards SET status=1',
+]
+
+describe('auth-store-gate: R2 bypasses (KISPROGI 6483 H)', () => {
+  const asPython = (sql: string) => `python3 - <<'EOF'\nimport sqlite3\nc=sqlite3.connect('store/claudeclaw.db')\nc.executescript('''${sql}''')\nEOF`
+  for (const q of SQL_BYPASSES) {
+    it(`refuses (sqlite3 argument and python heredoc): ${q.replace(/\n/g, '\\n')}`, () => {
+      expect(bash(`sqlite3 x.db "${q.replace(/"/g, '\\"').replace(/`/g, '\\`')}"`)).toBe('DENY')
+      expect(bash(asPython(q))).toBe('DENY')
+    })
+  }
+  for (const q of SQL_CONTROLS) {
+    it(`passes: ${q}`, () => { expect(bash(asPython(q))).toBe('pass') })
+  }
+  it('an escaped double quote in raw code text counts', () => {
+    expect(bash(`python3 - <<'EOF'\nimport sqlite3\nsqlite3.connect('x.db').execute("UPDATE \\"dashboard_users\\" SET totp_enabled=0")\nEOF`)).toBe('DENY')
+  })
+  it('every bypass case is a real write in SQLite (so the cases test something real)', () => {
+    const script = [
+      'import sqlite3, sys, json, os, tempfile',
+      'cases = json.loads(sys.argv[1]); d = tempfile.mkdtemp(); db = os.path.join(d, "c.db"); other = os.path.join(d, "other.db")',
+      'out = []',
+      'for q in cases:',
+      '    c = sqlite3.connect(db)',
+      '    c.executescript("DROP TABLE IF EXISTS dashboard_users; CREATE TABLE dashboard_users(id INTEGER PRIMARY KEY, totp_enabled INT); CREATE INDEX ix ON dashboard_users(id); INSERT INTO dashboard_users VALUES(1,1);")',
+      '    o = sqlite3.connect(other); o.executescript("DROP TABLE IF EXISTS dashboard_users; CREATE TABLE dashboard_users(id INTEGER PRIMARY KEY, totp_enabled INT); INSERT INTO dashboard_users VALUES(1,1);"); o.close()',
+      '    c.executescript(q.replace("other.db", other))',
+      '    c.commit(); c.close()',
+      '    a = sqlite3.connect(db).execute("select count(*), coalesce(sum(totp_enabled),0) from dashboard_users").fetchone()',
+      '    b = sqlite3.connect(other).execute("select count(*), coalesce(sum(totp_enabled),0) from dashboard_users").fetchone()',
+      '    out.append(list(a) != [1, 1] or list(b) != [1, 1])',
+      'print(json.dumps(out))',
+    ].join('\n')
+    const cases = SQL_BYPASSES.filter((q) => !q.includes(' m . ')).map((q) => q.replace(/\\n/g, '\n'))
+    const r = spawnSync('python3', ['-I', '-c', script, JSON.stringify(cases)], { encoding: 'utf-8' })
+    expect(r.status, r.stderr).toBe(0)
+    expect(JSON.parse(r.stdout)).toEqual(cases.map(() => true))
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')
