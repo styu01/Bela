@@ -504,7 +504,37 @@ def _destinations(head: str, args):
     return []
 
 
+_FIND_ACTIONS = ("-delete", "-exec", "-execdir", "-ok", "-okdir")
+# -exec commands that only show names or metadata: a find that runs only these reads no file's content.
+_FIND_NAME_ONLY_CMDS = {"echo", "printf", "ls", "stat", "basename", "dirname", "realpath", "readlink", "test", "[", "true", "du"}
+_PROTECTED_NAMES = (TOTP_NAME,) + DB_NAMES
+# -exec commands that can act on a whole folder (or run arbitrary code): a name filter proves nothing for them, since
+# a matched directory carries the protected files inside it.
+_FIND_FOLDER_CMDS = {"tar", "zip", "7z", "7za", "cpio", "rsync", "scp", "find", "xargs", "sudo", "env", "nice", "timeout",
+                     "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "perl", "ruby", "php", "awk",
+                     "gawk", "bun", "deno", "eval"}
+_RECURSIVE_FLAG_RX = re.compile(r"^-(?:-recursive|-archive|[A-Za-z]*[rRa][A-Za-z]*)$")
+
+
+def _find_filter_may_match(flag: str, value: str) -> bool:
+    """Whether one find filter can select a protected file (the second-factor store, the DB file or a sidecar)."""
+    if flag in ("-regex", "-iregex"):
+        return True
+    last = value.rstrip("/").split("/")[-1] if flag in ("-path", "-ipath", "-wholename", "-iwholename") else value
+    if not last:
+        return True
+    ci = flag.startswith("-i")
+    try:
+        return any(fnmatch.fnmatchcase(n.lower() if ci else n, last.lower() if ci else last) for n in _PROTECTED_NAMES)
+    except re.error:
+        return True
+
+
 def _find_on_store(args, cwd: str) -> bool:
+    """KISPROGI 6483 L1: a find that starts at, below or above the live store and deletes, or runs a command that can
+    read a file's content, is refused only when its filters can select a protected file. The filters of an expression
+    without -o / ! / -not / a comma are ANDed, so one filter that cannot match (-name, -iname, the last segment of
+    -path, -type d) is enough; -regex and the alternatives count as "may match"."""
     starts = []
     for a in args:
         if a.startswith("-") or a in ("(", "!", "\\("):
@@ -512,15 +542,39 @@ def _find_on_store(args, cwd: str) -> bool:
         starts.append(a)
     if not starts:
         starts = ["."]
-    destructive = any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls") for a in args)
-    if not destructive:
-        return False
     store = os.path.realpath(STORE)
-    for s in starts:
-        r = _resolve(s, cwd)
+    near = False
+    for st in starts:
+        r = _resolve(st, cwd)
         if r == store or r.startswith(store + os.sep) or store.startswith(r.rstrip(os.sep) + os.sep):
-            return True
-    return False
+            near = True
+    if not near:
+        return False
+    reading = False
+    for k, a in enumerate(args):
+        if a == "-delete":
+            reading = True
+        elif a in _FIND_ACTIONS[1:] and k + 1 < len(args):
+            cmd = os.path.basename(args[k + 1])
+            cargs = []
+            for b in args[k + 2:]:
+                if b in (";", "\\;", "+"):
+                    break
+                cargs.append(b)
+            if cmd in _FIND_NAME_ONLY_CMDS:
+                continue
+            if cmd in _FIND_FOLDER_CMDS or re.fullmatch(r"python\d[\d.]*", cmd) or any(_RECURSIVE_FLAG_RX.match(b) for b in cargs):
+                return True  # a folder-wide command near the store: no filter can prove it safe
+            reading = True
+    if not reading:
+        return False
+    if any(a in ("!", "-not", "-o", "-or", ",", "\\!") for a in args):
+        return True
+    filters = [(a, args[k + 1]) for k, a in enumerate(args[:-1])
+               if a in ("-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex")]
+    if not filters:
+        return True
+    return all(_find_filter_may_match(f, v) for f, v in filters)
 
 
 def _unparsable_hits(cmd: str) -> bool:

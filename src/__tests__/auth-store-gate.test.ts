@@ -56,6 +56,12 @@ const DENY_BASH: string[] = [
   'mv store /tmp/st', `rm -rf ${ROOT}`, 'rsync -a --delete /tmp/empty/ store/', `python3 -c "open('store/claudeclaw.db','wb').write(b'')"`,
   `python3 -c "from pathlib import Path; Path('store/claudeclaw.db').unlink()"`, `node -e "require('fs').rmSync('store/claudeclaw.db')"`,
   'cd store; rm claudeclaw.db', 'cd "$X" && rm store/claudeclaw.db', 'rm -f $X/claudeclaw.db',
+  // KISPROGI 6483 L1: a find near the store is refused when its filters can select a protected file
+  "find store -name '*.json' -exec cat {} +", "find . -name 'claudeclaw*' -delete", 'find store ! -name x.log -exec cat {} +',
+  "find store -name a -o -name b -exec cat {} +", "find store -regex '.*totp.*' -exec cat {} +", 'find / -exec grep secret {} +',
+  "find store -iname '.DASHBOARD*' -exec cat {} +", "find store -path '*/store/*' -exec cat {} +",
+  "find . -name store -exec rm -rf {} +", "find . -name store -exec tar czf /tmp/s.tgz {} +", "find store -type d -exec grep -r secret {} +",
+  "find store -name '*.log' -exec sh -c 'cat {}' \\;", "find store -type d -exec cat {} +",
   'echo "$(cat store/.dashboard-totp.json)"', 'cd store && grep -c x .dashboard-totp.json',
 ]
 const PASS_BASH: string[] = [
@@ -71,6 +77,11 @@ const PASS_BASH: string[] = [
   'cp store/claudeclaw.db /tmp/backup.db', 'rsync -a store/ /tmp/backup/', 'ls -la store/', 'ls -la store/.dashboard-totp.json',
   'test -f store/.dashboard-totp.json && echo yes', 'cat store/*.json', 'find store -name "*.json" -mtime -1',
   "find store -name '.dashboard-t*' -print", 'cp /tmp/evil.db store/', 'rm -rf store/tmpdir', 'cd "$X" && rm -rf store/tmp',
+  // KISPROGI 6483 L1: BELA's real everyday call, and finds whose filters cannot select a protected file
+  "find store -maxdepth 1 -iname '*desired*' -exec cat {} \\;", "find . -name '*.ts' -exec grep -l foo {} +",
+  "find store -name '*.tmp' -delete", "find store -type d -exec ls -ld {} +", 'find / -exec echo {} \\;',
+  "find store -path '*/logs/*.log' -exec tail -1 {} \\;", "find store -name '*.json' -iname '*desired*' -exec cat {} +",
+  "find store -name '*.tmp' -exec rm -f {} +",
   // another tree's copies, searches, everyday commands
   'rm -rf /tmp/wt/store/.dashboard-totp.json /tmp/wt/store/claudeclaw.db', 'cd /tmp/wt && rm -rf store', 'rm /tmp/scratch/claudeclaw.db',
   "grep -rn '\\.dashboard-totp' src/", "rg -n -e '.dashboard-totp.json' src scripts", "git log -S'.dashboard-totp' --oneline",
