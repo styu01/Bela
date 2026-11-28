@@ -124,7 +124,7 @@ function gateInvocation(interpreter: string, scriptPath: string, args: readonly 
 export function failClosedGateRun(invocation: string, label: string, hookTimeoutSec: number): string {
   if (!/^[A-Za-z0-9_.-]+$/.test(label)) throw new Error(`gate label must be a plain file name, got: ${label}`)
   const t = gateDeadlineSec(hookTimeoutSec)
-  const fail = `${GATE_FAIL_CLOSED_TAG}: ${label}: a kapu nem 0-val vagy 2-vel lepett ki (rc=$rc: betoltesi hiba, hianyzo fajl, jel vagy idotullepes). A hivas ezert TILTVA. Javitas: a kapu fajlja vagy egy fuggosege hibas, a hibauzenet fent. Bash nelkul javithato: a fo agens Read/Edit/Write eszkoze nincs kapuzva.`
+  const fail = `${GATE_FAIL_CLOSED_TAG}: ${label}: a kapu nem 0-val vagy 2-vel lepett ki (rc=$rc: betoltesi hiba, hianyzo fajl, jel vagy idotullepes). A hivas ezert TILTVA. Javitas: a kapu fajlja vagy egy fuggosege hibas, a hibauzenet fent. Bash nelkul javithato: a fo agens Read/Edit/Write eszkozet kapu-hiba nem blokkolja.`
   return `if command -v timeout >/dev/null 2>&1; then timeout -k 1 ${t} ${invocation}; else ${invocation}; fi; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "${fail}" >&2; exit 2; }; exit "$rc"`
 }
 

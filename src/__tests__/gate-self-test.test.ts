@@ -200,7 +200,7 @@ describe('texts', () => {
     const e: GateEntry = { agent: 'a', settingsPath: 's', projectDir: tmp, matcher: 'Bash', command: 'c', timeoutSec: 10, gate: 'g' }
     const t = gateFailureText([{ entry: e, ok: false, detail: 'rc=2: x' }])
     expect(t).not.toMatch(/—| -- /)
-    expect(t).toContain('Read/Edit/Write eszkoze nincs kapuzva')
+    expect(t).toContain('Read/Edit/Write eszkozet kapu-hiba nem blokkolja')
   })
 })
 

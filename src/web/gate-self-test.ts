@@ -572,7 +572,7 @@ export function gateFailureText(failed: readonly GateRunResult[], load: readonly
     ...lines,
     tampered
       ? 'Teendo: a verziokezelttol eltero kapu-fajlt ellenorizni (ki es miert modositotta), es ha nem szandekos, visszaallitani a git HEAD tartalmara; ha szandekos, commitolni. 60 mp mulva ujraellenorizve is elter. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.'
-      : 'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkoze nincs kapuzva. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
+      : 'Teendo: a kapu fajljat (vagy fuggoseget) javitani. Bash nelkul is megy: a fo agens Read/Edit/Write eszkozet kapu-hiba nem blokkolja. A kovetkezo onteszt (15 percen belul) jelzi a helyreallast.',
   ].join('\n')
 }
 

@@ -275,19 +275,27 @@ describe('the boot prune knows the wrapper', () => {
   })
 })
 
-// BELA 6223 (b): the fail-closed message names the way out that needs no Bash. The claim is pinned: the main
-// agent's tracked project settings put no gate on Read / Edit / Write (MultiEdit, NotebookEdit).
+// BELA 6223 (b): the fail-closed message names the way out that needs no Bash. The claim is pinned: in the main
+// agent's tracked project settings a gate failure never blocks Read / Edit / Write (MultiEdit, NotebookEdit). Since BELA
+// 6410 the auth-store gate does sit on those tools, but FAIL-OPEN (KISPROGI 6483 L3: the sentence says "a gate failure
+// does not block them" instead of "they are not gated").
 describe('the fail-closed message names the Bash-free way out', () => {
   it('the tail carries the sentence', () => {
-    expect(failClosedGateRun('x', 'g.mjs', 10)).toContain('Bash nelkul javithato: a fo agens Read/Edit/Write eszkoze nincs kapuzva.')
+    expect(failClosedGateRun('x', 'g.mjs', 10)).toContain('Bash nelkul javithato: a fo agens Read/Edit/Write eszkozet kapu-hiba nem blokkolja.')
   })
-  it('...and it is true for the main agent: no gate script on a Read / Edit / Write matcher in its project settings', () => {
+  it('...and it is true for the main agent: every hook on a Read / Edit / Write matcher in its project settings is fail-open', () => {
     const settings = JSON.parse(readFileSync(join(PROJECT_ROOT, '.claude', 'settings.json'), 'utf-8'))
-    const gates = /email-send-gate|self-pace-gate|kanban-write-gate|egress-gate|outgoing-copy-gate/
+    let fileToolHooks = 0
     for (const e of (settings.hooks?.PreToolUse ?? []) as { matcher: string; hooks: { command: string }[] }[]) {
       const re = new RegExp(`^(?:${e.matcher})$`)
       const hitsFileTool = ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].some((t) => re.test(t))
-      if (hitsFileTool) for (const h of e.hooks) expect(gates.test(h.command), `${e.matcher}: ${h.command.slice(0, 80)}`).toBe(false)
+      if (!hitsFileTool) continue
+      for (const h of e.hooks) {
+        fileToolHooks++
+        expect(h.command, `${e.matcher}: ${h.command.slice(0, 80)}`).not.toContain(GATE_FAIL_CLOSED_TAG)
+        expect(h.command, `${e.matcher}: ${h.command.slice(0, 80)}`).not.toMatch(/\bexit 2\b/)
+      }
     }
+    expect(fileToolHooks).toBe(1) // the auth-store gate's fail-open arm
   })
 })
