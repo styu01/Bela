@@ -434,6 +434,32 @@ describe('the owner approval of an installed package (this fork)', () => {
     expect(packageApprovalRefusal('hand')).toBeNull()
   })
 
+  // KISPROGI 6464 M1: the review request is escalated under the agent's key (with the plain owner sentence), and the
+  // approval clears it, so the owner is not alerted later about a package already approved. A refused approval does not.
+  it('the review request is escalated per agent, and only a successful approval clears it', async () => {
+    const N = await import('../web/agent-package/notices.js')
+    const E = await import('../web/owner-escalation.js')
+    const sent: Array<{ text: string; opts?: { reviewOf?: string; ownerText?: string } }> = []
+    const real = deps
+    deps = { ...real, notify: async (text, opts) => { sent.push({ text, opts }); return N.escalatePackageNotice(text, opts) } }
+    try {
+      const { sha } = await installed()
+      const review = sent.find((s) => s.text.includes('JOVAHAGYASRA VAR'))
+      expect(review?.opts).toEqual({ reviewOf: 'invoice-helper', ownerText: N.installReviewOwnerText('invoice-helper', '1.2.0') })
+      const key = N._packageReviewKeyForTest('invoice-helper')
+      expect(key).toMatch(/^agent-package-review:invoice-helper:/)
+      expect(E._getOwnerEscalationStateForTest(key!)).not.toBeNull()
+      expect((await approve('invoice-helper', { version: '9.9.9' })).status).toBe(409)
+      expect(E._getOwnerEscalationStateForTest(key!)).not.toBeNull()
+      expect((await approve('invoice-helper', { payloadSha256: sha })).status).toBe(200)
+      expect(E._getOwnerEscalationStateForTest(key!)).toBeNull()
+      expect(N._packageReviewKeyForTest('invoice-helper')).toBeNull()
+    } finally {
+      deps = real
+      E._resetAllOwnerEscalationsForTest()
+    }
+  })
+
   it('only POST approves', async () => {
     const out = await callRoute((ctx) => tryHandleAgentPackages(ctx, deps), 'GET', '/api/agents/invoice-helper/approve-package', SESSION).then((r) => r.out)
     expect(out.status).toBe(405)

@@ -62,6 +62,7 @@ const CRED = join(STORE, 'agent-package-credential.json')
 let fake: FakeServer
 let deps: PackageDeps
 const notified: string[] = []
+const notifiedOpts: unknown[] = []
 const install = (body: unknown, auth: RouteContext['auth'] = SESSION, d: PackageDeps = deps) =>
   callRoute((ctx) => tryHandleAgentPackages(ctx, d), 'POST', '/api/agents/install-package', auth, body).then((r) => { expect(r.handled).toBe(true); return r.out })
 const storeCredential = () => { writeFileSync(CRED, JSON.stringify({ schema: 1, token: TEST_TOKEN, deviceTokenId: TEST_DEVICE_ID, label: 'Mac', connectedAt: NOW.toISOString() }), { mode: 0o600 }); chmodSync(CRED, 0o600) }
@@ -92,7 +93,7 @@ beforeEach(() => {
   fake = makeFakeServer()
   catalog.body = { access: 'full', trial_pick: null, packages: [{ slug: 'invoice-helper', version: '1.2.0', kid: KEY.kid }] }
   catalog.calls = 0
-  deps = { keys: [KEY.jwk], fetchImpl: withCatalog(fake.fetchImpl), now: () => NOW, remote: makeRemote(TEST_ORIGIN), notify: async (t) => { notified.push(t); return true } }
+  deps = { keys: [KEY.jwk], fetchImpl: withCatalog(fake.fetchImpl), now: () => NOW, remote: makeRemote(TEST_ORIGIN), notify: async (t, o) => { notified.push(t); notifiedOpts.push(o); return true } }
   storeCredential()
 })
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }))
@@ -255,6 +256,8 @@ describe('the update and the owner approval (this fork)', () => {
     const review = notified.filter((t) => t.includes('UJRA JOVAHAGYASRA VAR'))
     expect(review).toHaveLength(1)
     expect(review[0]).toContain(`${NAME} 1.2.0 -> 1.3.0`)
+    // KISPROGI 6464 M1: under the agent's review key, with the plain owner sentence.
+    expect(notifiedOpts.at(-1)).toEqual({ reviewOf: NAME, ownerText: (await import('../web/agent-package/notices.js')).updateReviewOwnerText(NAME, '1.3.0') })
     expect(A.approvePackage(NAME, 'owner', NOW, { version: '1.3.0' }).ok).toBe(true)
     expect(A.packageApprovalRefusal(NAME)).toBeNull()
   })

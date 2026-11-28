@@ -20,7 +20,9 @@ import { join } from 'node:path'
 import { STORE_DIR, MAIN_AGENT_ID, OWNER_DRIVE_FOLDER } from '../../config.js'
 import { createAgentMessage } from '../../db.js'
 import { logger } from '../../logger.js'
-import { escalatePackageNotice } from '../agent-package/notices.js'
+import {
+  clearPackageReviewNotice, escalatePackageNotice, installReviewOwnerText, updateReviewOwnerText, type PackageNoticeOptions,
+} from '../agent-package/notices.js'
 import { approvePackage, packageApprovalState, pendingPackageAgents } from '../agent-package/approval.js'
 import { scanSkillDir } from '../skill-quarantine.js'
 import { json, methodNotAllowed, readBodyOrRefuse } from '../http-helpers.js'
@@ -54,7 +56,7 @@ import type { RouteContext } from './types.js'
 export type PackageDeps = {
   keys: readonly Jwk[]; fetchImpl: typeof fetch; now: () => Date; remote: Remote
   /** The owner alert path for the installer's stored notices (plan 7.3, N16); none: the notices wait for the next start. */
-  notify?: (text: string) => Promise<boolean>
+  notify?: (text: string, opts?: PackageNoticeOptions) => Promise<boolean>
 }
 
 export const RELEASED_DEPS: PackageDeps = {
@@ -276,6 +278,7 @@ async function installPackage(ctx: RouteContext, deps: PackageDeps): Promise<voi
       `Ugynok-csomag telepitve, JOVAHAGYASRA VAR (nem indul el addig): ${slug} ${pkg.version}. ` +
       `Fajlok: ${files}. Skill-vizsgalat talalatai: ${findings}. ` +
       `Atnezes: agents/${slug}/ (PACKAGE.md, LOCAL.md, .claude/skills). Jovahagyas: POST /api/agents/${slug}/approve-package (owner-munkamenet).`,
+      { reviewOf: slug, ownerText: installReviewOwnerText(slug, pkg.version) },
     )
   } catch (err) {
     logger.warn({ err, name: slug }, 'Agent package installed, but the review request failed')
@@ -324,6 +327,8 @@ async function approvePackageRoute(ctx: RouteContext, deps: PackageDeps, name: s
   const r = approvePackage(name, by, deps.now(), expected)
   if (!r.ok) { json(res, { error: r.error }, r.status); return }
   json(res, { ok: true, name, version: r.approval.version, payloadSha256: r.approval.payloadSha256, approvedAt: r.approval.approvedAt })
+  // KISPROGI 6464 M1: the review request is resolved; its owner alert must not go out after the approval.
+  clearPackageReviewNotice(name)
   announceApprovedPackageAgent(name)
 }
 
@@ -533,6 +538,7 @@ async function applyUpdate(ctx: RouteContext, deps: PackageDeps, rawName: string
       await (deps.notify ?? escalatePackageNotice)(
         `Ugynok-csomag frissitve, UJRA JOVAHAGYASRA VAR (nem indul el addig): ${first.name} ${first.manifest.payload.version} -> ${got.pkg.version}. ` +
         `Atnezes: agents/${first.name}/. Jovahagyas: POST /api/agents/${first.name}/approve-package (owner-munkamenet).`,
+        { reviewOf: first.name, ownerText: updateReviewOwnerText(first.name, got.pkg.version) },
       )
     } catch (err) {
       logger.warn({ err, name: first.name }, 'Agent package updated, but the review request failed')
