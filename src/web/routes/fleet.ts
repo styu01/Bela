@@ -1,6 +1,8 @@
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
-import { exportFleet, importFleet, MIN_VAULT_PASSWORD_LEN, UserFacingError, type ExportedFleet } from '../fleet-transfer.js'
+import { exportFleet, importFleet, MIN_VAULT_PASSWORD_LEN, UserFacingError, VaultImportRefused, type ExportedFleet } from '../fleet-transfer.js'
+import { listSecrets } from '../vault.js'
+import { guardProtectedVault } from '../vault-guard.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleFleet(ctx: RouteContext): Promise<boolean> {
@@ -16,6 +18,10 @@ export async function tryHandleFleet(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `X-Vault-Password must be at least ${MIN_VAULT_PASSWORD_LEN} characters.` }, 400)
       return true
     }
+    // VAULTMAINONLY (BELA 6533): with a password the package holds the whole vault and its key, encrypted with a
+    // password the CALLER chose, so it hands out every value: the main agent or the owner only, when a protected
+    // entry is in the vault
+    if (vaultPassword && !guardProtectedVault(ctx, listSecrets().map(s => s.id), 'fleet export (vault)')) return true
     try {
       const exported: ExportedFleet = exportFleet({ vaultPassword: vaultPassword || undefined })
       const buf = Buffer.from(exported.data)
@@ -58,13 +64,18 @@ export async function tryHandleFleet(ctx: RouteContext): Promise<boolean> {
 
     // importFleet handles JSON parse (and encrypted blob detection) internally
     try {
-      const result = importFleet(rawBody, { vaultPassword: vaultPassword || undefined, apply })
+      const result = importFleet(rawBody, {
+        vaultPassword: vaultPassword || undefined,
+        apply,
+        vaultImportAllowed: (incoming) => guardProtectedVault(ctx, [...listSecrets().map(s => s.id), ...incoming], 'fleet import (vault)'),
+      })
       if ('dryRun' in result && result.errors.length > 0) {
         json(res, result, 400)
       } else {
         json(res, result, 200)
       }
     } catch (err: any) {
+      if (err instanceof VaultImportRefused) return true  // the 403 is written
       logger.error({ err: err.message }, 'Fleet import failed')
       json(res, { error: `Import hiba: ${err.message}` }, 500)
     }

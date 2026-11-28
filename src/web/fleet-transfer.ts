@@ -988,9 +988,19 @@ const EMPTY_DIFF: DiffReport = {
   errors: [],
 }
 
+/** VAULTMAINONLY: the caller may not bring a vault section (the route has already answered 403). */
+export class VaultImportRefused extends Error {
+  constructor() { super('vault import refused') }
+}
+
 export function importFleet(
   rawBody: string,
-  options: { vaultPassword?: string; apply: boolean },
+  options: {
+    vaultPassword?: string
+    apply: boolean
+    /** asked before any write when the package carries a vault section, with its entry ids: false refuses the import */
+    vaultImportAllowed?: (incomingIds: string[]) => boolean
+  },
 ): DiffReport | ImportResult {
   // Auto-detect encrypted export: {"enc":1,"blob":"..."}
   // H2/M2: decrypt FIRST, before any file writes or DB commits (fail-fast on wrong password)
@@ -1039,6 +1049,13 @@ export function importFleet(
       report.warnings.push('vault szekció jelen van, de nem adtál meg jelszót -- a vault-titkok kihagyásra kerülnek.')
     }
     return report
+  }
+
+  // VAULTMAINONLY (BELA 6533): a vault section replaces the whole vault and its key, the protected entries too, so
+  // only the main agent or the owner may bring one. Asked before the first write: a refusal leaves nothing half done.
+  if (fleet.vault && options.vaultImportAllowed
+      && !options.vaultImportAllowed((fleet.vault.entries ?? []).map(e => String((e as { id?: unknown }).id ?? '')))) {
+    throw new VaultImportRefused()
   }
 
   // -------------------------------------------------------------------------

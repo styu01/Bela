@@ -361,3 +361,35 @@ describe('importFleet: avatarExt traversal rejected', () => {
     expect(errors.some(e => e.includes('avatarExt') && e.includes('testbot'))).toBe(true)
   })
 })
+
+// VAULTMAINONLY (BELA 6533): a vault section replaces the whole vault and its key, so the route asks before the first
+// write whether the caller may bring one; a refusal leaves nothing half done.
+describe('importFleet: a vault section needs the caller check before any write', () => {
+  const WITH_VAULT = JSON.stringify({
+    ...JSON.parse(MINIMAL_FLEET),
+    vault: { vaultKey: 'a2V5', entries: [{ id: 'Moho claude token', label: 'x', value: 'enc' }, { id: 'other', label: 'y', value: 'enc' }], bindings: [] },
+  })
+
+  it('refused: throws VaultImportRefused, asks with the incoming ids, writes nothing', async () => {
+    const { importFleet, VaultImportRefused } = await import('../web/fleet-transfer.js')
+    const { atomicWriteFileSync } = await import('../web/atomic-write.js')
+    ;(atomicWriteFileSync as any).mockClear()
+    const asked: string[][] = []
+    expect(() => importFleet(WITH_VAULT, { apply: true, vaultImportAllowed: (ids) => { asked.push(ids); return false } }))
+      .toThrow(VaultImportRefused)
+    expect(asked).toEqual([['Moho claude token', 'other']])
+    expect((atomicWriteFileSync as any).mock.calls.length).toBe(0)
+  })
+
+  it('allowed: the vault section is written; a package without one is never asked about; a dry run is never asked', async () => {
+    const { importFleet } = await import('../web/fleet-transfer.js')
+    const { atomicWriteFileSync } = await import('../web/atomic-write.js')
+    ;(atomicWriteFileSync as any).mockClear()
+    importFleet(WITH_VAULT, { apply: true, vaultImportAllowed: () => true })
+    expect((atomicWriteFileSync as any).mock.calls.some((c: string[]) => c[0].endsWith('.vault-key'))).toBe(true)
+    const ask = vi.fn(() => false)
+    importFleet(MINIMAL_FLEET, { apply: true, vaultImportAllowed: ask })
+    importFleet(WITH_VAULT, { apply: false, vaultImportAllowed: ask })
+    expect(ask).not.toHaveBeenCalled()
+  })
+})

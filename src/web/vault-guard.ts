@@ -4,9 +4,9 @@
 //   (b) the owner's dashboard login session (ownerSessionUser: a session, or the token with a valid session cookie).
 // Everyone else gets 403: a sub-agent's pane and every child of it, bela-worker(-fast), the webchat units, a uid 0
 // socket without a session (the WSL relay, interop tools), a federation peer, a device key, an unidentifiable caller.
-// The same rule guards changing one (POST/DELETE/import, integrity: an overwrite would break the mailer silently).
-// A binding of a protected entry (which writes the value into an MCP config file anyone can read) is refused for
-// every caller.
+// The same rule guards changing one (POST/DELETE/import, integrity: an overwrite would break the mailer silently),
+// a fleet export that packs the vault and a fleet import that brings one. A binding of a protected entry (which
+// writes the value into an MCP config file anyone can read) is refused for every caller.
 //
 // Every refusal writes one log line: the entry ids, the action, the caller's class, pane session, pid, comm and
 // scope. Never a value. With VAULT_MAIN_ONLY=audit the refusal is only logged and the call goes through.
