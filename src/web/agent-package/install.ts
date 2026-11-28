@@ -134,9 +134,11 @@ export function packageDescription(dir: string): string | null {
 }
 
 /** Plan 4.2: the summary's package field, {slug, version} from a readable record, else null. */
-export function packageSummaryField(dir: string): { slug: string; version: string } | null {
+export function packageSummaryField(dir: string): { slug: string; version: string; payloadSha256: string } | null {
   const r = readPackageManifest(dir)
-  return r.state === 'ok' ? { slug: r.manifest.payload.slug, version: r.manifest.payload.version } : null
+  // This fork (KISPROGI 6464 M2): the digest of the package standing in the folder, so the catalog's approve button can
+  // name exactly that package (a package changed since is refused: 409 package_changed).
+  return r.state === 'ok' ? { slug: r.manifest.payload.slug, version: r.manifest.payload.version, payloadSha256: r.manifest.payloadSha256 } : null
 }
 
 // ---------------------------------------------------------------------------

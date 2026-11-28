@@ -4617,7 +4617,7 @@ async function loadAgentCatalogPage() {
   const installed = {}
   for (const ag of agents) {
     if (ag && ag.package && typeof ag.package.slug === 'string') {
-      installed[ag.package.slug] = { name: ag.name, version: ag.package.version, running: !!ag.running, approval: ag.packageApproval || null }
+      installed[ag.package.slug] = { name: ag.name, version: ag.package.version, payloadSha256: ag.package.payloadSha256 || null, running: !!ag.running, approval: ag.packageApproval || null }
     }
   }
   const pkgs = Array.isArray(view.catalog && view.catalog.packages) ? view.catalog.packages : []
@@ -4733,7 +4733,7 @@ function agentCatalogCard(pkg, view, installed) {
       box.append(status)
       const approve = acBtn('btn-primary btn-compact', t('agentCatalog.approve_btn'), async () => {
         approve.disabled = true
-        if (!(await agentCatalogApprove(state.installed.name, state.installed.version, null, status, box))) approve.disabled = false
+        if (!(await agentCatalogApprove(state.installed.name, state.installed.version, state.installed.payloadSha256, null, status, box))) approve.disabled = false
         else approve.remove()
       })
       box.append(approve)
@@ -4790,13 +4790,15 @@ function agentCatalogConfirm(pkg, state, panel) {
 // and starts only after its approval (POST /api/agents/<name>/approve-package).
 const AGENT_PKG_STEPS = ['download', 'verify', 'scan', 'create', 'review']
 
-/** Is `slug` installed now? The re-measure after a request whose answer was lost (Samu, extra 3). */
+/** Is `slug` installed now? The re-measure after a request whose answer was lost (Samu, extra 3). Returns the agent's
+ *  name with the version and payload digest standing in its folder (KISPROGI 6464 M2: what the approval then names),
+ *  or null. */
 async function agentCatalogInstalledName(slug) {
   try {
     const a = await readActionReply(await fetch('/api/agents'))
     const list = Array.isArray(a.body) ? a.body : (Array.isArray(a.body.agents) ? a.body.agents : [])
     const hit = list.find((ag) => ag && ag.package && ag.package.slug === slug)
-    return hit ? hit.name : null
+    return hit ? { name: hit.name, version: hit.package.version || null, payloadSha256: hit.package.payloadSha256 || null } : null
   } catch {
     return null
   }
@@ -4819,6 +4821,7 @@ async function agentCatalogInstall(pkg, panel, btn, displayName = '') {
   panel.replaceChildren(box)
   const mark = (i, cls) => { items[i].classList.add(cls) }
   let name = null
+  let measured = null
   try {
     let r = null
     try {
@@ -4828,8 +4831,9 @@ async function agentCatalogInstall(pkg, panel, btn, displayName = '') {
       }))
     } catch {
       // The answer was lost (a proxy or the network cut it): the install may have finished. Measure, do not guess.
-      name = await agentCatalogInstalledName(pkg.slug)
-      if (name === null) { status.className = 'ac-error'; status.textContent = t('agentCatalog.err.lost'); return }
+      measured = await agentCatalogInstalledName(pkg.slug)
+      if (measured === null) { status.className = 'ac-error'; status.textContent = t('agentCatalog.err.lost'); return }
+      name = measured.name
     }
     if (r && !r.ok) {
       const step = agentPkgErrorStep(r.body) - 1
@@ -4849,10 +4853,13 @@ async function agentCatalogInstall(pkg, panel, btn, displayName = '') {
     // Step 5: set aside, waiting for the owner approval (after BELA reviewed it); the start comes after the approval.
     status.className = 'ac-muted'
     status.textContent = t('agentCatalog.pending_review')
-    const version = r ? r.body.version : null
+    // KISPROGI 6464 M2: the approval names exactly what was installed (the version AND the payload digest), so a package
+    // changed since, even under the same version, is refused (409 package_changed), never approved unseen.
+    const version = r ? r.body.version : measured.version
+    const payloadSha256 = r ? r.body.payloadSha256 : measured.payloadSha256
     const approve = acBtn('btn-primary btn-compact', t('agentCatalog.approve_btn'), async () => {
       approve.disabled = true
-      if (!(await agentCatalogApprove(name, version, items[4], status, box))) approve.disabled = false
+      if (!(await agentCatalogApprove(name, version, payloadSha256, items[4], status, box))) approve.disabled = false
       else approve.remove()
     })
     box.append(approve)
@@ -4861,15 +4868,24 @@ async function agentCatalogInstall(pkg, panel, btn, displayName = '') {
   }
 }
 
-/** This fork: the owner approval of an installed package (exactly `version` when known: a package changed since the
- *  review is refused by the server). On success the start is offered. Returns whether the approval went through. */
-async function agentCatalogApprove(name, version, item, status, box) {
+/** Only the digest shape the server writes (64 lowercase hex); anything else is not sent. */
+function agentPkgApproveBody(version, payloadSha256) {
+  const body = {}
+  if (typeof version === 'string' && version) body.version = version
+  if (typeof payloadSha256 === 'string' && /^[0-9a-f]{64}$/.test(payloadSha256)) body.payloadSha256 = payloadSha256
+  return body
+}
+
+/** This fork: the owner approval of an installed package, naming exactly `version` and `payloadSha256` when known (a
+ *  package changed since the review is refused by the server: 409 package_changed). On success the start is offered.
+ *  Returns whether the approval went through. */
+async function agentCatalogApprove(name, version, payloadSha256, item, status, box) {
   status.className = 'ac-muted'
   status.textContent = t('agentCatalog.approving')
   let r
   try {
     r = await readActionReply(await fetch(`/api/agents/${encodeURIComponent(name)}/approve-package`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(version ? { version } : {}),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agentPkgApproveBody(version, payloadSha256)),
     }))
   } catch {
     r = { ok: false, body: {} }

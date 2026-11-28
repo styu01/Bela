@@ -270,13 +270,14 @@ async function installPackage(ctx: RouteContext, deps: PackageDeps): Promise<voi
   // 11. This fork (BELA 6438/6444): the package is SET ASIDE, not taken into use. It does not start before the
   // owner approval (approval.ts), so the fleet is not told of a new colleague yet (that happens on approval), and
   // BELA is asked to review it: the name, the version, the files and the skill scan counts, never the texts.
-  json(res, { ok: true, name: slug, version: pkg.version, modelHintApplied, skillReport: out.skillReport, approval: 'pending' })
+  // KISPROGI 6464 M2: the payload digest goes with the answer, so the approval can name exactly what was installed.
+  json(res, { ok: true, name: slug, version: pkg.version, payloadSha256: pkg.payloadSha256, modelHintApplied, skillReport: out.skillReport, approval: 'pending' })
   try {
     const files = pkg.files.map((f) => f.path).join(', ')
     const findings = Object.entries(out.skillReport.findings).map(([k, v]) => `${k}: ${v}`).join(', ') || 'nincs'
     await (deps.notify ?? escalatePackageNotice)(
       `Ugynok-csomag telepitve, JOVAHAGYASRA VAR (nem indul el addig): ${slug} ${pkg.version}. ` +
-      `Fajlok: ${files}. Skill-vizsgalat talalatai: ${findings}. ` +
+      `Fajlok: ${files}. Skill-vizsgalat talalatai: ${findings}. payloadSha256: ${pkg.payloadSha256}. ` +
       `Atnezes: agents/${slug}/ (PACKAGE.md, LOCAL.md, .claude/skills). Jovahagyas: POST /api/agents/${slug}/approve-package (owner-munkamenet).`,
       { reviewOf: slug, ownerText: installReviewOwnerText(slug, pkg.version) },
     )
@@ -533,10 +534,11 @@ async function applyUpdate(ctx: RouteContext, deps: PackageDeps, rawName: string
     // N18/e: the audit lines are written on a successful apply (the check writes none).
     try { packageSkillReport(first.name, got.pkg, now) } catch (err) { logger.warn({ err, name: first.name }, 'agent package update: the skill audit did not run') }
     // This fork: the new record no longer matches the approval, so the agent waits again; BELA is asked to review.
-    json(res, { ok: true, kind: out.kind, version: got.pkg.version, applied: out.applied, keptMine: out.keptMine, approval: 'pending' })
+    json(res, { ok: true, kind: out.kind, version: got.pkg.version, payloadSha256: got.pkg.payloadSha256, applied: out.applied, keptMine: out.keptMine, approval: 'pending' })
     try {
       await (deps.notify ?? escalatePackageNotice)(
         `Ugynok-csomag frissitve, UJRA JOVAHAGYASRA VAR (nem indul el addig): ${first.name} ${first.manifest.payload.version} -> ${got.pkg.version}. ` +
+        `payloadSha256: ${got.pkg.payloadSha256}. ` +
         `Atnezes: agents/${first.name}/. Jovahagyas: POST /api/agents/${first.name}/approve-package (owner-munkamenet).`,
         { reviewOf: first.name, ownerText: updateReviewOwnerText(first.name, got.pkg.version) },
       )

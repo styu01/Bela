@@ -453,7 +453,7 @@ interface AgentSummary {
    *  else null -- drives the warning on the agent card. */
   missingCustomProvider: string | null
   /** Upstream 9301a1dd (plan 4.2): the installed agent package, from its readable record; null for any other agent. */
-  package: { slug: string; version: string } | null
+  package: { slug: string; version: string; payloadSha256: string } | null
   /** This fork (BELA 6438): where a package agent stands with its owner approval; null for any other agent.
    *  'pending' covers an unreadable record too: either way the agent does not start. */
   packageApproval: 'approved' | 'pending' | null

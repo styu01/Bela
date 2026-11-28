@@ -180,14 +180,16 @@ describe('Agent catalog page: the owner approval (this fork)', () => {
     expect(install).not.toBe('')
     expect(install).not.toContain('agentCatalogStart(')
     expect(install).toContain("t('agentCatalog.approve_btn')")
-    expect(install).toContain('agentCatalogApprove(name, version, items[4], status, box)')
+    expect(install).toContain('agentCatalogApprove(name, version, payloadSha256, items[4], status, box)')
+    // KISPROGI 6464 M2: the digest of what was installed, from the answer (or, after a lost answer, from the re-measure).
+    expect(install).toContain('const payloadSha256 = r ? r.body.payloadSha256 : measured.payloadSha256')
   })
 
   it('the approval posts to the approve route with the version seen, and only then offers the start', () => {
     const approve = fn('agentCatalogApprove')
     expect(approve).toContain('/approve-package')
     expect(approve).toContain("method: 'POST'")
-    expect(approve).toContain('JSON.stringify(version ? { version } : {})')
+    expect(approve).toContain('JSON.stringify(agentPkgApproveBody(version, payloadSha256))')
     const ok = approve.indexOf('if (!r.ok) {')
     const start = approve.indexOf('agentCatalogStart(')
     expect(ok).toBeGreaterThan(-1)
@@ -200,6 +202,32 @@ describe('Agent catalog page: the owner approval (this fork)', () => {
     expect(card).toContain("t('agentCatalog.pending')")
     expect(card).toContain("t('agentCatalog.approve_btn')")
     expect(APP).toContain('approval: ag.packageApproval || null')
+    // KISPROGI 6464 M2: the card names the digest standing in the folder, from the agent list.
+    expect(card).toContain('agentCatalogApprove(state.installed.name, state.installed.version, state.installed.payloadSha256, null, status, box)')
+    expect(APP).toContain('payloadSha256: ag.package.payloadSha256 || null')
+  })
+
+  // KISPROGI 6464 M2, run out of the real source: the request body the approve button sends.
+  it('the approve request names the version and the digest; a malformed digest is not sent', async () => {
+    const SHA = 'ab'.repeat(32)
+    const sent: Array<{ url: string; body: unknown }> = []
+    const el = () => ({ className: '', textContent: '', classList: { add() {}, remove() {} }, append() {}, remove() {} })
+    const ctx: Record<string, unknown> = {
+      t: (k: string) => k, ownerSessionText: () => '', URL,
+      document: { createElement: el },
+      fetch: async (url: string, init: { body: string }) => { sent.push({ url, body: JSON.parse(init.body) }); return { ok: false, status: 409, json: async () => ({ error: 'package_changed' }) } },
+      readActionReply: async (r: { ok: boolean; status: number; json: () => Promise<unknown> }) => ({ ok: r.ok, status: r.status, body: await r.json() }),
+    }
+    vm.runInNewContext(`${BLOCK}\nthis.g = { agentPkgApproveBody, agentCatalogApprove }`, ctx)
+    const g = ctx.g as { agentPkgApproveBody: (v: unknown, s: unknown) => unknown; agentCatalogApprove: (...a: unknown[]) => Promise<boolean> }
+    expect(g.agentPkgApproveBody('1.2.0', SHA)).toEqual({ version: '1.2.0', payloadSha256: SHA })
+    expect(g.agentPkgApproveBody('1.2.0', null)).toEqual({ version: '1.2.0' })
+    expect(g.agentPkgApproveBody(null, 'AB'.repeat(32))).toEqual({})
+    expect(g.agentPkgApproveBody('', 'x')).toEqual({})
+    const status = el()
+    expect(await g.agentCatalogApprove('invoice-helper', '1.2.0', SHA, null, status, el())).toBe(false)
+    expect(sent).toEqual([{ url: '/api/agents/invoice-helper/approve-package', body: { version: '1.2.0', payloadSha256: SHA } }])
+    expect(status.className).toBe('ac-error')
   })
 })
 

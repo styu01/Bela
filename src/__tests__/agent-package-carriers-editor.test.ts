@@ -190,7 +190,8 @@ describe('the dashboard summary (plan 4.2, M13; mutant 25)', () => {
     makeAgent('hand', HAND_FILES)
     const pkg = await hit('GET', '/api/agents/pkg')
     expect(pkg.body.description).toBe('Keeps the invoices in order.')
-    expect(pkg.body.package).toEqual({ slug: 'pkg', version: '1.2.0' })
+    // This fork (KISPROGI 6464 M2): the record's payload digest too, which the catalog's approve button names.
+    expect(pkg.body.package).toEqual({ slug: 'pkg', version: '1.2.0', payloadSha256: 'a'.repeat(64) })
     const hand = await hit('GET', '/api/agents/hand')
     expect(hand.body.description).toBe('A hand-made agent.')
     expect(hand.body.package).toBeNull()

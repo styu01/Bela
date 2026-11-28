@@ -103,6 +103,11 @@ describe('the success path (plan 6.1)', () => {
     const out = await install({ slug: 'invoice-helper' })
     expect(out.status).toBe(200)
     expect(out.body).toMatchObject({ ok: true, name: 'invoice-helper', version: '1.2.0', modelHintApplied: null, approval: 'pending' })
+    // KISPROGI 6464 M2: the digest of exactly what was installed (the record's), for the approval to name.
+    const rec = JSON.parse(readFileSync(join(AGENTS, 'invoice-helper', '.package', 'manifest.json'), 'utf8'))
+    expect(out.body.payloadSha256).toBe(rec.payloadSha256)
+    expect(out.body.payloadSha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(notified.find((t) => t.includes('JOVAHAGYASRA VAR'))).toContain(`payloadSha256: ${rec.payloadSha256}`)
     expect(out.body.skillReport).toMatchObject({ quarantineApplies: true, findings: {}, globalNameCollisions: [] })
     expect(typeof out.body.skillReport.quarantineOn).toBe('boolean')
     expect(fake.requests).toHaveLength(1)

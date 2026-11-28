@@ -252,13 +252,19 @@ describe('the update and the owner approval (this fork)', () => {
     const c = await check()
     const out = await apply({ planId: c.body.planId, decisions: {} })
     expect(out).toMatchObject({ status: 200, body: { ok: true, version: '1.3.0', approval: 'pending' } })
+    // KISPROGI 6464 M2: the new record's digest, in the answer and in BELA's review request.
+    const rec = JSON.parse(readFileSync(dirOf('.package/manifest.json'), 'utf8'))
+    expect(out.body.payloadSha256).toBe(rec.payloadSha256)
     expect(A.packageApprovalRefusal(NAME)).toBe(A.REFUSAL_PACKAGE_NOT_APPROVED)
     const review = notified.filter((t) => t.includes('UJRA JOVAHAGYASRA VAR'))
     expect(review).toHaveLength(1)
     expect(review[0]).toContain(`${NAME} 1.2.0 -> 1.3.0`)
+    expect(review[0]).toContain(`payloadSha256: ${out.body.payloadSha256}`)
     // KISPROGI 6464 M1: under the agent's review key, with the plain owner sentence.
     expect(notifiedOpts.at(-1)).toEqual({ reviewOf: NAME, ownerText: (await import('../web/agent-package/notices.js')).updateReviewOwnerText(NAME, '1.3.0') })
-    expect(A.approvePackage(NAME, 'owner', NOW, { version: '1.3.0' }).ok).toBe(true)
+    // The same version with another digest is not approved unseen; the answered digest is.
+    expect(A.approvePackage(NAME, 'owner', NOW, { version: '1.3.0', payloadSha256: 'f'.repeat(64) })).toMatchObject({ ok: false, status: 409, error: 'package_changed' })
+    expect(A.approvePackage(NAME, 'owner', NOW, { version: '1.3.0', payloadSha256: out.body.payloadSha256 }).ok).toBe(true)
     expect(A.packageApprovalRefusal(NAME)).toBeNull()
   })
 
