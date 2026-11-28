@@ -833,8 +833,7 @@ const R6566_PASS: string[] = [
   `python3 -c 'import sqlite3; c=sqlite3.connect("store/claudeclaw.db"); print(c.execute("select count(*) from agent_messages").fetchone())'`,
   `python3 -c 'import sqlite3; sqlite3.connect("store/claudeclaw.db").execute("DELETE FROM kanban_cards WHERE id=1")'`,
   `perl -e 'unlink "/tmp/x.db"'`, `python3 -c 'import shutil; shutil.rmtree("/tmp/build")'`, `node -e 'require("fs").rmSync("/tmp/x", {recursive: true})'`,
-  `python3 -c 'import os; os.system("ls -la store")'`, `ruby -e 'h = {}; h.delete("store")'`,
-  `python3 -c 'd = {"store": 1}; d.pop("store"); l = ["store"]; l.remove("store")'`, `python3 -c 'x = ["-exec", "rm", "store/claudeclaw.db"]; print(x)'`,
+  `python3 -c 'import os; os.system("ls -la store")'`, `python3 -c 'x = ["-exec", "rm", "store/claudeclaw.db"]; print(x)'`,
   "python3 - <<'PY'\nt = '''\nfind store -exec cat {} +\n`rm store/claudeclaw.db`\n'''\nprint(t)\nPY",
   'tar -czf /tmp/backup.tgz store', 'tar -cf - src | tar -xf - -C /tmp/x', 'tar -tf /tmp/backup.tgz', 'tar -xzf /tmp/a.tgz -C /tmp/x',
   'make -C /tmp/build', "make -f - <<'EOF'\nall:\n\techo hi\nEOF", 'timeout 5 ls store', 'timeout -k 1 5 rm /tmp/x', 'nice -n 5 make',
@@ -896,6 +895,78 @@ describe('auth-store-gate: KISPROGI 6566 (interpreter calls, archives to stdout,
   })
   it.skipIf(!BWRAP)('every refused form above that is relative really hits the DB or leaks (in the sandbox)', () => {
     for (const [cmd, effect, cc] of R6566_REAL) realRun(cmd, effect, cc)
+  })
+})
+
+// KISPROGI 6609 N1-N3: interpreter code that holds a strictly protected string (the DB or second-factor file, the store
+// folder) is refused beside a deleting / renaming / truncating name with any prefix, an indirection, a write through a
+// variable bound to it, Perl's open > and awk's > / |; subprocess / os aliases are shell calls. More programs that run
+// a command line are wrappers (watch, script -c, npx -c, the multiplexer's shell-running subcommands), and git -c runs
+// an alias or a command-valued key. Measured on the real calls (replay): a read, a report to another file, importlib
+// by path and subprocess running something else stay allowed.
+const R6609_DENY: string[] = [
+  `python3 -c "import os as o; o.remove('store/claudeclaw.db')"`, `python3 -c "from os import remove as r; r('store/claudeclaw.db')"`,
+  `python3 -c "import os; getattr(os,'rem'+'ove')('store/claudeclaw.db')"`, `python3 -c "__import__('os').remove('store/claudeclaw.db')"`,
+  `python3 -c "import subprocess as s; s.run(['rm','store/claudeclaw.db'])"`, `python3 -c "import os; f=os.remove; f('store/claudeclaw.db')"`,
+  `python3 -c "import shutil as sh; sh.move('store/claudeclaw.db', '/tmp/x')"`, `python3 -c "import importlib; importlib.import_module('os').remove('store/claudeclaw.db')"`,
+  `python3 -c "p = 'store/claudeclaw.db'; open(p, 'w').close()"`, `python3 -c "from pathlib import Path; p = Path('store/claudeclaw.db'); p.write_bytes(b'')"`,
+  `python3 -c "from subprocess import run as r; r(['rm', 'store/claudeclaw.db'])"`, `python3 -c "import os as o; o.system('rm store/claudeclaw.db')"`,
+  `ruby -e 'h = {}; h.delete("store")'`, `python3 -c 'd = {"store": 1}; d.pop("store"); l = ["store"]; l.remove("store")'`,
+  `perl -e '$f="store/claudeclaw.db"; unlink $f'`, `perl -e 'my $f = "store/claudeclaw.db"; rename $f, "/tmp/x"'`,
+  `perl -e 'open F, ">store/claudeclaw.db"'`, `perl -e 'open(my $fh, ">", "store/claudeclaw.db")'`, `ruby -e "File.unlink 'store/claudeclaw.db'"`,
+  `ruby -e 'File.open("store/claudeclaw.db", "w") {}'`, `awk 'BEGIN{print "" > "store/claudeclaw.db"}'`,
+  `awk 'BEGIN{print "x" | "cat > store/claudeclaw.db"}'`, `node -e "const {unlinkSync:u}=require('fs'); u('store/claudeclaw.db')"`,
+  `node -e "require('fs')['unl'+'inkSync']('store/claudeclaw.db')"`, `bun -e "await Bun.file('store/claudeclaw.db').delete()"`,
+  `npx tsx -e "require('fs').unlinkSync('store/claudeclaw.db')"`, `./node_modules/.bin/tsx -e "require('fs').unlinkSync('store/claudeclaw.db')"`,
+  `ts-node -e "require('fs').unlinkSync('store/claudeclaw.db')"`,
+  `python3 -c "m = __import__('os'); m.replace('/tmp/e.db', 'store/claudeclaw.db')"`,
+  // N2
+  `git -c alias.x='!rm store/claudeclaw.db' x`, `git -c core.pager='rm store/claudeclaw.db' log`, `git -c core.sshCommand='rm -rf store' fetch`,
+  `git -c credential.helper='!rm store/claudeclaw.db' push`, `watch -n1 'rm store/claudeclaw.db'`, 'watch -n 1 rm store/claudeclaw.db',
+  'watch -x rm store/claudeclaw.db', `script -qc 'rm store/claudeclaw.db' /dev/null`, `script -q -c 'rm -rf store' /dev/null`,
+  'script -q store/claudeclaw.db', `npx -c 'rm store/claudeclaw.db'`, `tmux new -d 'rm store/claudeclaw.db'`,
+  `tmux -L sock new-session -d 'rm -rf store'`, `tmux new-window 'rm store/claudeclaw.db'`, `tmux respawn-pane -k 'rm store/claudeclaw.db'`,
+  `tmux display-popup 'rm store/claudeclaw.db'`, `tmux pipe-pane 'cat > store/claudeclaw.db'`, `tmux if-shell 'rm store/claudeclaw.db' 'display ok'`,
+]
+const R6609_PASS: string[] = [
+  `python3 -c "d={}; d.pop('x', None); print(d)"`, `python3 -c "import json; print(json.dumps({'remove': 1, 'delete': 2}))"`,
+  `python3 -c "import os; os.remove('/tmp/foo.txt')"`, `node -e "require('fs').unlinkSync('/tmp/x.txt')"`,
+  `python3 -c "import os; root = '${ROOT}'; os.remove('/tmp/x.txt')"`,
+  `python3 -c "import sqlite3; c = sqlite3.connect('store/claudeclaw.db'); move = [1, 2]; print(c.execute('select count(*) from memories').fetchone(), move)"`,
+  "python3 - <<'PY'\nimport sqlite3\nwith sqlite3.connect('file:store/claudeclaw.db?mode=ro', uri=True) as c:\n    print(c.execute('select 1').fetchone())\nPY",
+  `python3 -c "from pathlib import Path; print(Path('store/claudeclaw.db').stat().st_size)"`,
+  `python3 -c "import importlib.util, sqlite3; s = importlib.util.spec_from_file_location('m', 'scripts/x.py'); print(sqlite3.connect('store/claudeclaw.db').execute('select 1').fetchone())"`,
+  `python3 -c "import sqlite3, json; c = sqlite3.connect('store/claudeclaw.db'); rows = c.execute('select 1').fetchall(); open('/tmp/report.json', 'w').write(json.dumps(rows))"`,
+  `python3 -c "import sqlite3; c = sqlite3.connect('store/claudeclaw.db'); s = 'a.b'.replace('.', '-'); print(s)"`,
+  `python3 -c "import subprocess as sp; print(sp.run(['ls', '-la'], capture_output=True).stdout)"`,
+  `python3 -c "print('[link](https://example.com)'); import sqlite3; sqlite3.connect('store/claudeclaw.db')"`,
+  `npx tsx -e "console.log(1)"`, 'npx vitest run --maxWorkers=2',
+  'git -c alias.st=status st', 'git -c core.pager=less log -1', 'git -c user.name=x commit --dry-run', 'watch -n1 ls store',
+  `watch -n 5 'df -h'`, `watch -x echo 'a; rm store/claudeclaw.db'`, 'script -q /dev/null', `script -qc 'ls -la' /dev/null`, `tmux new -d -s dev 'npm run dev'`, 'tmux ls', 'tmux kill-session -t dev',
+]
+const R6609_REAL: Array<[string, 'leaks' | 'db', boolean]> = [
+  [`python3 -c "import os as o; o.remove('store/claudeclaw.db')"`, 'db', false],
+  [`python3 -c "from os import remove as r; r('store/claudeclaw.db')"`, 'db', false],
+  [`python3 -c "import os; getattr(os,'rem'+'ove')('store/claudeclaw.db')"`, 'db', false],
+  [`python3 -c "import subprocess as s; s.run(['rm','store/claudeclaw.db'])"`, 'db', false],
+  [`python3 -c "p = 'store/claudeclaw.db'; open(p, 'w').close()"`, 'db', false],
+  [`perl -e '$f="store/claudeclaw.db"; unlink $f'`, 'db', false], [`perl -e 'open F, ">store/claudeclaw.db"'`, 'db', false],
+  [`awk 'BEGIN{print "" > "store/claudeclaw.db"}'`, 'db', false],
+  [`node -e "const {unlinkSync:u}=require('fs'); u('store/claudeclaw.db')"`, 'db', false],
+  [`script -qc 'rm store/claudeclaw.db' /dev/null`, 'db', false],
+]
+
+describe('auth-store-gate: KISPROGI 6609 (interpreter aliases and indirection, more command-line runners, git -c)', () => {
+  for (const c of R6609_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6609_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('the multiplexer: -c names the folder; without it only a new session starts here, the others where the target pane is', () => {
+    const sub = join(ROOT, 'scripts')
+    for (const c of [`tmux new -d -c ${ROOT} 'rm store/claudeclaw.db'`, `tmux new-window 'rm store/claudeclaw.db'`,
+      `tmux split-window -c ${ROOT} 'cat store/.dashboard-totp.json'`]) expect(bash(c, sub), c).toBe('DENY')
+    for (const c of [`tmux new -d 'rm store/claudeclaw.db'`, 'tmux new -d -c /tmp \'rm -rf store\'']) expect(bash(c, sub), c).toBe('pass')
+  })
+  it.skipIf(!BWRAP)('every refused form above that is relative really hits the DB (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6609_REAL) realRun(cmd, effect, cc)
   })
 })
 

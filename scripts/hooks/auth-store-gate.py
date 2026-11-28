@@ -141,6 +141,7 @@ INTERPRETERS = {
     "python", "python2", "python3", "pypy", "pypy3", "node", "nodejs", "bun", "deno", "perl", "ruby", "php",
     "sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "busybox", "sqlite3", "eval", "source", ".", "awk",
     "gawk", "mawk", "nawk", "osascript", "pwsh", "tclsh", "lua", "R", "Rscript",
+    "tsx", "ts-node", "ts-node-esm",  # KISPROGI 6609 N3: TypeScript runners are JS interpreters
 }
 # KISPROGI 6566 R3, R5, R6: ONE table for every program that runs another command after its own options. Each entry:
 # sv = short option letters that take a value (bundled: -vC DIR, or attached: -CDIR), lv = long options that take a
@@ -193,7 +194,28 @@ WRAPPER_SPECS = {
                                         "--path-property", "--socket-property", "--timer-property", "--host",
                                         "--machine", "--service-type", "--background"},
                         cd_l={"--working-directory"}, here={"-d", "--same-dir"}, home=True),
+    # KISPROGI 6609 N2: watch hands its words, joined, to sh -c (unless -x); script runs its -c text and writes its
+    # positional file (no command word); npx / bunx / pnpx run a package's binary (npx -c is shell text).
+    "watch": dict(sv="nq", lv={"--interval", "--equexit"}, joins_shell=True, exec_flags={"-x", "--exec"}),
+    "script": dict(sv="cEBIOTm", lv={"--command", "--echo", "--log-in", "--log-out", "--log-io", "--log-timing",
+                                     "--logging-format", "--output-limit"},
+                   shell_s="c", shell_l={"--command"}, no_command=True),
+    "npx": dict(sv="pc", lv={"--package", "--call"}, shell_s="c", shell_l={"--call"}),
+    "bunx": {}, "pnpx": {},
     "then": {}, "do": {}, "else": {}, "if": {}, "while": {}, "until": {}, "!": {}, "{": {}, "(": {}, "elif": {},
+}
+# KISPROGI 6609 N2: the terminal multiplexer's subcommands that run a shell command line (the words after their
+# options, joined), with the value letters of their options; -c names the folder it starts in. Any other subcommand
+# runs no shell text. Global options before the subcommand: -L / -S / -f take a value.
+TMUX_SHELL_SUBCOMMANDS = {
+    "new-session": "cefFnstxy", "new": "cefFnstxy",
+    "new-window": "ceFnt", "neww": "ceFnt",
+    "split-window": "ceFlpt", "splitw": "ceFlpt",
+    "respawn-pane": "cet", "respawnp": "cet", "respawn-window": "cet", "respawnw": "cet",
+    "run-shell": "cdt", "run": "cdt",
+    "display-popup": "bcdehsStTwxy", "popup": "bcdehsStTwxy",
+    "pipe-pane": "t", "pipep": "t",
+    "if-shell": "t", "if": "t",
 }
 WRAPPERS = set(WRAPPER_SPECS)
 _ASSIGN_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
@@ -204,7 +226,7 @@ def _unwrap(words):
     word's index, len(words) when there is none), chdirs (each folder value a wrapper moves the command to, None for a
     place not known here), splits (env -S strings), shells (flock -c texts), assigns ([(NAME, VALUE)] before the
     command, the env wrapper's too), wrappers (their names)."""
-    out = {"chdirs": [], "splits": [], "shells": [], "assigns": [], "wrappers": []}
+    out = {"chdirs": [], "splits": [], "shells": [], "assigns": [], "wrappers": [], "writes": []}
     i = 0
     while i < len(words):
         w = _unmark(words[i])
@@ -212,6 +234,11 @@ def _unwrap(words):
             out["assigns"].append(tuple(w.split("=", 1)))
             i += 1
             continue
+        if os.path.basename(w) == "tmux":
+            _unwrap_tmux([_unmark(x) for x in words[i + 1:]], out)
+            out["wrappers"].append("tmux")
+            i = len(words)
+            break
         spec = WRAPPER_SPECS.get(os.path.basename(w))
         if spec is None:
             break
@@ -245,8 +272,11 @@ def _unwrap(words):
                     else "shell" if long in spec.get("shell_l", set()) else None)
 
         pos = spec.get("pos", 0)
+        exec_seen = False
         while i < len(words):
             o = _unmark(words[i])
+            if o in spec.get("exec_flags", set()):
+                exec_seen = True
             if o == "--":
                 i += 1
                 break
@@ -309,8 +339,52 @@ def _unwrap(words):
             break
         if spec.get("home") and not moved:
             out["chdirs"].append(None)
+        if spec.get("no_command"):
+            out["writes"] += [_unmark(x) for x in words[i:] if not _unmark(x).startswith("-")]
+            i = len(words)
+            break
+        if spec.get("joins_shell") and not exec_seen and i < len(words):
+            out["shells"].append(" ".join(_unmark(x) for x in words[i:]))
+            i = len(words)
+            break
     out["idx"] = i
     return out
+
+
+def _unwrap_tmux(args, out) -> None:
+    """KISPROGI 6609 N2: a multiplexer call. Its shell-running subcommands (TMUX_SHELL_SUBCOMMANDS) give their
+    joined command words as shell text and their -c folder as a place; without -c only new-session starts in the
+    caller's folder, the others start where the target pane is (a place not known here)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in ("-L", "-S", "-f") else 1
+    if i >= len(args) or args[i] not in TMUX_SHELL_SUBCOMMANDS:
+        return
+    sub, letters, i = args[i], TMUX_SHELL_SUBCOMMANDS[args[i]], i + 1
+    folder = None
+    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+        o = args[i]
+        if o == "--":
+            i += 1
+            break
+        j = 1
+        while j < len(o):
+            if o[j] in letters:
+                val = o[j + 1:]
+                if not val and i + 1 < len(args):
+                    i += 1
+                    val = args[i]
+                if o[j] == "c":
+                    folder = val
+                break
+            j += 1
+        i += 1
+    if folder is not None:
+        out["chdirs"].append(folder)
+    elif sub not in ("new-session", "new"):
+        out["chdirs"].append(None)
+    if i < len(args):
+        out["shells"].append(" ".join(args[i:]))
 
 
 # KISPROGI 6566 R2, R3, R4: commands whose OWN options move the folder they read or write in, in the same shape as
@@ -773,6 +847,81 @@ def _mask_literals(text: str) -> str:
 _BACKTICK_SHELL_LANGS = re.compile(r"(?:perl|ruby|jruby|truffleruby|php)[\d.]*")
 
 
+# KISPROGI 6609 N1, N3: when interpreter code holds a strictly protected string (the DB or second-factor file name, or
+# the store folder itself), an alias or an indirection could reach a deleting call under a name the call table does not
+# know (import os as o; o.remove(p), from os import remove as r, getattr(os, "rem"+"ove"), __import__("os"),
+# f = os.remove, const {unlinkSync: u} = require("fs"), fs["unl"+"inkSync"], File.unlink "x", unlink $f). Then any of
+# these in the code (strings blanked out) refuses: a deleting / renaming / truncating name with ANY prefix; an
+# indirection (from-import of such a name, getattr, builtin exec / eval / compile, globals() / vars() / locals(), a
+# computed call x[...](...), importlib.import_module, __import__ of os / shutil / subprocess / pathlib / posix / io /
+# sys / builtins); a variable bound straight to the protected string and then written (open(p, "w"), p.write_bytes(),
+# p.touch()); Perl's open to ">file" / "+<file"; awk's print > / | (a file or command target). The aliases of
+# subprocess and os (import subprocess as s, from subprocess import run as r) are shell calls too: their string
+# arguments are checked as shell. Measured on the real calls (replay): a read (sqlite3 mode=ro, a SELECT), a report
+# or a state file written to ANOTHER file, importlib loading a script by path, and subprocess running something else
+# stay allowed.
+_CODE_DESTRUCTIVE_ANY_RX = re.compile(
+    r"(?<![\w$])(?:remove|removedirs|unlink\w*|rmtree|rmdir\w*|rename\w*|move|truncate\w*|ftruncate|delete\w*|rm|rmSync|"
+    r"rm_rf|rm_r|rm_f|remove_tree|remove_dir\w*|remove_file|emptyDir\w*)(?!\w)(?!\s*=(?!=))")  # not an assignment target
+_CODE_INDIRECTION_RX = re.compile(
+    r"(?<![\w.$])(?:getattr|exec|eval|compile|globals|vars|locals)\s*\(|\bimportlib\s*\.\s*import_module\b"
+    r"|\[\s*['\"][^\]\n]*\]\s*\(|\bfrom\s+[\w.]+\s+import\b[^\n;]*?\b(?:remove|unlink|rmtree|rename|replace|move|truncate|system|popen|"
+    r"run|call|Popen|check_call|check_output|getoutput|getstatusoutput|spawn\w*|exec\w*)\b")
+_CODE_DUNDER_IMPORT_RX = re.compile(r"__import__\s*\(\s*['\"](?:os|shutil|subprocess|pathlib|posix|nt|io|sys|builtins)['\"]")
+_CODE_ASSIGN_LITERAL_RX = re.compile(
+    r"(?:\$|(?<![\w.]))([A-Za-z_]\w*)\s*=\s*(?:[\w.]+\s*\(\s*)?[rRbBfFuU]{0,2}(['\"])((?:(?!\2)[^\\\n]|\\.){1,400})\2")
+_CODE_ALIAS_RX = re.compile(r"\bimport\s+(subprocess|os)\s+as\s+([A-Za-z_]\w*)")
+_CODE_FROM_SUBPROCESS_RX = re.compile(r"\bfrom\s+(?:subprocess|os)\s+import\s+([^\n;]+)")
+_PERL_WRITE_MODE_RX = re.compile(r"^\s*(?:\+?>{1,2}|\+<)\s*(.*)$")
+_DOT_ONLY_RX = re.compile(r"^\.{1,2}(?:/\.{1,2})*/?$")
+
+
+def _strictly_protected_literal(lit: str, places) -> bool:
+    """A code string naming the DB or second-factor file, or the store folder itself, from any of the places. A
+    folder that only HOLDS the store (the install root, /home) is not enough here: it stands in almost every script
+    (sys.path, cd, a report path); deleting it outright is still refused by the direct delete-call rule."""
+    m = _PERL_WRITE_MODE_RX.match(lit)
+    cand = m.group(1) if m else lit
+    if DB_RX.search(cand) or TOTP_RX.search(cand):
+        return True
+    cand = cand.strip()
+    if not cand or _DOT_ONLY_RX.match(cand) or _unknown_place(cand) or "\n" in cand or len(cand) > 400:
+        return False
+    return any(_is_store_dir(cand, c) for c in places)
+
+
+def _code_protected_shape(text: str, code: str, places, lang: str) -> bool:
+    """KISPROGI 6609 N1, N3 (see _CODE_DESTRUCTIVE_ANY_RX)."""
+    lits = [_code_literal(m) for m in _CODE_LITERAL_RX.finditer(text)]
+    protected = [x for x in lits if _strictly_protected_literal(x, places)]
+    if not protected:
+        return False
+    # a local variable the code itself assigns (move = [...]; move += ...) is no call; as an attribute (os.remove,
+    # f = os.remove) the name still counts
+    assigned = {m.group(1) for m in re.finditer(r"(?<![\w.$])([A-Za-z_]\w*)\s*[-+*/|&]?=(?!=)", code)}
+    for m in _CODE_DESTRUCTIVE_ANY_RX.finditer(code):
+        before = code[:m.start()].rstrip()[-2:]
+        if m.group(0) in assigned and not before.endswith((".", ":", "->")):
+            continue
+        return True
+    if _CODE_INDIRECTION_RX.search(code) or _CODE_DUNDER_IMPORT_RX.search(text):
+        return True
+    bound = {m.group(1) for m in _CODE_ASSIGN_LITERAL_RX.finditer(text)
+             if _strictly_protected_literal(re.sub(r"\\(.)", r"\1", m.group(3)), places)}
+    for v in bound:
+        e = re.escape(v)
+        if (re.search(r"(?<![\w.])" + e + r"\s*\.\s*(?:write_bytes|write_text|touch|open|chmod|write)\s*\(", code)
+                or re.search(r"(?<![\w.])open\s*\(\s*" + e + r"\s*,\s*['\"][rbt]*[wax+]", text)):
+            return True
+    if re.fullmatch(r"(?:perl|ruby|jruby|truffleruby)[\d.]*", lang or "") and re.search(r"\bopen\b", code) and (
+            any(_PERL_WRITE_MODE_RX.match(x) and _PERL_WRITE_MODE_RX.match(x).group(1) for x in protected)
+            or any(x.strip() in (">", ">>", "+<", "+>", "+>>") for x in lits)):
+        return True
+    if re.fullmatch(r"[gmn]?awk", lang or "") and re.search(r"[>|]", code):
+        return True
+    return False
+
+
 def _code_call_checks(text: str, cwd: str, depth: int, lang: str = "") -> None:
     """KISPROGI 6566 R1: the delete / shell / chdir calls of interpreter code (see _CODE_DELETE_NAMES). The names are
     matched in the code with its strings blanked out; the strings themselves are read from the original text."""
@@ -804,6 +953,9 @@ def _code_call_checks(text: str, cwd: str, depth: int, lang: str = "") -> None:
         for c in places:
             if _names_protected(t, c):
                 _deny("a dashboard adatbazis-fajljanak vagy a store mappanak torlese egy ertelmezo kodjaban")
+    if _code_protected_shape(text, code, places, lang):
+        _deny("vedett nev (dashboard adatbazis, masodik faktor tara vagy a store mappa) egy ertelmezo kodjaban torlo, "
+              "atnevezo, iro vagy indirekt (alias, getattr, __import__, subprocess) hivas mellett")
     if depth >= 4:
         return
     shells = []
@@ -811,6 +963,19 @@ def _code_call_checks(text: str, cwd: str, depth: int, lang: str = "") -> None:
         lits = [_code_literal(x) for x in _CODE_LITERAL_RX.finditer(_call_span(text, m.end()))]
         if lits:
             shells.append(" ".join(lits))
+    # KISPROGI 6609 N1: import subprocess as s / import os as o / from subprocess import run [as r]: their calls run
+    # shell too (s.run(["rm", ...]), r("rm ...", shell=True)); the string arguments are checked as shell
+    alias_calls = [re.escape(m.group(2)) + r"\s*\.\s*\w+" for m in _CODE_ALIAS_RX.finditer(code)]
+    for m in _CODE_FROM_SUBPROCESS_RX.finditer(code):
+        for part in m.group(1).replace("(", " ").replace(")", " ").split(","):
+            words = part.split()
+            if words:
+                alias_calls.append(re.escape(words[-1]))
+    if alias_calls:
+        for m in re.finditer(r"(?<![\w.])(?:" + "|".join(alias_calls) + r")\s*(?=\()", code):
+            lits = [_code_literal(x) for x in _CODE_LITERAL_RX.finditer(_call_span(text, m.end()))]
+            if lits:
+                shells.append(" ".join(lits))
     for m in _CODE_BACKTICK_RX.finditer(text if _BACKTICK_SHELL_LANGS.fullmatch(lang or "") else ""):
         if code[m.start()] != text[m.start()]:
             continue  # a backtick inside a string literal: text, not a command
@@ -2301,6 +2466,10 @@ def _pax_to_stdout_reads_store(args, cwd: str) -> bool:
 
 
 _MAKE_STDIN = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+# KISPROGI 6609 N2: git config keys whose value git runs as a shell command line
+_GIT_COMMAND_KEYS = {"core.pager", "core.editor", "core.sshcommand", "core.fsmonitor", "core.askpass", "diff.external",
+                     "sequence.editor", "gpg.program", "gpg.ssh.program", "gpg.x509.program", "web.browser",
+                     "sendemail.smtpserver", "uploadpack.packobjectshook", "credential.helper"}
 _MAKE_SHELL_RX = re.compile(r"\$[({]shell[ \t]+([^)}]*)[)}]")
 
 
@@ -2361,6 +2530,9 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             for text in _env_split_strings(pipeline[idx]):
                 _code_text_checks(text, "env -S", cwd, depth)
                 check_bash(text, cwd, depth + 1)
+        for w in _wrapper_writes(pipeline[idx]):
+            if _is_live_db_path(w, cwd) or _is_live_totp_word(w, cwd):
+                _deny("egy burkolo (script) a dashboard adatbazis-fajljaba vagy a masodik faktor taraba irna")
         if not head:
             continue
         # KISPROGI 6511 HS3: a code reader (a shell, an interpreter, eval, trap, source) that gets a substitution's
@@ -2487,6 +2659,19 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
         if head == "git" and _git_clean_on_store(args, cwd):
             _deny("git clean -x/-X a store mappara (a gitignore-olt store-t, benne a dashboard adatbazisat torolne)")
+        if head == "git" and depth < 4:
+            # KISPROGI 6609 N2: git -c KEY=VALUE where git runs VALUE as shell: an alias starting with "!", or a
+            # command-valued key (pager, editor, ssh command, fsmonitor, external diff, credential helper, ...)
+            for name, val, _k in _program_options("git", args)["opts"]:
+                if name != "-c" or not val or "=" not in val:
+                    continue
+                key, cmdline = val.split("=", 1)
+                key = key.strip().lower()
+                if key.startswith("alias.") and cmdline.startswith("!"):
+                    check_bash(cmdline[1:], cwd, depth + 1)
+                elif key in _GIT_COMMAND_KEYS or key.startswith("pager.") or (
+                        key.startswith("credential.") and key.endswith("helper") and cmdline.startswith("!")):
+                    check_bash(cmdline.lstrip("!"), cwd, depth + 1)
         if head == "git" and _git_grep_on_store(args, cwd):
             _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
         if head in ("tar", "gtar", "bsdtar"):
@@ -3003,6 +3188,11 @@ def _env_split_strings(toks):
     """The command lines wrappers run from a string before the command word: env -S / --split-string, flock -c."""
     u = _unwrap([t for t in toks if t not in REDIRS])
     return u["splits"] + u["shells"]
+
+
+def _wrapper_writes(toks):
+    """KISPROGI 6609 N2: files a wrapper writes itself (script's typescript file)."""
+    return _unwrap([t for t in toks if t not in REDIRS])["writes"]
 
 
 def _git_clean_on_store(args, cwd: str) -> bool:
