@@ -15,12 +15,13 @@
 //
 // The watchdog (scripts/watchdog.sh) makes the same comparison itself, with python3 on the same two files: no derived
 // list stands between them, so nothing can go stale and let an updated, unapproved package agent start there.
-import { lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { STORE_DIR } from '../../config.js'
 import { logger } from '../../logger.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
-import { agentsBaseDir, isInstallableName, isPackageAgentDir, installMarkerState } from './marker.js'
+import { agentsBaseDir, isInstallableName, isPackageAgentDir, installMarkerState, updatingTracePathOf } from './marker.js'
+import { clearPackageReviewNotice } from './notices.js'
 import { readPackageManifest } from './install.js'
 
 export const APPROVALS_DIRNAME = 'agent-package-approved'
@@ -149,4 +150,38 @@ export function pendingPackageAgents(): string[] {
     const s = packageApprovalState(n).state
     return s === 'pending' || s === 'unreadable_record'
   }).sort()
+}
+
+/**
+ * KISPROGI 6476 (a) and what goes with it (BELA 6478): an agent folder was deleted (DELETE /api/agents/<name>, after
+ * the folder is gone). Its package state outside the folder goes too:
+ *  - the open review request: its stage-2 owner alert about an agent that no longer exists must not go out;
+ *  - the owner approval record: a later install under the same name, even of the very same package, waits for a NEW
+ *    approval instead of starting on the old one;
+ *  - an update trace: it would hold a later install under the same name as "Package update in progress" (the boot
+ *    sweep removeOrphanUpdatingTraces only runs at a server start).
+ * A link or any other entry under those names is removed as well (the name is checked first, nothing outside the two
+ * store folders is touched). Never throws; returns what it removed.
+ */
+export function forgetDeletedPackageAgent(name: string): { review: boolean; approval: boolean; trace: boolean } {
+  const out = { review: false, approval: false, trace: false }
+  if (!isInstallableName(name)) return out
+  try { out.review = clearPackageReviewNotice(name) } catch (err) { logger.warn({ err, name }, 'agent package: the review request was not cleared') }
+  const drop = (p: string): boolean => {
+    try {
+      lstatSync(p)
+    } catch {
+      return false
+    }
+    try {
+      unlinkSync(p)
+      return true
+    } catch (err) {
+      logger.warn({ err, name, path: p }, 'agent package: a record of a deleted agent was not removed')
+      return false
+    }
+  }
+  out.approval = drop(approvalPathOf(name))
+  out.trace = drop(updatingTracePathOf(name))
+  return out
 }

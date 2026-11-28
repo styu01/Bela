@@ -471,6 +471,61 @@ describe('the owner approval of an installed package (this fork)', () => {
     }
   })
 
+  // KISPROGI 6476 (a), BELA 6478: deleting a package agent takes its state outside the folder with it.
+  it('a deleted package agent: its review request, approval and update trace go; a reinstall waits for a new approval', async () => {
+    const N = await import('../web/agent-package/notices.js')
+    const E = await import('../web/owner-escalation.js')
+    const A = await import('../web/agent-package/approval.js')
+    const real = deps
+    deps = { ...real, notify: async (text, opts) => N.escalatePackageNotice(text, opts) }
+    try {
+      const { sha } = await installed()
+      const key = N._packageReviewKeyForTest('invoice-helper')!
+      expect((await approve('invoice-helper', { payloadSha256: sha })).status).toBe(200)
+      // a review request again (as after an update), and a trace of an interrupted update
+      await N.escalatePackageNotice('updated, review again', { reviewOf: 'invoice-helper' })
+      const key2 = N._packageReviewKeyForTest('invoice-helper')!
+      mkdirSync(join(STORE, 'agent-package-updating'), { recursive: true })
+      writeFileSync(join(STORE, 'agent-package-updating', 'invoice-helper.json'), '{}')
+      rmSync(join(AGENTS, 'invoice-helper'), { recursive: true, force: true })
+      expect(A.forgetDeletedPackageAgent('invoice-helper')).toEqual({ review: true, approval: true, trace: true })
+      expect(existsSync(join(STORE, 'agent-package-approved', 'invoice-helper.json'))).toBe(false)
+      expect(existsSync(join(STORE, 'agent-package-updating', 'invoice-helper.json'))).toBe(false)
+      expect(N._packageReviewKeyForTest('invoice-helper')).toBeNull()
+      expect(E._getOwnerEscalationStateForTest(key2)).toBeNull()
+      expect(key).not.toBe(key2)
+      expect(A.forgetDeletedPackageAgent('invoice-helper')).toEqual({ review: false, approval: false, trace: false })
+      // the very same package installed again does not start on the old approval
+      fake.answer({ status: 200, body: delivery() })
+      expect((await install({ slug: 'invoice-helper' })).status).toBe(200)
+      expect(A.packageApprovalRefusal('invoice-helper')).toBe('Package awaiting owner approval')
+      const { packageStartRefusal } = await import('../web/agent-package/install.js')
+      expect(packageStartRefusal('invoice-helper', join(AGENTS, 'invoice-helper'))).toBeNull()
+    } finally {
+      deps = real
+      E._resetAllOwnerEscalationsForTest()
+    }
+  })
+
+  it('forgetDeletedPackageAgent touches nothing for a name that is not installable', async () => {
+    const A = await import('../web/agent-package/approval.js')
+    mkdirSync(join(STORE, 'agent-package-approved'), { recursive: true })
+    writeFileSync(join(STORE, 'agent-package-approved', 'Bad..Name.json'), '{}')
+    expect(A.forgetDeletedPackageAgent('Bad..Name')).toEqual({ review: false, approval: false, trace: false })
+    expect(A.forgetDeletedPackageAgent('../x')).toEqual({ review: false, approval: false, trace: false })
+    expect(existsSync(join(STORE, 'agent-package-approved', 'Bad..Name.json'))).toBe(true)
+  })
+
+  it('DELETE /api/agents/<name> forgets the package state right after the folder is removed (source pin)', () => {
+    const src = readFileSync(join(__dirname, '..', 'web', 'routes', 'agents.ts'), 'utf8')
+    const at = src.indexOf("if (agentMatch && method === 'DELETE') {")
+    const body = src.slice(at, src.indexOf('json(res, { ok: true })', at))
+    const rm = body.indexOf('rmSync(dir, { recursive: true, force: true })')
+    const forget = body.indexOf('forgetDeletedPackageAgent(name)')
+    expect(rm).toBeGreaterThan(0)
+    expect(forget).toBeGreaterThan(rm)
+  })
+
   it('only POST approves', async () => {
     const out = await callRoute((ctx) => tryHandleAgentPackages(ctx, deps), 'GET', '/api/agents/invoice-helper/approve-package', SESSION).then((r) => r.out)
     expect(out.status).toBe(405)

@@ -155,7 +155,7 @@ import {
 } from '../agent-bundle.js'
 import { hasLaunchTrace, hasPackageManifestFile, startsWithPackageShell } from '../agent-package/marker.js'
 import { packageDescription, packageSummaryField } from '../agent-package/install.js'
-import { packageApprovalState } from '../agent-package/approval.js'
+import { forgetDeletedPackageAgent, packageApprovalState } from '../agent-package/approval.js'
 import type { RouteContext } from './types.js'
 import { suggestForAgent, type AgentSignals } from '../model-suggest.js'
 import { getTokenSummary } from '../token-usage.js'
@@ -2378,6 +2378,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // provider) for its orphan reap, so it must run while the dir still exists.
     if (isAgentRunning(name)) await stopAgentProcess(name)
     rmSync(dir, { recursive: true, force: true })
+    // KISPROGI 6476 (a), BELA 6478: a package agent's review request, owner approval and update trace go with it.
+    forgetDeletedPackageAgent(name)
     cleanupTeamReferences(name)
     json(res, { ok: true })
     return true
