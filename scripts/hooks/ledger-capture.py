@@ -7,6 +7,7 @@ blocks the prompt (always exit 0).
 """
 import sys
 import os
+import html
 import json
 import re
 
@@ -45,11 +46,19 @@ def main():
         # carries the transcript in the body instead, so nothing is stored then).
         att_kind = _attr(attrs, "attachment_kind")
         att_file_id = _attr(attrs, "attachment_file_id")
+        # Display metadata of the same file (Webchat file card). A caption replaces
+        # the plugin's "(document: NAME)" text, so the name is kept separately.
+        att_name = _attr(attrs, "attachment_name")
+        att_name = html.unescape(att_name) if att_name is not None else None
+        att_size = _attr(attrs, "attachment_size")
+        att_mime = _attr(attrs, "attachment_mime")
         if chat_id and message_id:
             try:
                 ledger_lib.log_inbound(
                     agent_id, chat_id, message_id, text.strip(), ts,
                     attachment_kind=att_kind, attachment_file_id=att_file_id,
+                    attachment_name=att_name, attachment_size=att_size,
+                    attachment_mime=att_mime,
                 )
             except Exception:
                 pass  # never block the prompt on a ledger error

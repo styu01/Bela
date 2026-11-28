@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS conversation_log (
   created_at INTEGER NOT NULL,
   attachment_kind TEXT,
   attachment_file_id TEXT,
+  attachment_name TEXT,
+  attachment_size INTEGER,
+  attachment_mime TEXT,
   UNIQUE(agent_id, chat_id, direction, message_id)
 )
 """
@@ -41,6 +44,11 @@ INDEX = "CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_
 _MIGRATION_COLUMNS = (
     ("attachment_kind", "TEXT"),
     ("attachment_file_id", "TEXT"),
+    # File cards (Webchat P5.9.9.F): the plugin's attachment_name/size/mime, so a
+    # captioned file keeps its name (the caption replaces "(document: NAME)").
+    ("attachment_name", "TEXT"),
+    ("attachment_size", "INTEGER"),
+    ("attachment_mime", "TEXT"),
 )
 
 RECENT_LIMIT = 20
@@ -125,34 +133,74 @@ def agent_id_from_cwd(cwd):
     return base or main_agent_id()
 
 
+def _add_column(con, col, coltype):
+    """ALTER that tolerates only a concurrent winner. Claude Code runs the UserPromptSubmit hooks in
+    parallel (ledger-capture + ledger-replay), so on the first prompt after an upgrade two processes
+    can both see a column missing; the loser gets "duplicate column name" and must go on, or its
+    connect() raises and the hook drops the inbound row (PROGI 6537 K1, race_poc.py). Any other error
+    (a locked database included) still raises: no half-migrated table is ever reported as fine."""
+    try:
+        con.execute(f"ALTER TABLE conversation_log ADD COLUMN {col} {coltype}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
 def connect():
     con = sqlite3.connect(db_path(), timeout=10)
-    con.execute("PRAGMA busy_timeout=10000")
-    con.execute(SCHEMA)
-    con.execute(INDEX)
-    existing = {row[1] for row in con.execute("PRAGMA table_info(conversation_log)")}
-    for col, coltype in _MIGRATION_COLUMNS:
-        if col not in existing:
-            con.execute(f"ALTER TABLE conversation_log ADD COLUMN {col} {coltype}")
+    try:
+        con.execute("PRAGMA busy_timeout=10000")
+        con.execute(SCHEMA)
+        con.execute(INDEX)
+        existing = {row[1] for row in con.execute("PRAGMA table_info(conversation_log)")}
+        for col, coltype in _MIGRATION_COLUMNS:
+            if col not in existing:
+                _add_column(con, col, coltype)
+    except Exception:
+        con.close()
+        raise
     return con
 
 
+def _attachment_meta(name, size, mime):
+    """Bounded, display-only file metadata; anything malformed is dropped (stored as NULL)."""
+    if not isinstance(name, str) or not name.strip() or len(name) > 255 or any(ord(c) < 32 for c in name):
+        name = None
+    try:
+        size = int(size) if size is not None else None
+    except (TypeError, ValueError):
+        size = None
+    if size is not None and not 0 < size <= 4 * 1024 * 1024 * 1024:
+        size = None
+    if not isinstance(mime, str) or not 0 < len(mime) <= 255 or any(ord(c) < 33 for c in mime) or "/" not in mime:
+        mime = None
+    return name, size, mime
+
+
 def log_inbound(agent_id, chat_id, message_id, text, ts,
-                attachment_kind=None, attachment_file_id=None):
+                attachment_kind=None, attachment_file_id=None,
+                attachment_name=None, attachment_size=None, attachment_mime=None):
     """Record an inbound user message. Idempotent on (agent_id, chat_id, in, message_id).
 
     attachment_kind/file_id: set for voice / video_note messages that arrived
     WITHOUT a transcript, so a respawned session can still download and
-    transcribe the audio instead of losing the message content forever."""
+    transcribe the audio instead of losing the message content forever.
+    attachment_name/size/mime: the plugin's display metadata of the same file
+    (the Webchat file card needs the name, which a caption would otherwise hide)."""
+    if attachment_kind and attachment_file_id:
+        attachment_name, attachment_size, attachment_mime = _attachment_meta(
+            attachment_name, attachment_size, attachment_mime)
+    else:
+        attachment_name = attachment_size = attachment_mime = None
     con = connect()
     try:
         con.execute(
             "INSERT OR IGNORE INTO conversation_log"
             " (agent_id, chat_id, direction, message_id, text, ts, created_at,"
-            "  attachment_kind, attachment_file_id)"
-            " VALUES (?, ?, 'in', ?, ?, ?, ?, ?, ?)",
+            "  attachment_kind, attachment_file_id, attachment_name, attachment_size, attachment_mime)"
+            " VALUES (?, ?, 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (str(agent_id), str(chat_id), str(message_id), text, ts, int(time.time()),
-             attachment_kind, attachment_file_id),
+             attachment_kind, attachment_file_id, attachment_name, attachment_size, attachment_mime),
         )
         con.commit()
     finally:

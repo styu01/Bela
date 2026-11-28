@@ -32,8 +32,15 @@ describe('conversation_log schema: db.ts migration == ledger_lib.py (no drift)',
   it('the column sets are identical and complete', () => {
     const a = logColumns(dbts).sort()
     const b = logColumns(lib).sort()
-    expect(a).toEqual(['agent_id', 'attachment_file_id', 'attachment_kind', 'chat_id', 'created_at', 'direction', 'id', 'message_id', 'text', 'ts'])
+    expect(a).toEqual(['agent_id', 'attachment_file_id', 'attachment_kind', 'attachment_mime', 'attachment_name', 'attachment_size', 'chat_id', 'created_at', 'direction', 'id', 'message_id', 'text', 'ts'])
     expect(b).toEqual(a)
+  })
+
+  it('both migrate pre-existing ledgers to the attachment metadata columns', () => {
+    for (const col of ['attachment_kind', 'attachment_file_id', 'attachment_name', 'attachment_size', 'attachment_mime']) {
+      expect(dbts).toMatch(new RegExp(`\\['${col}', '(TEXT|INTEGER)'\\]`))
+      expect(lib).toMatch(new RegExp(`\\("${col}", "(TEXT|INTEGER)"\\)`))
+    }
   })
 
   it('both constrain direction to in/out', () => {

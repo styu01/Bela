@@ -455,6 +455,99 @@ OUT_G4="$(run_drain "$DB_LD4")"
 assert_eq "live drain: in-flight question (within grace) is not surfaced" "" "$OUT_G4"
 
 # ---------------------------------------------------------------------------
+# (h) file attachment display metadata (Webchat file card, P5.9.9.F)
+# ---------------------------------------------------------------------------
+echo "--- (h) attachment name/size/mime ---"
+emit_attachment() { # message_id text kind name size mime
+    python3 - "$@" <<'PYEOF2'
+import json, sys
+mid, text, kind, name, size, mime = sys.argv[1:7]
+extra = f' attachment_kind="{kind}" attachment_file_id="BQACAgQAAxkBAAIi{mid}xxxxxxxx"'
+if size: extra += f' attachment_size="{size}"'
+if mime: extra += f' attachment_mime="{mime}"'
+if name: extra += f' attachment_name="{name}"'
+block = (f'<channel source="plugin:telegram:telegram" chat_id="10000000001" message_id="{mid}" '
+         f'user="x" ts="2026-06-02T14:20:25.000Z"{extra}>\n{text}\n</channel>')
+print(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": block}))
+PYEOF2
+}
+mkdir -p "$TMPDIR_BASE/h"; DB_H="$TMPDIR_BASE/h/x.db"
+emit_attachment 1200 "most egy fájlt csatolok" document "ATTEKINTES.md" 6341 text/markdown | run_hook ledger-capture.py "$DB_H"
+assert_eq "file meta: caption kept as text" "most egy fájlt csatolok" "$(db_scalar "$DB_H" "SELECT text FROM conversation_log WHERE message_id='1200'")"
+assert_eq "file meta: name stored" "ATTEKINTES.md" "$(db_scalar "$DB_H" "SELECT attachment_name FROM conversation_log WHERE message_id='1200'")"
+assert_eq "file meta: size stored as integer" "6341|integer" "$(db_scalar "$DB_H" "SELECT attachment_size||'|'||typeof(attachment_size) FROM conversation_log WHERE message_id='1200'")"
+assert_eq "file meta: mime stored" "text/markdown" "$(db_scalar "$DB_H" "SELECT attachment_mime FROM conversation_log WHERE message_id='1200'")"
+emit_attachment 1201 "(document: a &amp; b.pdf)" document "a &amp; b.pdf" 12 application/pdf | run_hook ledger-capture.py "$DB_H"
+assert_eq "file meta: entity-escaped name unescaped" "a & b.pdf" "$(db_scalar "$DB_H" "SELECT attachment_name FROM conversation_log WHERE message_id='1201'")"
+emit_attachment 1202 "(voice message)" voice "" 999999999999 "bad mime" | run_hook ledger-capture.py "$DB_H"
+assert_eq "file meta: malformed size and mime dropped, missing name NULL" "NULL|NULL|NULL|voice" "$(db_scalar "$DB_H" "SELECT coalesce(attachment_name,'NULL')||'|'||coalesce(attachment_size,'NULL')||'|'||coalesce(attachment_mime,'NULL')||'|'||attachment_kind FROM conversation_log WHERE message_id='1202'")"
+emit_inbound 10000000001 1203 "sima szoveg" | run_hook ledger-capture.py "$DB_H"
+assert_eq "file meta: plain text row has no file metadata" "NULL" "$(db_scalar "$DB_H" "SELECT coalesce(attachment_name,attachment_size,attachment_mime) FROM conversation_log WHERE message_id='1203'")"
+# An existing pre-P5.9.9.F ledger (no new columns) is upgraded in place and keeps its rows.
+mkdir -p "$TMPDIR_BASE/h2"; DB_H2="$TMPDIR_BASE/h2/x.db"
+python3 - "$DB_H2" <<'PYEOF3'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("""CREATE TABLE conversation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+ direction TEXT NOT NULL CHECK(direction IN ('in','out')), message_id TEXT, text TEXT, ts TEXT, created_at INTEGER NOT NULL,
+ attachment_kind TEXT, attachment_file_id TEXT, UNIQUE(agent_id, chat_id, direction, message_id))""")
+c.execute("INSERT INTO conversation_log (agent_id,chat_id,direction,message_id,text,created_at,attachment_kind,attachment_file_id) VALUES ('marveen','10000000001','in','1','(document: old.pdf)',1,'document','BQACAgQAAxkBAAIiold')")
+c.commit(); c.close()
+PYEOF3
+emit_attachment 1204 "(document: new.txt)" document "new.txt" 3 text/plain | run_hook ledger-capture.py "$DB_H2"
+assert_eq "file meta: old ledger upgraded, old row intact, new row has name" "old.pdf-row|new.txt" "$(db_scalar "$DB_H2" "SELECT (SELECT CASE WHEN attachment_name IS NULL AND text='(document: old.pdf)' THEN 'old.pdf-row' END FROM conversation_log WHERE message_id='1')||'|'||(SELECT attachment_name FROM conversation_log WHERE message_id='1204')")"
+
+# ---------------------------------------------------------------------------
+# (i) migration race: a parallel hook added the column first (PROGI 6537 K1)
+# ---------------------------------------------------------------------------
+echo "--- (i) migration race ---"
+mkdir -p "$TMPDIR_BASE/i"
+RACE_OUT="$(LEDGER_DB_PATH="$TMPDIR_BASE/i/x.db" MAIN_AGENT_ID=marveen python3 - "$HOOKS_DIR" <<'PYRACE'
+import sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+import ledger_lib
+path = ledger_lib.db_path()
+old = sqlite3.connect(path)
+old.execute("""CREATE TABLE conversation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+ direction TEXT NOT NULL CHECK(direction IN ('in','out')), message_id TEXT, text TEXT, ts TEXT, created_at INTEGER NOT NULL,
+ attachment_kind TEXT, attachment_file_id TEXT, attachment_name TEXT, attachment_size INTEGER, attachment_mime TEXT,
+ UNIQUE(agent_id, chat_id, direction, message_id))""")
+old.commit(); old.close()
+real_connect = sqlite3.connect
+class Stale:
+    """PRAGMA hides the three new columns until an ALTER for them was tried (another process won)."""
+    def __init__(self, con, fail=None):
+        self.con, self.hidden, self.fail = con, {"attachment_name", "attachment_size", "attachment_mime"}, fail
+    def execute(self, sql, *a):
+        if sql.startswith("ALTER TABLE conversation_log ADD COLUMN"):
+            if self.fail: raise sqlite3.OperationalError(self.fail)
+            self.hidden.discard(sql.split()[5])
+        cur = self.con.execute(sql, *a)
+        if sql.startswith("PRAGMA table_info"):
+            return [r for r in cur.fetchall() if r[1] not in self.hidden]
+        return cur
+    def __getattr__(self, n): return getattr(self.con, n)
+res = []
+ledger_lib.sqlite3.connect = lambda *a, **k: Stale(real_connect(*a, **k))
+try:
+    ledger_lib.log_inbound("marveen", "1", "77", "(document: a.pdf)", None, "document", "BQACAgQAAxkBAAIiRACE", "a.pdf", 5, "application/pdf")
+    res.append("dup-tolerated")
+except Exception as e:
+    res.append("dup-raised:" + type(e).__name__)
+ledger_lib.sqlite3.connect = lambda *a, **k: Stale(real_connect(*a, **k), fail="database is locked")
+try:
+    ledger_lib.connect(); res.append("locked-swallowed")
+except sqlite3.OperationalError as e:
+    res.append("locked-raised")
+ledger_lib.sqlite3.connect = real_connect
+c = real_connect(path)
+res.append(str(c.execute("SELECT attachment_name FROM conversation_log WHERE message_id='77'").fetchone()))
+print("|".join(res))
+PYRACE
+)"
+assert_eq "migration race: duplicate column tolerated, other errors raise, row kept" "dup-tolerated|locked-raised|('a.pdf',)" "$RACE_OUT"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

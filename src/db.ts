@@ -302,19 +302,18 @@ export function initDatabase(dbPathOverride?: string): void {
       created_at INTEGER NOT NULL,
       attachment_kind TEXT,
       attachment_file_id TEXT,
+      attachment_name TEXT,
+      attachment_size INTEGER,
+      attachment_mime TEXT,
       UNIQUE(agent_id, chat_id, direction, message_id)
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_id, created_at)`)
   // Migration for pre-existing DBs: transcript-less voice/video_note inbounds
   // keep their attachment identity so a respawned session can still download
-  // and transcribe them (mirrors _MIGRATION_COLUMNS in scripts/hooks/ledger_lib.py).
-  for (const col of ['attachment_kind', 'attachment_file_id']) {
-    const cols = db.prepare("PRAGMA table_info(conversation_log)").all() as { name: string }[]
-    if (!cols.some(c => c.name === col)) {
-      db.exec(`ALTER TABLE conversation_log ADD COLUMN ${col} TEXT`)
-    }
-  }
+  // and transcribe them; the name/size/mime columns keep a file's display metadata for
+  // the Webchat file card (mirrors _MIGRATION_COLUMNS in scripts/hooks/ledger_lib.py).
+  migrateConversationLogColumns(db)
 
   // Migration: hot/warm/cold/shared tier system with an enforced CHECK.
   // Rebuilds the table whenever its current schema doesn't include the
@@ -2133,6 +2132,31 @@ export const KANBAN_VERSIONED_FIELDS = [
 // dispatch stamps and updated_at do not move it. Dropped and recreated in one immediate transaction
 // on every start, so a column added to the list later reaches existing databases and no other process
 // ever writes without it. No recursion: the inner UPDATE sets only `version`.
+// conversation_log columns added after the first schema (mirrors _MIGRATION_COLUMNS in
+// scripts/hooks/ledger_lib.py): transcript-less voice/video_note inbounds keep their attachment
+// identity, and the name/size/mime columns keep a file's display metadata for the Webchat file card.
+export const CONVERSATION_LOG_MIGRATION_COLUMNS = [
+  ['attachment_kind', 'TEXT'], ['attachment_file_id', 'TEXT'],
+  ['attachment_name', 'TEXT'], ['attachment_size', 'INTEGER'], ['attachment_mime', 'TEXT'],
+] as const
+
+// The ledger hooks (ledger_lib.connect) run the same migration in their own processes, in parallel
+// with each other and with a dashboard start (PROGI 6537 K1). The rule is the kanban one above: ALTER
+// only a missing column, tolerate only "duplicate column name" (a concurrent process added it first),
+// and THROW if a column is still missing afterwards, so the dashboard never starts half-migrated.
+export function migrateConversationLogColumns(dbh: Database.Database): void {
+  const has = (col: string) => (dbh.prepare('PRAGMA table_info(conversation_log)').all() as Array<{ name: string }>).some((c) => c.name === col)
+  for (const [col, type] of CONVERSATION_LOG_MIGRATION_COLUMNS) {
+    if (has(col)) continue
+    try {
+      dbh.exec(`ALTER TABLE conversation_log ADD COLUMN ${col} ${type}`)
+    } catch (err) {
+      if (!/duplicate column name/i.test(String((err as Error)?.message ?? err))) throw err
+    }
+    if (!has(col)) throw new Error(`conversation_log.${col} migration did not add the column`)
+  }
+}
+
 export function ensureKanbanVersionColumnAndTrigger(dbh: Database.Database): void {
   const hasVersion = () => (dbh.prepare('PRAGMA table_info(kanban_cards)').all() as Array<{ name: string }>).some((c) => c.name === 'version')
   if (!hasVersion()) {
