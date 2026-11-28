@@ -1,0 +1,13 @@
+# User-unit TEMPLATE only. No automatic installation or enabling.
+# :17 keeps clear of the on-the-hour jobs and of the 00:00 nightly backup.
+[Unit]
+Description=Marveen DB health check every hour at :17 Budapest time
+
+[Timer]
+OnCalendar=*-*-* *:17:00 Europe/Budapest
+AccuracySec=1min
+Persistent=true
+Unit=db-health.service
+
+[Install]
+WantedBy=timers.target

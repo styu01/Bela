@@ -1,0 +1,21 @@
+# User-unit TEMPLATE. Replace both /home/kisss/marveen paths before installation.
+# No installation or enabling is performed by this file; enabling is the main
+# agent's decision (see docs/db-health.md for install / disable commands).
+# Read-only towards the live DB; writes only store/.db-health-state.json,
+# store/.db-health.lock, store/logs/db-health.log and, in the ghost case,
+# store/recovery-db-<stamp>/. Never restarts the dashboard.
+# Exit 1 = a problem exists and no alert channel accepted it (unit failed,
+# the next hourly run retries). /usr/bin/python3 is absolute: no PATH needed.
+[Unit]
+Description=Marveen hourly read-only health check of store/claudeclaw.db
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kisss/marveen
+ExecStart=/usr/bin/python3 /home/kisss/marveen/scripts/db-health.py
+Environment=TZ=Europe/Budapest
+UMask=0077
+Nice=10
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
