@@ -5,9 +5,9 @@
 // tools fail-open). The gate's whole loop never runs here: the cases are one tool call each.
 import { describe, it, expect, afterAll } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { accessSync, constants, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, appendFileSync, symlinkSync } from 'node:fs'
+import { accessSync, constants, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, symlinkSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import {
   AUTH_STORE_GATE_MATCHER, GATE_FAIL_CLOSED_TAG, authStoreGateCommand, failClosedGateRun, injectAuthStoreGate,
@@ -232,8 +232,26 @@ const CLAUDE_BIN = [
 const CC_FUNCS = (bin: string) => `find(){ ( exec -a bfs ${JSON.stringify(bin)} -S dfs -regextype findutils-default "$@" ); }\n` +
   `grep(){ ( exec -a ugrep ${JSON.stringify(bin)} -G --ignore-files --hidden -I --encoding=UTF-8 "$@" ); }\n`
 const BWRAP = ['/usr/bin/bwrap', '/bin/bwrap'].find((p) => { try { accessSync(p, constants.X_OK); return true } catch { return false } })
+// KISPROGI 6566 L2: the real stores are covered by an empty tmpfs inside the sandbox, as in sandbox-run.sh, so a case
+// that escapes its box cannot READ a real second-factor secret into the test output either: this checkout's store and
+// the main checkout's (a worktree's git common dir names it), whichever exist.
+const REAL_STORES = (() => {
+  const roots = [PROJECT_ROOT]
+  const common = spawnSync('git', ['-C', PROJECT_ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf-8' })
+  if (common.status === 0 && common.stdout.trim()) roots.push(dirname(common.stdout.trim()))
+  return [...new Set(roots.map((r) => join(r, 'store')))].filter((d) => { try { return statSync(d).isDirectory() } catch { return false } })
+})()
+// A private /tmp too, as in sandbox-run.sh (make -f - stores its stdin makefile there); the box is bound after it.
+const sandboxArgv = (box: string): string[] => [BWRAP!, '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
+  ...REAL_STORES.flatMap((d) => ['--tmpfs', d]), '--bind', box, box, '--chdir', box,
+  '--unshare-pid', '--die-with-parent', '--new-session']
+// KISPROGI 6566 L3: the relative-only guard reads the command the way bash would join it: quotes, a backslash-newline
+// and backslashes removed first ('/x', "mar""veen", marv\<newline>een), and a path may follow an operator too.
+const NOT_RELATIVE = /(^|[\s=;|&<>(){}`:,])(\/(?!dev\/(?:std|null\b))|~)|\.\.\/|\/\.\.|\$\{?HOME|OLDPWD|CDPATH|\$\{?PWD|marvee/
+const relativeOnly = (cmd: string): boolean =>
+  !NOT_RELATIVE.test(cmd) && !NOT_RELATIVE.test(cmd.replace(/\\\n/g, '').replace(/["'\\]/g, ''))
 function realRun(cmd: string, effect: 'leaks' | 'db', cc: boolean): void {
-  expect(cmd, 'a real-run case must stay relative').not.toMatch(/(^|[\s=])(\/(?!dev\/std)|~)|\.\.\/|\/\.\.|\$\{?HOME|OLDPWD|CDPATH|\$\{?PWD|marvee/)
+  expect(relativeOnly(cmd), `a real-run case must stay relative: ${cmd}`).toBe(true)
   expect(bash(cmd), cmd).toBe('DENY')
   const box = mkdtempSync(join(tmp, 'real-'))
   mkdirSync(join(box, 'store')); mkdirSync(join(box, 'src'))
@@ -246,8 +264,7 @@ function realRun(cmd: string, effect: 'leaks' | 'db', cc: boolean): void {
   // every real run sees the whole filesystem READ-ONLY and only its own scratch box writable, so even a case that
   // escapes its box cannot write anywhere (BELA 6550). Without bubblewrap the relative-only check above is the guard.
   const argv = BWRAP
-    ? [BWRAP, '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--bind', box, box, '--chdir', box,
-       '--unshare-pid', '--die-with-parent', '--new-session', 'bash', '--noprofile', '--norc', '-c', script]
+    ? [...sandboxArgv(box), 'bash', '--noprofile', '--norc', '-c', script]
     : ['bash', '--noprofile', '--norc', '-c', script]
   const run = spawnSync(argv[0], argv.slice(1), { cwd: box, encoding: 'utf-8', timeout: 10_000, env: { ...process.env, GIT_CEILING_DIRECTORIES: tmp } })
   try {
@@ -711,8 +728,8 @@ const R6539_DENY: string[] = [
   'x=$(python3 <<E\nimport os; os.remove("store/claudeclaw.db")\nE\n)', 'x=$(cat <<E\nx\nE\ncat store/.dashboard-totp.json)',
   // a literal marker-named delimiter takes no body: what follows is checked as commands
   'cat <<__HEREDOC0__\nrm store/claudeclaw.db\n__HEREDOC0__',
-  // Q10: more distinct cwds than MAX_CWDS
-  Array.from({ length: 33 }, (_, i) => `cd /tmp/d${i}`).join('; ') + '; ls',
+  // Q10: more distinct cwds than MAX_CWDS, and the command could matter there (KISPROGI 6566 L1: a plain ls passes now)
+  Array.from({ length: 33 }, (_, i) => `cd /tmp/d${i}`).join('; ') + '; rm -rf x',
 ]
 const R6539_PASS: string[] = [
   'true || cd /tmp; ls', 'cd /tmp && rm -rf store || echo fail', 'cd /tmp && rm -rf store; cd -', 'cd src && ls',
@@ -760,10 +777,125 @@ describe('auth-store-gate: KISPROGI 6539 (|| before a cd, line continuation, her
   it.skipIf(!BWRAP)('a real run is sandboxed: it cannot write outside its own box', () => {
     const box = mkdtempSync(join(tmp, 'sbx-'))
     const outside = join(tmp, `outside-${Date.now()}`)
-    spawnSync(BWRAP!, ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--bind', box, box, '--chdir', box,
-      '--unshare-pid', '--die-with-parent', '--new-session', 'bash', '-c', `touch ${JSON.stringify(outside)}; touch inside`], { encoding: 'utf-8' })
+    const argv = sandboxArgv(box)
+    spawnSync(argv[0], [...argv.slice(1), 'bash', '-c', `touch ${JSON.stringify(outside)}; touch inside`], { encoding: 'utf-8' })
     expect(existsSync(outside)).toBe(false)
     expect(existsSync(join(box, 'inside'))).toBe(true)
+  })
+  it.skipIf(!BWRAP)('a real run is sandboxed: the real stores look empty inside it (KISPROGI 6566 L2)', () => {
+    expect(REAL_STORES.length).toBeGreaterThan(0)
+    const box = mkdtempSync(join(tmp, 'sbx-'))
+    const argv = sandboxArgv(box)
+    for (const d of REAL_STORES) {
+      const r = spawnSync(argv[0], [...argv.slice(1), 'ls', '-A', d], { encoding: 'utf-8' })
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout.trim(), d).toBe('')
+    }
+  })
+  it('the relative-only guard sees through quotes, line continuations and concatenation (KISPROGI 6566 L3)', () => {
+    for (const c of ["rm '/x/store'", 'cat "/etc/passwd"', 'cd mar""veen', "cd marv\\\neen", 'x=(/tmp)', 'cat <~/x', 'a;/bin/rm x',
+      "cat '..'/x", 'echo "/"etc/passwd'])
+      expect(relativeOnly(c), c).toBe(false)
+    for (const c of ['cat store/a.log', 'rm -f store/claudeclaw.db', "grep -r 'x' src"]) expect(relativeOnly(c), c).toBe(true)
+  })
+})
+
+// KISPROGI 6566: interpreters' file and process calls in one table (R1), one-step archive reads (R2), every wrapper and
+// folder-changing option in one table (R3, R5, R6), git's work tree (R4), eval of a substitution (R7), an extglob cd
+// target (R8), and the cwd bound that only refuses when it could matter (L1).
+const R6566_DENY: string[] = [
+  // R1
+  `perl -e 'unlink "store/claudeclaw.db"'`, `perl -e 'unlink glob "store/claudeclaw.*"'`, `perl -MFile::Path -e 'rmtree("store")'`,
+  `perl -e 'system "rm -rf store"'`, `perl -e 'qx{rm store/claudeclaw.db}'`, `ruby -e 'File.delete("store/claudeclaw.db")'`,
+  `ruby -e 'require "fileutils"; FileUtils.rm_rf("store")'`, `ruby -e 'system("rm store/claudeclaw.db")'`, "ruby -e 'puts `rm store/claudeclaw.db`'",
+  `php -r 'unlink("store/claudeclaw.db");'`, `php -r 'shell_exec("rm store/claudeclaw.db");'`, `php -r 'rename("store", "/tmp/s");'`,
+  `lua -e 'os.remove("store/claudeclaw.db")'`, `lua -e 'os.execute("rm -rf store")'`, `awk 'BEGIN{system("rm store/claudeclaw.db")}'`,
+  `awk 'BEGIN{system("rm -rf store")}'`, `python3 -c 'import shutil; shutil.rmtree("store")'`,
+  `python3 -c 'import subprocess; subprocess.run(["rm", "-rf", "store"])'`, `python3 -c 'import os; os.remove(os.path.join("store", "claudeclaw.db"))'`,
+  `python3 -c 'import shutil, pathlib; shutil.rmtree(pathlib.Path("store"))'`, `node -e 'require("child_process").execSync("rm store/claudeclaw.db")'`,
+  `node -e 'require("fs").promises.rm("store", {recursive: true})'`, `Rscript -e 'file.remove("store/claudeclaw.db")'`,
+  `tclsh <<< 'file delete store/claudeclaw.db'`,
+  // R2
+  'tar -cf - store | tar -xOf -', 'tar cf - store | tar -xOf -', 'tar -c store | cat', 'tar -czf - . | base64', 'zip -r - store | cat', 'pax -w store',
+  `tar --to-command='rm store/claudeclaw.db' -xf /tmp/a.tar`, `tar -cf /tmp/a.tar --checkpoint-action=exec='rm store/claudeclaw.db' src`,
+  // R3 (make reading its makefile from stdin) and R5 (a wrapper with operands)
+  "make -f - <<'EOF'\nall:\n\trm -rf store\nEOF", "make -f /dev/stdin <<< 'x:; rm store/claudeclaw.db'", "echo 'x:; rm -rf store' | make -f -",
+  'timeout 5 rm store/claudeclaw.db', 'timeout -k 1 5 rm store/claudeclaw.db', 'timeout -s KILL 5 rm -rf store',
+  'nice -5 rm store/claudeclaw.db', 'flock /tmp/l rm store/claudeclaw.db', `flock /tmp/l -c 'rm store/claudeclaw.db'`,
+  // R6: the folder-changing programs are wrappers too
+  'unshare rm store/claudeclaw.db', 'bwrap --bind / / rm store/claudeclaw.db', 'bwrap --ro-bind / / --tmpfs /tmp rm -rf store',
+  'systemd-run --user rm store/claudeclaw.db', 'sudo -u kisss rm store/claudeclaw.db', 'setsid -f rm store/claudeclaw.db',
+  // R7
+  'eval "$(cat /tmp/x)"; rm store/claudeclaw.db', "x='cd /tmp'; eval $x; rm store/claudeclaw.db",
+]
+const R6566_PASS: string[] = [
+  `perl -e 'print "store/claudeclaw.db\n"'`, "perl -ne 'print if /x/' store/a.log", "awk '{print $1}' store/a.log", `awk 'BEGIN{system("ls store")}'`,
+  `python3 -c 'import sqlite3; c=sqlite3.connect("store/claudeclaw.db"); print(c.execute("select count(*) from agent_messages").fetchone())'`,
+  `python3 -c 'import sqlite3; sqlite3.connect("store/claudeclaw.db").execute("DELETE FROM kanban_cards WHERE id=1")'`,
+  `perl -e 'unlink "/tmp/x.db"'`, `python3 -c 'import shutil; shutil.rmtree("/tmp/build")'`, `node -e 'require("fs").rmSync("/tmp/x", {recursive: true})'`,
+  `python3 -c 'import os; os.system("ls -la store")'`, `ruby -e 'h = {}; h.delete("store")'`,
+  `python3 -c 'd = {"store": 1}; d.pop("store"); l = ["store"]; l.remove("store")'`, `python3 -c 'x = ["-exec", "rm", "store/claudeclaw.db"]; print(x)'`,
+  "python3 - <<'PY'\nt = '''\nfind store -exec cat {} +\n`rm store/claudeclaw.db`\n'''\nprint(t)\nPY",
+  'tar -czf /tmp/backup.tgz store', 'tar -cf - src | tar -xf - -C /tmp/x', 'tar -tf /tmp/backup.tgz', 'tar -xzf /tmp/a.tgz -C /tmp/x',
+  'make -C /tmp/build', "make -f - <<'EOF'\nall:\n\techo hi\nEOF", 'timeout 5 ls store', 'timeout -k 1 5 rm /tmp/x', 'nice -n 5 make',
+  'bwrap --ro-bind / / --chdir /tmp ls', 'eval "$(ssh-agent -s)"; ls', 'shopt -s extglob\nls !(x)',
+  // a call name inside a string is text, not a call
+  `python3 -c "print('use os.remove(\\"store\\") never')"`,
+]
+const R6566_REAL: Array<[string, 'leaks' | 'db', boolean]> = [
+  [`perl -e 'unlink "store/claudeclaw.db"'`, 'db', false], [`perl -e 'system "rm -rf store"'`, 'db', false],
+  [`awk 'BEGIN{system("rm store/claudeclaw.db")}'`, 'db', false], [`python3 -c 'import shutil; shutil.rmtree("store")'`, 'db', false],
+  ['tar -cf - store | tar -xOf -', 'leaks', false], ['tar -c store | tar -xOf -', 'leaks', false],
+  ["make -f - <<'EOF'\nall:\n\trm store/claudeclaw.db\nEOF", 'db', false], ['timeout 5 rm store/claudeclaw.db', 'db', false],
+  ['xargs -a /dev/null env -C store rm claudeclaw.db', 'db', false], ['env -iC store rm claudeclaw.db', 'db', false],
+  ['eval "$(echo cd store)"; rm claudeclaw.db', 'db', false], ['shopt -s extglob\ncd @(store)\nrm claudeclaw.db', 'db', false],
+]
+
+describe('auth-store-gate: KISPROGI 6566 (interpreter calls, archives to stdout, one wrapper table, git work tree, eval $(...), extglob, the cwd bound)', () => {
+  for (const c of R6566_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6566_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('wrappers and folder options reach the install from elsewhere (bundled, attached, after a wrapper with operands)', () => {
+    const sub = join(ROOT, 'scripts')
+    for (const c of [
+      `env -vC ${ROOT} rm store/claudeclaw.db`, `env -iC ${ROOT} rm store/claudeclaw.db`, `env -iC${ROOT} rm store/claudeclaw.db`,
+      `tar -cvC ${ROOT} -f - store/.dashboard-totp.json`, `tar -C${ROOT} -cf - store`, `tar --directory=${ROOT} -cf - store`,
+      `make -C${ROOT} -f /dev/stdin <<'EOF'\nall:\n\trm store/claudeclaw.db\nEOF`, `make --directory=${ROOT} -f - <<'EOF'\nall:\n\trm store/claudeclaw.db\nEOF`,
+      `git --work-tree=${ROOT} --git-dir=${ROOT}/.git clean -fdX`, `git --work-tree ${ROOT} --git-dir ${ROOT}/.git clean -fdX`,
+      `GIT_WORK_TREE=${ROOT} GIT_DIR=${ROOT}/.git git clean -fdX`, `env GIT_WORK_TREE=${ROOT} git clean -fdx`,
+      `timeout 5 env -C ${ROOT} rm store/claudeclaw.db`, `timeout -k 1 5 env -C ${ROOT} rm store/claudeclaw.db`,
+      `timeout --signal=KILL 5s env -C ${ROOT} rm store/claudeclaw.db`, `xargs -a /dev/null env -C ${ROOT} rm store/claudeclaw.db`,
+      `nice -n 5 env -C ${ROOT} rm store/claudeclaw.db`, `ionice -c 3 env -C ${ROOT} rm store/claudeclaw.db`,
+      `stdbuf -o L env -C ${ROOT} rm store/claudeclaw.db`, `taskset 1 env -C ${ROOT} rm store/claudeclaw.db`,
+      `chrt 0 env -C ${ROOT} rm store/claudeclaw.db`, `flock /tmp/l env -C ${ROOT} rm store/claudeclaw.db`,
+      `unshare --wd=${ROOT} rm store/claudeclaw.db`, `unshare -w ${ROOT} rm store/claudeclaw.db`,
+      `bwrap --bind / / --chdir ${ROOT} rm store/claudeclaw.db`, `systemd-run --user --working-directory=${ROOT} rm store/claudeclaw.db`,
+      `nsenter --wd=${ROOT} rm store/claudeclaw.db`, `sudo -D ${ROOT} rm store/claudeclaw.db`,
+      `perl -e 'chdir "${ROOT}"; unlink "store/claudeclaw.db"'`, `python3 -c 'import os; os.chdir("${ROOT}"); os.remove("store/claudeclaw.db")'`,
+      `python3 -c 'import os; os.chdir("${ROOT}"); os.system("rm -rf store")'`,
+      `eval "$(echo cd ${ROOT})"; rm store/claudeclaw.db`, `eval "$(printf 'cd %s' ${ROOT})"; rm store/claudeclaw.db`,
+      'eval `echo cd ' + ROOT + '`; rm store/claudeclaw.db', `shopt -s extglob\ncd ${dirname(ROOT)}/@(install)\nrm store/claudeclaw.db`,
+      `shopt -s extglob\ncd ${dirname(ROOT)}/+(install)\nrm store/claudeclaw.db`,
+      // a wrapper that starts the command in a place not known here (the unit's folder, a login shell, a new root)
+      'systemd-run --user rm store/claudeclaw.db', 'sudo -i rm store/claudeclaw.db', 'unshare -R /srv rm store/claudeclaw.db',
+      `x='cd ${ROOT}'; eval $x; rm store/claudeclaw.db`, `perl -e 'chdir "$ENV{X}"; unlink "store/claudeclaw.db"'`,
+    ]) expect(bash(c, sub), c).toBe('DENY')
+    for (const c of [
+      'env -iC /tmp rm store/claudeclaw.db', 'unshare --wd=/tmp rm store/claudeclaw.db', 'systemd-run --user --working-directory=/tmp rm -rf store',
+      `git --work-tree=${ROOT} clean -fdXn`, 'GIT_WORK_TREE=/tmp/x git clean -fdx', 'eval "$(echo cd /tmp)"; rm store/claudeclaw.db',
+      'sudo -u kisss rm store/claudeclaw.db',
+    ]) expect(bash(c, sub), c).toBe('pass')
+  })
+  it('the cwd bound refuses only when it could matter (L1)', () => {
+    const cds = Array.from({ length: 40 }, (_, i) => `cd /tmp/d${i}; `).join('')
+    const subs = Array.from({ length: 40 }, (_, i) => `(cd /tmp/p${i} && make); `).join('')
+    for (const c of [`${cds}ls`, `${subs}echo done`, `${cds}rm -f /tmp/x`, `${cds}echo hi there`,
+      Array.from({ length: 40 }, (_, i) => `cd /tmp/p${i} && make`).join(' && ')]) expect(bash(c), c.slice(-80)).toBe('pass')
+    for (const c of [`${cds}cd ${dirname(ROOT)}; rm -rf ${ROOT.split('/').pop()}`, `${cds}rm -rf store`, `${cds}cat store/x.json`,
+      `${cds}rm store/claudeclaw.db`, `${cds}tar -cf /tmp/a.tar ../x`, Array.from({ length: 400 }, (_, i) => `cd /tmp/d${i}; rm -f a${i}; `).join('')])
+      expect(bash(c), c.slice(-80)).toBe('DENY')
+  })
+  it.skipIf(!BWRAP)('every refused form above that is relative really hits the DB or leaks (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6566_REAL) realRun(cmd, effect, cc)
   })
 })
 

@@ -142,9 +142,283 @@ INTERPRETERS = {
     "sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "busybox", "sqlite3", "eval", "source", ".", "awk",
     "gawk", "mawk", "nawk", "osascript", "pwsh", "tclsh", "lua", "R", "Rscript",
 }
-WRAPPERS = {"sudo", "doas", "env", "nice", "nohup", "timeout", "stdbuf", "command", "builtin", "exec", "time",
-            "xargs", "ionice", "chrt", "setsid", "unbuffer", "flock", "caffeinate", "taskset", "chronic", "then",
-            "do", "else", "if", "while", "until", "!", "{", "(", "elif"}
+# KISPROGI 6566 R3, R5, R6: ONE table for every program that runs another command after its own options. Each entry:
+# sv = short option letters that take a value (bundled: -vC DIR, or attached: -CDIR), lv = long options that take a
+# value (--opt VALUE or --opt=VALUE), pos = positional operands before the command word (timeout's DURATION), cd_s /
+# cd_l = the options that move the command's working folder, root_s / root_l = those that change its root or its user's
+# home (the command then runs in a place not known here), opt_s / opt_l = options whose value is optional and only
+# attached (-wDIR, --wd=DIR; alone they mean "a place not known here"), split_s / split_l = options whose value is a
+# command line (env -S), shell_s / shell_l = options whose value is shell text (flock -c), lv2 / lv3 = long options with
+# two / three values (bwrap --bind SRC DEST), assigns = NAME=VALUE words before the command are environment, home =
+# the command starts in a place not known here unless a cd option names one (systemd-run: the manager's folder).
+# A program that is not here is the command itself. Adding a wrapper or a folder-changing option is one row.
+WRAPPER_SPECS = {
+    "env": dict(sv="uCS", lv={"--unset", "--chdir", "--split-string"}, cd_s="C", cd_l={"--chdir"}, split_s="S",
+                split_l={"--split-string"}, assigns=True),
+    "sudo": dict(sv="ugCDhprtUTR", lv={"--user", "--group", "--close-from", "--chdir", "--host", "--prompt", "--role",
+                                      "--type", "--other-user", "--command-timeout", "--chroot"},
+                 cd_s="D", cd_l={"--chdir"}, root_s="Ri", root_l={"--chroot", "--login"}, assigns=True),
+    "doas": dict(sv="uC"),
+    "nice": dict(sv="n", lv={"--adjustment"}),
+    "nohup": {}, "setsid": {}, "unbuffer": {}, "chronic": {}, "builtin": {}, "command": {},
+    "caffeinate": dict(sv="tw"),
+    "exec": dict(sv="a"),
+    "time": dict(sv="fo", lv={"--format", "--output"}),
+    "timeout": dict(sv="ks", lv={"--kill-after", "--signal"}, pos=1),
+    "stdbuf": dict(sv="ioe", lv={"--input", "--output", "--error"}),
+    "ionice": dict(sv="cnpPu", lv={"--class", "--classdata", "--pid", "--pgid", "--uid"}),
+    "chrt": dict(sv="TPD", lv={"--sched-runtime", "--sched-period", "--sched-deadline"}, pos=1),
+    "taskset": dict(pos=1),
+    "flock": dict(sv="wEc", lv={"--timeout", "--wait", "--conflict-exit-code", "--command"}, pos=1, shell_s="c",
+                  shell_l={"--command"}),
+    "xargs": dict(sv="ILPdEansa", lv={"--arg-file", "--delimiter", "--eof", "--max-lines", "--max-args", "--max-procs",
+                                     "--max-chars", "--replace", "--process-slot-var"}),
+    "unshare": dict(sv="SGRw", lv={"--setuid", "--setgid", "--root", "--wd", "--propagation", "--map-user",
+                                   "--map-group", "--map-users", "--map-groups"},
+                    cd_s="w", cd_l={"--wd"}, root_s="R", root_l={"--root"}),
+    "nsenter": dict(sv="tSG", lv={"--target", "--setuid", "--setgid"}, opt_s="wr", opt_l={"--wd", "--root"},
+                    cd_s="w", cd_l={"--wd"}, root_s="r", root_l={"--root"}),
+    "bwrap": dict(lv={"--chdir", "--tmpfs", "--dev", "--proc", "--dir", "--remount-ro", "--unsetenv", "--hostname",
+                      "--uid", "--gid", "--exec-label", "--file-label", "--seccomp", "--add-seccomp-fd", "--info-fd",
+                      "--json-status-fd", "--block-fd", "--userns-block-fd", "--sync-fd", "--lock-file", "--cap-add",
+                      "--cap-drop", "--perms", "--size", "--args", "--userns", "--userns2", "--pidns", "--argv0",
+                      "--mqueue", "--overlay-src", "--tmp-overlay", "--ro-overlay"},
+                  lv2={"--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind", "--dev-bind-try",
+                       "--setenv", "--symlink", "--file", "--bind-data", "--ro-bind-data", "--chmod", "--bind-fd",
+                       "--ro-bind-fd"},
+                  lv3={"--overlay"}, cd_l={"--chdir"}),
+    "systemd-run": dict(sv="pEHMu", lv={"--unit", "--property", "--description", "--slot", "--setenv", "--uid",
+                                        "--gid", "--nice", "--working-directory", "--on-active", "--on-boot",
+                                        "--on-startup", "--on-unit-active", "--on-unit-inactive", "--on-calendar",
+                                        "--path-property", "--socket-property", "--timer-property", "--host",
+                                        "--machine", "--service-type", "--background"},
+                        cd_l={"--working-directory"}, here={"-d", "--same-dir"}, home=True),
+    "then": {}, "do": {}, "else": {}, "if": {}, "while": {}, "until": {}, "!": {}, "{": {}, "(": {}, "elif": {},
+}
+WRAPPERS = set(WRAPPER_SPECS)
+_ASSIGN_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
+
+
+def _unwrap(words):
+    """Walk the assignments and wrappers before a command word (WRAPPER_SPECS). Returns a dict: idx (the command
+    word's index, len(words) when there is none), chdirs (each folder value a wrapper moves the command to, None for a
+    place not known here), splits (env -S strings), shells (flock -c texts), assigns ([(NAME, VALUE)] before the
+    command, the env wrapper's too), wrappers (their names)."""
+    out = {"chdirs": [], "splits": [], "shells": [], "assigns": [], "wrappers": []}
+    i = 0
+    while i < len(words):
+        w = _unmark(words[i])
+        if _ASSIGN_RX.fullmatch(w):
+            out["assigns"].append(tuple(w.split("=", 1)))
+            i += 1
+            continue
+        spec = WRAPPER_SPECS.get(os.path.basename(w))
+        if spec is None:
+            break
+        out["wrappers"].append(os.path.basename(w))
+        i += 1
+        sv, lv = spec.get("sv", ""), spec.get("lv", set())
+        lv2, lv3 = spec.get("lv2", set()), spec.get("lv3", set())
+        cd_s, cd_l = spec.get("cd_s", ""), spec.get("cd_l", set())
+        root_s, root_l = spec.get("root_s", ""), spec.get("root_l", set())
+        opt_s, opt_l = spec.get("opt_s", ""), spec.get("opt_l", set())
+        moved = False
+
+        def take(kind, value):
+            nonlocal moved
+            if kind == "cd":
+                out["chdirs"].append(value)
+                moved = True
+            elif kind == "root":
+                out["chdirs"].append(None)
+                moved = True
+            elif kind == "split":
+                out["splits"].append(value)
+            elif kind == "shell":
+                out["shells"].append(value)
+
+        def kind_of(letter=None, long=None):
+            if letter is not None:
+                return ("cd" if letter in cd_s else "root" if letter in root_s else
+                        "split" if letter in spec.get("split_s", "") else "shell" if letter in spec.get("shell_s", "") else None)
+            return ("cd" if long in cd_l else "root" if long in root_l else "split" if long in spec.get("split_l", set())
+                    else "shell" if long in spec.get("shell_l", set()) else None)
+
+        pos = spec.get("pos", 0)
+        while i < len(words):
+            o = _unmark(words[i])
+            if o == "--":
+                i += 1
+                break
+            if spec.get("assigns") and _ASSIGN_RX.fullmatch(o):
+                out["assigns"].append(tuple(o.split("=", 1)))
+                i += 1
+                continue
+            if o in spec.get("here", set()):
+                i += 1
+                continue
+            if o.startswith("--") and len(o) > 2:
+                name, eq, val = o.partition("=")
+                if name in opt_l:
+                    take(kind_of(long=name), val if eq else None)
+                    i += 1
+                    continue
+                if name in lv or name in lv2 or name in lv3:
+                    n_vals = 3 if name in lv3 else 2 if name in lv2 else 1
+                    if eq:
+                        vals, i = [val], i + 1
+                    else:
+                        vals, i = [_unmark(v) for v in words[i + 1:i + 1 + n_vals]], i + 1 + n_vals
+                    k = kind_of(long=name)
+                    if k and vals:
+                        take(k, vals[0])
+                    continue
+                k = kind_of(long=name)
+                if k == "root":
+                    take(k, None)
+                i += 1
+                continue
+            if re.fullmatch(r"-\d[\d.]*[smhd]?", o):
+                i += 1  # an old-style number option (nice -5)
+                continue
+            if o.startswith("-") and len(o) > 1:
+                j = 1
+                while j < len(o):
+                    letter = o[j]
+                    if letter in opt_s:
+                        take(kind_of(letter=letter), o[j + 1:] or None)
+                        break
+                    if letter in sv:
+                        val = o[j + 1:]
+                        if not val and i + 1 < len(words):
+                            i += 1
+                            val = _unmark(words[i])
+                        k = kind_of(letter=letter)
+                        if k:
+                            take(k, val)
+                        break
+                    if kind_of(letter=letter) == "root":
+                        take("root", None)
+                    j += 1
+                i += 1
+                continue
+            if pos > 0:
+                pos -= 1
+                i += 1
+                continue
+            break
+        if spec.get("home") and not moved:
+            out["chdirs"].append(None)
+    out["idx"] = i
+    return out
+
+
+# KISPROGI 6566 R2, R3, R4: commands whose OWN options move the folder they read or write in, in the same shape as
+# WRAPPER_SPECS (sv / lv / cd_s / cd_l). cumulative: a second -C is relative to the first (make, git). old_style: tar's
+# first word may be a dash-less letter bundle whose value letters take the following words in order (tar cvfC - DIR).
+# stop_at_operand: the options end at the first operand (git's subcommand). worktree: the long option and the
+# environment variable that name git's work tree (git clean deletes there).
+PROGRAM_SPECS = {
+    "tar": dict(sv="bCfFgHIKLNTVX", lv={"--directory", "--file", "--files-from", "--exclude-from", "--use-compress-program",
+                                       "--to-command", "--info-script", "--new-volume-script", "--rsh-command",
+                                       "--index-file", "--format", "--label", "--newer", "--after-date", "--exclude",
+                                       "--transform", "--xform", "--owner", "--group", "--mode", "--mtime", "--level",
+                                       "--listed-incremental", "--suffix", "--volno-file", "--tape-length",
+                                       "--blocking-factor", "--record-size", "--starting-file", "--checkpoint-action",
+                                       "--strip-components", "--newer-mtime", "--atime-preserve", "--sparse-version"},
+                cd_s="C", cd_l={"--directory"}, old_style=True),
+    "make": dict(sv="CfIoWjl", lv={"--directory", "--file", "--makefile", "--include-dir", "--old-file", "--assume-old",
+                                  "--what-if", "--new-file", "--assume-new", "--eval", "--jobs", "--load-average"},
+                 cd_s="C", cd_l={"--directory"}, cumulative=True),
+    "git": dict(sv="Cc", lv={"--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix",
+                             "--list-cmds", "--attr-source"},
+                cd_s="C", cumulative=True, stop_at_operand=True, worktree=("--work-tree", "GIT_WORK_TREE")),
+}
+for _alias, _base in (("gtar", "tar"), ("bsdtar", "tar"), ("gmake", "make")):
+    PROGRAM_SPECS[_alias] = PROGRAM_SPECS[_base]
+
+
+def _program_options(head: str, args):
+    """Parse a PROGRAM_SPECS command's own options. Returns {"opts": [(option, value or None, operand index)],
+    "operands": [words], "rest": the words after git's subcommand option block (its subcommand first)}. The
+    operand index of an option is how many operands came before it (tar's -C applies to the operands after it)."""
+    spec = PROGRAM_SPECS[head]
+    sv, lv = spec.get("sv", ""), spec.get("lv", set())
+    words = [_unmark(a) for a in args]
+    opts, operands, i = [], [], 0
+    if spec.get("old_style") and words and not words[0].startswith("-") and re.fullmatch(r"[A-Za-z]+", words[0]):
+        letters, i = words[0], 1
+        for letter in letters:
+            if letter in sv and i < len(words):
+                opts.append(("-" + letter, words[i], 0))
+                i += 1
+            else:
+                opts.append(("-" + letter, None, 0))
+    while i < len(words):
+        o = words[i]
+        if o == "--":
+            operands += words[i + 1:]
+            break
+        if o.startswith("--") and len(o) > 2:
+            name, eq, val = o.partition("=")
+            if name in lv:
+                if not eq:
+                    val = words[i + 1] if i + 1 < len(words) else ""
+                    i += 1
+                opts.append((name, val, len(operands)))
+            else:
+                opts.append((name, val if eq else None, len(operands)))
+            i += 1
+            continue
+        if o.startswith("-") and len(o) > 1:
+            j = 1
+            while j < len(o):
+                letter = o[j]
+                if letter in sv:
+                    val = o[j + 1:]
+                    if not val and i + 1 < len(words):
+                        i += 1
+                        val = words[i]
+                    opts.append(("-" + letter, val, len(operands)))
+                    break
+                opts.append(("-" + letter, None, len(operands)))
+                j += 1
+            i += 1
+            continue
+        if spec.get("stop_at_operand"):
+            return {"opts": opts, "operands": [], "rest": words[i:]}
+        operands.append(o)
+        i += 1
+    return {"opts": opts, "operands": operands, "rest": []}
+
+
+def _program_folders(head: str, args, cwd: str, assigns=(), place=None):
+    """The folders a PROGRAM_SPECS command moves to with its own options, in order (cumulative where the program says
+    so), plus git's work tree (--work-tree, or GIT_WORK_TREE among the assignments) resolved from the last one. A
+    variable or glob folder is UNKNOWN_CWD."""
+    spec = PROGRAM_SPECS[head]
+    place = place or (lambda v, base: _resolve(v, base))
+    out, d = [], cwd
+    parsed = _program_options(head, args)
+    cd_s, cd_l = spec.get("cd_s", ""), spec.get("cd_l", set())
+    for name, val, _k in parsed["opts"]:
+        if val is None:
+            continue
+        if (name[1:] in cd_s and not name.startswith("--")) or name in cd_l:
+            base = d if spec.get("cumulative") else cwd
+            d2 = UNKNOWN_CWD if base == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(val)) else place(val, base)
+            if spec.get("cumulative"):
+                d = d2
+            out.append(d2)
+    wt = spec.get("worktree")
+    if wt:
+        vals = [v for name, v, _k in parsed["opts"] if name == wt[0] and v is not None]
+        vals += [v for n, v in assigns if n == wt[1]]
+        for v in vals:
+            out.append(UNKNOWN_CWD if d == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(v)) else place(v, d))
+    return out
+
+
 DATA_ONLY_HEADS = {"echo", "printf"}
 STDIN_TO_FILE_HEADS = {"cat", "tee"}
 CURL_DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-ascii", "--data-urlencode", "--json",
@@ -381,14 +655,188 @@ def _sql_write(text: str) -> bool:
     return any(rx.search(cut) or rx.search(text) for rx in SQL_WRITE_RXS)
 
 
-def _code_text_checks(text: str, where: str, cwd: str, depth: int) -> None:
-    """Text a program runs: all three rules, and shell text is parsed again (a nested command)."""
+# KISPROGI 6566 R1: the file and process calls of code interpreters, in one table for every language (Python, Perl,
+# Ruby, PHP, Node, Lua, R, Tcl, awk). Three kinds of call:
+#   delete: a call that deletes, moves away or truncates its first argument (no parentheses needed in Perl's
+#           unlink "x" / rmtree "x", or Tcl's file delete x); the argument is checked like a path word of rm;
+#   shell:  a call that runs a shell command line (system, exec, popen, shell_exec, backticks, qx{}, os.execute,
+#           subprocess.*): its string arguments, joined, are checked as shell;
+#   chdir:  chdir / os.chdir / Dir.chdir / process.chdir / setwd / cd: the strings above are resolved there too (a
+#           non-string argument is a place not known here).
+# A module or object prefix (os., FileUtils., fs., File::Path::) is allowed before any name. Adding a name is one word.
+_CODE_PREFIX = r"(?<![\w$@%-])(?:[A-Za-z_]\w*\s*(?:\.|::|->)\s*)*"
+# File-specific names count with any prefix; the generic ones (h.delete("key") is a hash) only bare or after a file
+# module (os.remove, File.delete, FileUtils.mv, fs.rename, file.remove in R).
+_CODE_DELETE_NAMES = ("unlink|unlinkSync|unlink_file|removeSync|remove_file|remove_dir|remove_dir_all|remove_tree|"
+                      "rmtree|rmdir|rmdirSync|rm_rf|rm_r|rm_f|rmSync|deleteSync|truncateSync|renameSync|emptyDir|"
+                      "emptyDirSync|outputFile|outputFileSync")
+_CODE_DELETE_GENERIC = "remove|delete|truncate|rename|move|mv|rm"
+_CODE_FILE_MODULES = "os|shutil|FileUtils|File|fs|fsp|fse|fsPromises|promises|Dir|Deno|Bun|file|FS|Path|pathlib"
+_CODE_DELETE_RX = re.compile(
+    _CODE_PREFIX + r"(?:" + _CODE_DELETE_NAMES + r")\s*\("
+    r"|(?<![\w$@%.>:-])(?:(?:" + _CODE_FILE_MODULES + r"|require\s*\(\s*['\"][^'\"]*['\"]\s*\))\s*(?:\.|::)\s*)*"
+    r"(?:" + _CODE_DELETE_GENERIC + r")\s*\(")
+_CODE_DELETE_BARE_RX = re.compile(r"(?<![\w$@%.>:-])(?:unlink|rmtree|remove_tree|rename|truncate)\s+(?=['\"]|glob\b)")
+_CODE_TCL_DELETE_RX = re.compile(r"\bfile\s+(?:delete|rename)\s+(?:-force\s+)?(?:--\s+)?")
+_CODE_SHELL_NAMES = ("system|exec|execSync|execFile|execFileSync|spawn|spawnSync|popen|Popen|check_call|check_output|"
+                     "getoutput|getstatusoutput|shell_exec|passthru|proc_open|pcntl_exec|capture2|capture2e|capture3|popen3")
+_CODE_SHELL_RX = re.compile(
+    _CODE_PREFIX + r"(?:" + _CODE_SHELL_NAMES + r")\b\s*(?=[(\s'\"])"
+    r"|(?<![\w$-])(?:subprocess|sp|os|Open3|IO|io|Kernel|child_process|cp|Process|Bun|Deno|Runtime)\s*(?:\.|::)\s*"
+    r"(?:run|call|execute|spawn|Command|exec)\b\s*(?=[(\s'\"])")
+_CODE_BACKTICK_RX = re.compile(r"`([^`]{1,2000})`|\bqx\s*([{(\[<])|%x\s*([{(\[<])")
+_CODE_CHDIR_RX = re.compile(_CODE_PREFIX + r"(?:chdir|setwd|Set-Location|cd)\s*(?=[(\s'\"])\(?\s*")
+_CODE_LITERAL_RX = re.compile(r"""[rRbBfFuU]{0,2}(?:'((?:[^'\\\n]|\\.){0,2000})'|"((?:[^"\\\n]|\\.){0,2000})")""")
+_CODE_PATH_CALL_RX = re.compile(r"(?:[A-Za-z_]\w*\s*(?:\.|::)\s*)*(?:Path|join|realpath|abspath|resolve|expand_path)\s*\(")
+_CLOSERS = {"(": ")", "{": "}", "[": "]", "<": ">"}
+
+
+def _code_literal(m) -> str:
+    raw = m.group(1) if m.group(1) is not None else m.group(2)
+    return re.sub(r"\\(.)", r"\1", raw)
+
+
+def _call_span(text: str, i: int) -> str:
+    """The argument text of a call starting at i: a balanced (...) when it starts with "(", else up to the end of the
+    statement (; or newline outside quotes). Quote-aware, at most 4000 characters."""
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    start, depth, q, j = i, 0, None, i
+    paren = i < len(text) and text[i] == "("
+    while j < len(text) and j - start < 4000:
+        c = text[j]
+        if q:
+            if c == "\\":
+                j += 2
+                continue
+            if c == q:
+                q = None
+        elif c in "'\"":
+            q = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if paren and depth == 0:
+                return text[start + 1:j]
+            if depth < 0:
+                break
+        elif c in ";\n" and depth == 0:
+            break
+        j += 1
+    return text[start + (1 if paren else 0):j]
+
+
+def _first_path_argument(text: str, i: int):
+    """The first argument of a delete call at i when it is a string (or a path constructor of strings: Path("x"),
+    os.path.join("store", "claudeclaw.db"), glob("...")); None for a variable or an expression."""
+    while i < len(text) and text[i] in " \t(":
+        i += 1
+    if text.startswith("glob", i):
+        i += 4
+        while i < len(text) and text[i] in " \t(":
+            i += 1
+    m = _CODE_PATH_CALL_RX.match(text, i)
+    if m:
+        lits = [_code_literal(x) for x in _CODE_LITERAL_RX.finditer(_call_span(text, m.end() - 1))]
+        return "/".join(lits) if lits else None
+    m = _CODE_LITERAL_RX.match(text, i)
+    return _code_literal(m) if m else None
+
+
+def _mask_literals(text: str) -> str:
+    """The text with every string literal's content (and backticks') blanked out, same length: a call name is only
+    looked for in code, never inside a string ("-exec" in a Python list is no exec call)."""
+    out, q, i = list(text), None, 0
+    while i < len(text):
+        c = text[i]
+        if q:
+            if c == "\\" and i + 1 < len(text):
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            if len(q) == 3 and text.startswith(q, i):
+                q, i = None, i + 3  # the end of a Python triple-quoted string
+                continue
+            if len(q) == 1 and (c == q or c == "\n"):
+                q = None
+            else:
+                out[i] = " "
+        elif c in "'\"":
+            q = c * 3 if text.startswith(c * 3, i) else c
+            i += len(q)
+            continue
+        i += 1
+    return "".join(out)
+
+
+_BACKTICK_SHELL_LANGS = re.compile(r"(?:perl|ruby|jruby|truffleruby|php)[\d.]*")
+
+
+def _code_call_checks(text: str, cwd: str, depth: int, lang: str = "") -> None:
+    """KISPROGI 6566 R1: the delete / shell / chdir calls of interpreter code (see _CODE_DELETE_NAMES). The names are
+    matched in the code with its strings blanked out; the strings themselves are read from the original text."""
+    code = _mask_literals(text)
+    places = [cwd]
+    for m in _CODE_CHDIR_RX.finditer(code):
+        lit = _CODE_LITERAL_RX.match(text, m.end())
+        if lit:
+            target = _code_literal(lit)
+            places.append(UNKNOWN_CWD if _unknown_place(target) or (cwd == UNKNOWN_CWD and not os.path.isabs(target))
+                          else _resolve(target, cwd))
+        else:
+            places.append(UNKNOWN_CWD)
+    places = list(dict.fromkeys(places))
+    targets = []
+    for rx in (_CODE_DELETE_RX, _CODE_DELETE_BARE_RX):
+        for m in rx.finditer(code):
+            arg = _first_path_argument(text, m.end() - (1 if text[m.end() - 1:m.end()] == "(" else 0))
+            if arg is not None:
+                targets.append(arg)
+    for m in _CODE_TCL_DELETE_RX.finditer(code):
+        lit = _CODE_LITERAL_RX.match(text, m.end())
+        word = _code_literal(lit) if lit else (re.match(r"[^\s;\]}]+", text[m.end():]) or [None])[0]
+        if word:
+            targets.append(word)
+    for t in targets:
+        if "#{" in t or "${" in t:
+            continue  # an interpolated string: a variable place, the known limit
+        for c in places:
+            if _names_protected(t, c):
+                _deny("a dashboard adatbazis-fajljanak vagy a store mappanak torlese egy ertelmezo kodjaban")
+    if depth >= 4:
+        return
+    shells = []
+    for m in _CODE_SHELL_RX.finditer(code):
+        lits = [_code_literal(x) for x in _CODE_LITERAL_RX.finditer(_call_span(text, m.end()))]
+        if lits:
+            shells.append(" ".join(lits))
+    for m in _CODE_BACKTICK_RX.finditer(text if _BACKTICK_SHELL_LANGS.fullmatch(lang or "") else ""):
+        if code[m.start()] != text[m.start()]:
+            continue  # a backtick inside a string literal: text, not a command
+        if m.group(1) is not None:
+            shells.append(m.group(1))
+        else:
+            opener = m.group(2) or m.group(3)
+            end = text.find(_CLOSERS[opener], m.end())
+            if end > m.end():
+                shells.append(text[m.end():end])
+    for sh in shells:
+        for c in places:
+            check_bash(sh, c, depth + 1, best_effort=True)
+
+
+def _code_text_checks(text: str, where: str, cwd: str, depth: int, code: str = "") -> None:
+    """Text a program runs: all three rules, and shell text is parsed again (a nested command). code: the text is a
+    code interpreter's (not a shell's; its name): its delete / shell / chdir calls are checked too (KISPROGI 6566 R1)."""
     if _sql_write(text):
         _deny(f"SQL-iras a dashboard_users tablara ({where})")
     if TOTP_RX.search(text):
         _deny(f"a masodik faktor tara egy futtatott szovegben ({where})")
     if _code_writes_db(text) or _sqlite_dot_writes_live_db(text, cwd):
         _deny(f"a dashboard adatbazis-fajljanak irasa egy futtatott kodban ({where})")
+    if code:
+        _code_call_checks(text, cwd, depth, code)
     if depth < 4 and re.search(r"[;&|<>$`\n]|\b(?:rm|mv|cp|tee|dd|truncate|ln|install|rsync|find)\b", text):
         try:
             check_bash(text, cwd, depth + 1, best_effort=True)
@@ -919,7 +1367,48 @@ def _protect_quoted_ops(text: str):
     return "".join(out), ph
 
 
+_EXTGLOB_LEAD = "@+?*!"
+
+
+def _extglob_to_glob(text: str) -> str:
+    """KISPROGI 6566 R8: an extglob pattern (@(a|b), +(x), ?(x), *(x), !(x)) is ONE word to bash, but its "(" looked
+    like a subshell here, so cd /home/u/@(marveen) went to a folder named "@". Each one becomes a plain * (a superset
+    of what it can match) outside quotes: glued to a word, or at a word start (except !( there, which may be bash's
+    negation of a subshell). Without extglob these are syntax errors, so nothing that runs is misread."""
+    out, i, n, sq, dq = [], 0, len(text), False, False
+    while i < n:
+        c = text[i]
+        if c == "\\" and not sq and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == "'" and not dq:
+            sq = not sq
+        elif c == '"' and not sq:
+            dq = not dq
+        elif not sq and not dq and c in _EXTGLOB_LEAD and i + 1 < n and text[i + 1] == "(":
+            glued = i > 0 and text[i - 1] not in " \t\r\n" + _OP_CHARS
+            if glued or c != "!":
+                depth, j = 0, i + 1
+                while j < n:
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j += 1
+                if j < n:
+                    out.append("*")
+                    i = j + 1
+                    continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _tokens(text: str):
+    text = _extglob_to_glob(text)
     text, ph = _protect_quoted_ops(text)
     lx = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()\n")
     lx.whitespace = " \t\r"
@@ -1069,29 +1558,10 @@ def _split_command(toks):
             continue
         words.append(t)
         k += 1
-    # assignments and wrappers before the real command word
-    i = 0
-    assigns = []
-    while i < len(words):
-        w = words[i]
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w, re.S):
-            assigns.append(w.split("=", 1)[1])
-            i += 1
-            continue
-        base = os.path.basename(w)
-        if base in WRAPPERS:
-            i += 1
-            # skip the wrapper's own options and operands (env assignments, durations, nice levels)
-            while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", words[i])
-                                      or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
-                takes_arg = (r"-[IiLPdEansx]|-[nkus]" if base == "xargs"
-                             else r"-[uCS]|--unset|--chdir|--split-string" if base == "env"  # KISPROGI 6539 Q4
-                             else r"-[nkus]|--signal|--kill-after|-o|-e|-i")
-                if re.fullmatch(takes_arg, words[i]) and i + 1 < len(words):
-                    i += 1
-                i += 1
-            continue
-        break
+    # assignments and wrappers before the real command word (one table: WRAPPER_SPECS)
+    u = _unwrap(words)
+    i = u["idx"]
+    assigns = [v for _n, v in u["assigns"]]
     head = os.path.basename(words[i]) if i < len(words) else ""
     return head, words[i + 1:] if i < len(words) else [], redirs, herestr, heredocs, assigns
 
@@ -1451,7 +1921,32 @@ def _unparsable_hits(cmd: str) -> bool:
 
 
 _HD_STACK = []  # per check_bash level being processed: (bodies, meta); a substitution's text refers to its parent's
-MAX_CWDS = 32   # KISPROGI 6539 Q10: more distinct possible cwds than this in one command is refused (fail closed)
+MAX_CWDS = 32   # KISPROGI 6539 Q10, 6566 L1: the bound on the possible cwds at one point (see _cwd_overflow_risky)
+# KISPROGI 6566 L1: the commands that read, copy, move or delete the files they name: a relative operand of theirs may
+# reach the store (or a folder holding it) from one of too many possible places.
+_FILE_TOUCH_HEADS = FILE_OP_HEADS | SEARCH_HEADS | {"find", "tar", "gtar", "bsdtar", "zip", "pax", "cpio", "git", "cat",
+                                                    "tac", "head", "tail", "less", "more", "base64", "xxd", "od", "strings",
+                                                    "sqlite3", "chmod", "chown", "rmdir"}
+
+
+def _cwd_overflow_risky(cmd: str, pipes) -> bool:
+    """KISPROGI 6566 L1: with more than MAX_CWDS possible places, a command is refused only when it could matter: it
+    names a protected thing or the word store (or a dot-name glob), or a command that touches files has a relative
+    operand (from too many places any relative name, even "marveen" from /home/kisss, may be the store's folder). A
+    cd's own target is no operand."""
+    if _unparsable_hits(cmd) or _BIG_TEXT_STORE_RX.search(cmd) or DB_RX.search(cmd) or TOTP_RX.search(cmd):
+        return True
+    for pl in pipes or []:
+        for member in pl:
+            if member and member[0] in (SUBSHELL_OPEN, SUBSHELL_CLOSE):
+                continue
+            head, args, *_ = _split_command(member)
+            if head in ("cd", "pushd", "popd") or head not in _FILE_TOUCH_HEADS:
+                continue
+            for a in (_unmark(a) for a in args):
+                if a and not a.startswith("-") and not os.path.isabs(os.path.expanduser(a)):
+                    return True
+    return False
 
 
 def _resolve_heredoc_refs(bodies, meta) -> None:
@@ -1540,6 +2035,7 @@ def _cwd_sets(pipes, ends, start, cmd: str, sub_text, bodies, depth: int):
     Returns (per pipeline: its candidate list or None for a subshell marker, every place ever reached)."""
     sets, every = [], dict.fromkeys(start)
     cur, base, stack, andor_ok = list(start), list(start), [], True
+    overflow_risky = None
     for pl, end in zip(pipes, ends):
         if pl == [[SUBSHELL_OPEN]]:
             stack.append((cur, base, andor_ok))
@@ -1564,6 +2060,18 @@ def _cwd_sets(pipes, ends, start, cmd: str, sub_text, bodies, depth: int):
                 if words[:1] == ["--"]:
                     words = words[1:]
                 effect = _cwd_effect(" ".join(words), cur, depth)
+                # KISPROGI 6566 R7: an eval word holding a substitution or a variable is text not known here, like
+                # source's: an unknown place, plus where the substitution's text leads when it only prints
+                # (eval "$(echo cd DIR)", eval "$(printf 'cd %s' DIR)", eval `echo cd DIR`)
+                marks = [mk for w in words for mk in re.findall(r"__SUBST\d+__", w)]
+                if any(re.search(r"[$`]", w) for w in words):
+                    effect = list(dict.fromkeys(effect + [UNKNOWN_CWD]))
+                for mk in marks:
+                    printed = _printer_output(sub_text.get(mk, ""))
+                    if printed is None:
+                        effect = list(dict.fromkeys(effect + [UNKNOWN_CWD]))
+                    else:
+                        effect = list(dict.fromkeys(effect + _cwd_effect(printed, cur, depth)))
             elif head in ("source", ".") and depth < 4:
                 effect = list(dict.fromkeys(cur + [UNKNOWN_CWD]))
                 texts = [h for h in herestr] + [bodies.get(m, "") for m in heredocs]
@@ -1588,8 +2096,21 @@ def _cwd_sets(pipes, ends, start, cmd: str, sub_text, bodies, depth: int):
         elif end != "&&":
             cur = base
         andor_ok = False if end == "||" else (andor_ok if end == "&&" else True)
-        if len(every) > MAX_CWDS:
-            _deny(f"tul sok lehetseges munkamappa egy parancsban (tobb mint {MAX_CWDS} cd-cel); bontsd tobb hivasra")
+        if len(cur) > MAX_CWDS or len(base) > MAX_CWDS or len(every) > 4 * MAX_CWDS:
+            # KISPROGI 6566 L1: the bound is on the places possible at this point; past it the command is refused
+            # only when it could matter (see _cwd_overflow_risky), otherwise the places beyond the bound become ONE
+            # place not known here (a superset: every later path is checked there too), which keeps the work bounded
+            if overflow_risky is None:
+                overflow_risky = _cwd_overflow_risky(cmd, pipes)
+            if overflow_risky:
+                _deny(f"tul sok lehetseges munkamappa egy parancsban (tobb mint {MAX_CWDS} cd-cel), es a parancs vedett "
+                      "nevet, a store szot vagy fajlkezelo parancsban relativ utat emlit; bontsd tobb hivasra")
+            if len(cur) > MAX_CWDS:
+                cur = list(dict.fromkeys(cur[:MAX_CWDS] + [UNKNOWN_CWD]))
+            if len(base) > MAX_CWDS:
+                base = list(dict.fromkeys(base[:MAX_CWDS] + [UNKNOWN_CWD]))
+            if len(every) > 4 * MAX_CWDS:
+                every = dict.fromkeys(list(every)[:MAX_CWDS] + [UNKNOWN_CWD])
     return sets, every
 
 
@@ -1620,53 +2141,15 @@ def _pipeline_chdirs(pipeline, cwd: str):
 
     for toks in pipeline:
         words = [t for t in toks if t not in REDIRS]
-        i = 0
-        while i < len(words):  # wrappers before the command word; env's own options
-            w = words[i]
-            b = os.path.basename(w)
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w, re.S):
-                i += 1
-                continue
-            if b == "env":
-                i += 1
-                while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
-                    o = words[i]
-                    if o in ("-C", "--chdir") and i + 1 < len(words):
-                        out.append(place(words[i + 1], cwd))
-                        i += 1
-                    elif o.startswith("--chdir="):
-                        out.append(place(o.split("=", 1)[1], cwd))
-                    elif re.fullmatch(r"-[iv0]*C.+", o):
-                        out.append(place(o[o.index("C") + 1:], cwd))
-                    elif o in ("-u", "--unset", "-S", "--split-string") and i + 1 < len(words):
-                        i += 1
-                    i += 1
-                continue
-            if b in WRAPPERS and b != "xargs":
-                i += 1
-                continue
-            break
+        u = _unwrap(words)  # KISPROGI 6566 R3, R5, R6: every wrapper's folder options, bundled or attached too
+        i = u["idx"]
+        for v in u["chdirs"]:
+            out.append(UNKNOWN_CWD if v is None else place(v, cwd))
         if i >= len(words):
             continue
         head, rest = os.path.basename(_unmark(words[i])), words[i + 1:]
-        if head == "git":
-            d, k = cwd, 0
-            while k < len(rest) and rest[k].startswith("-"):
-                if rest[k] == "-C" and k + 1 < len(rest):
-                    d = place(rest[k + 1], d) if d != UNKNOWN_CWD else UNKNOWN_CWD
-                    out.append(d)
-                    k += 2
-                    continue
-                k += 2 if rest[k] in ("-c", "--git-dir", "--work-tree", "--namespace") else 1
-        elif head in ("tar", "gtar", "bsdtar", "make", "gmake"):
-            for k, a in enumerate(rest):
-                a = _unmark(a)
-                if a in ("-C", "--directory") and k + 1 < len(rest):
-                    out.append(place(rest[k + 1], cwd))
-                elif a.startswith("--directory="):
-                    out.append(place(a.split("=", 1)[1], cwd))
-                elif head in ("make", "gmake") and re.fullmatch(r"-C.+", a):
-                    out.append(place(a[2:], cwd))
+        if head in PROGRAM_SPECS:
+            out += _program_folders(head, rest, cwd, u["assigns"], place)
     return list(dict.fromkeys(out))
 
 
@@ -1726,6 +2209,118 @@ def _cd_targets(cur, head: str, args, cmd: str):
     return list(out)
 
 
+def _names_protected(word: str, d: str) -> bool:
+    """A path word that names the live store, a folder holding it, the DB or the second-factor store from folder d."""
+    return (_is_store_or_ancestor(word, d) or _is_store_dir(word, d) or _is_live_db_path(word, d)
+            or _is_live_totp_word(word, d))
+
+
+_TAR_CREATE = {"-c", "--create"}
+_TAR_SHELL_OPTS = {"--to-command", "--use-compress-program", "-I", "--rsh-command", "--info-script", "-F",
+                   "--new-volume-script"}
+
+
+def _tar_checks(args, cwd: str, depth: int) -> None:
+    """KISPROGI 6566 R2: tar -c writing its archive to stdout (-f -, or no -f: GNU tar's default) reads every file it
+    packs in one step (tar -cf - store | tar -xOf -): a member naming the store, a folder holding it, the DB or the
+    second-factor store is refused, each from the folder its -C chain gives it. A copy into an archive FILE stays
+    allowed, like cp. The options whose value tar runs as a command (--to-command, -I, --checkpoint-action=exec=...)
+    are shell."""
+    parsed = _program_options("tar", args)
+    for name, val, _k in parsed["opts"]:
+        if val is None or depth >= 4:
+            continue
+        if name in _TAR_SHELL_OPTS:
+            check_bash(val, cwd, depth + 1)
+        elif name == "--checkpoint-action" and val.startswith("exec="):
+            check_bash(val[5:], cwd, depth + 1)
+    if not any(name in _TAR_CREATE for name, _v, _k in parsed["opts"]):
+        return
+    archives = [v for name, v, _k in parsed["opts"] if name in ("-f", "--file") and v is not None]
+    if archives and archives[-1] != "-":
+        return
+    d, opts = cwd, [(k, v) for name, v, k in parsed["opts"] if name in ("-C", "--directory") and v is not None]
+    for idx, op in enumerate(parsed["operands"]):
+        for k, v in opts:
+            if k <= idx and k >= 0:
+                d = UNKNOWN_CWD if _unknown_place(v) or (d == UNKNOWN_CWD and not os.path.isabs(v)) else _resolve(v, d)
+        opts = [(k, v) for k, v in opts if k > idx]
+        if _names_protected(op, d):
+            _deny("tar archivum a kimenetre a store tartalmabol (egy lepesben olvasna a dashboard adatbazisat vagy a "
+                  "masodik faktor tarat); fajlba csomagolva mehet")
+
+
+_ZIP_VALUE_OPTS = {"-b", "-n", "-t", "-tt", "-O", "--output-file", "-P", "--password", "-Z", "--compression-method", "-s",
+                   "--split-size", "-sp"}
+
+
+def _zip_to_stdout_reads_store(args, cwd: str) -> bool:
+    """zip with "-" as the archive (or -O -) writes the packed files to stdout: one-step read, like tar -cf -."""
+    words, pos, out_dash, i, skip_list = [_unmark(a) for a in args], [], False, 0, False
+    while i < len(words):
+        w = words[i]
+        if w in ("-x", "-i", "--exclude", "--include"):
+            skip_list = True
+        elif w in _ZIP_VALUE_OPTS and i + 1 < len(words):
+            out_dash = out_dash or (w in ("-O", "--output-file") and words[i + 1] == "-")
+            i += 1
+            skip_list = False
+        elif w.startswith("-") and w != "-":
+            skip_list = False
+        elif not skip_list:
+            pos.append(w)
+        i += 1
+    if not pos or not (pos[0] == "-" or out_dash):
+        return False
+    return any(_names_protected(src, cwd) for src in pos[1:])
+
+
+def _pax_to_stdout_reads_store(args, cwd: str) -> bool:
+    """pax -w without -f (or -f -) writes the archive to stdout."""
+    words, ops, mode_w, mode_r, archive, i = [_unmark(a) for a in args], [], False, False, None, 0
+    while i < len(words):
+        w = words[i]
+        if w.startswith("-") and len(w) > 1:
+            letters = w[1:]
+            for j, letter in enumerate(letters):
+                if letter in "fsoxbBTGUp":
+                    val = letters[j + 1:] or (words[i + 1] if i + 1 < len(words) else "")
+                    if not letters[j + 1:]:
+                        i += 1
+                    if letter == "f":
+                        archive = val
+                    break
+                mode_w = mode_w or letter == "w"
+                mode_r = mode_r or letter == "r"
+        else:
+            ops.append(w)
+        i += 1
+    if not mode_w or mode_r or (archive not in (None, "-")):
+        return False
+    return any(_names_protected(op, cwd) for op in ops)
+
+
+_MAKE_STDIN = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+_MAKE_SHELL_RX = re.compile(r"\$[({]shell[ \t]+([^)}]*)[)}]")
+
+
+def _make_text_checks(text: str, cwd: str, depth: int) -> None:
+    """KISPROGI 6566 R3: makefile text the gate can see (a makefile read from stdin, --eval): its recipe lines (after a
+    tab, or after "target: ;") and $(shell ...) calls are shell, run in make's folder."""
+    _code_text_checks(text, "make", cwd, depth)
+    if depth >= 4:
+        return
+    for line in text.splitlines():
+        m = re.match(r"^[^\t#=:]*::?[^=;]*;(.*)$", line)
+        recipe = line[1:] if line.startswith("\t") else (m.group(1) if m else None)
+        if recipe is not None:
+            recipe = recipe.lstrip("@-+ \t")
+            if recipe:
+                check_bash(recipe, cwd, depth + 1)
+    for m in _MAKE_SHELL_RX.finditer(text):
+        check_bash(m.group(1), cwd, depth + 1)
+
+
 def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
     """One pipeline under one cwd candidate: every rule on every member."""
     feeds_interpreter = False
@@ -1734,6 +2329,11 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
     for idx, (head, args, redirs, herestr, heredocs, assigns) in enumerate(parsed):
         is_interp = head in INTERPRETERS or re.fullmatch(r"python\d[\d.]*|pypy\d*|node\d*|perl\d[\d.]*|ruby\d[\d.]*|php\d[\d.]*", head or "")
         later_interp = any(h in INTERPRETERS or re.fullmatch(r"python\d[\d.]*", h or "") for h in heads[idx + 1:])
+        # KISPROGI 6566 R1: code (not shell) for this member, or for the interpreter its output feeds
+        later_heads0 = [h for h in heads[idx + 1:] if h in INTERPRETERS or re.fullmatch(r"python\d[\d.]*", h or "")]
+        code_here = head if is_interp and head not in _SHELLS and head not in ("eval", "source", ".", "trap") else ""
+        code_later = (later_heads0[0] if later_heads0 and later_heads0[0] not in _SHELLS
+                      and later_heads0[0] not in ("eval", "source", ".") else "")
         feeds_interpreter = feeds_interpreter or bool(is_interp)
         # values of assignments are data unless something runs them; a protected name there is still refused
         for v in assigns:
@@ -1749,10 +2349,10 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
         for m in heredocs:
             body = bodies.get(m, "")
             if is_interp or (head in STDIN_TO_FILE_HEADS and later_interp):
-                _code_text_checks(body, "heredoc", cwd, depth)
+                _code_text_checks(body, "heredoc", cwd, depth, code=code_here or (not is_interp and code_later))
         for h in herestr:
             if is_interp or later_interp:
-                _code_text_checks(h, "here-string", cwd, depth)
+                _code_text_checks(h, "here-string", cwd, depth, code=code_here or (not is_interp and code_later))
             elif _is_live_totp_word(h, cwd):
                 _deny("a masodik faktor taranak neve")
         # env -S / --split-string: the string is split into the command line env runs (KISPROGI 6539 Q4 family); it
@@ -1837,16 +2437,16 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             for a in (_unmark(a) for a in args):
                 if _totp_word(a):
                     _deny("a masodik faktor tara egy ertelmezo argumentumaban")
-                _code_text_checks(a, f"{head} argumentum", cwd, depth)
+                _code_text_checks(a, f"{head} argumentum", cwd, depth, code=code_here)
             continue
         if head in DATA_ONLY_HEADS:
             if later_interp:
                 for a in args:
-                    _code_text_checks(a, f"{head} -> ertelmezo", cwd, depth)
+                    _code_text_checks(a, f"{head} -> ertelmezo", cwd, depth, code=code_later)
                 # what echo / printf actually prints is one line of code ("echo -n rm store/... | sh",
                 # "printf '%s ' rm store/... | sh"; KISPROGI 6505, 6511)
                 for line in _printed_text(head, args):
-                    _code_text_checks(line, f"{head} -> ertelmezo", cwd, depth)
+                    _code_text_checks(line, f"{head} -> ertelmezo", cwd, depth, code=code_later)
             continue
         data_pos = _curl_data_positions(args) if head in ("curl", "wget", "http", "https", "xh") else set()
         search_pats = set()
@@ -1889,6 +2489,21 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             _deny("git clean -x/-X a store mappara (a gitignore-olt store-t, benne a dashboard adatbazisat torolne)")
         if head == "git" and _git_grep_on_store(args, cwd):
             _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
+        if head in ("tar", "gtar", "bsdtar"):
+            _tar_checks(args, cwd, depth)
+        if head == "zip" and _zip_to_stdout_reads_store(args, cwd):
+            _deny("zip archivum a kimenetre a store tartalmabol (egy lepesben olvasna); fajlba csomagolva mehet")
+        if head == "pax" and _pax_to_stdout_reads_store(args, cwd):
+            _deny("pax archivum a kimenetre a store tartalmabol (egy lepesben olvasna); fajlba csomagolva mehet")
+        if head in ("make", "gmake"):
+            mk = _program_options(head, args)
+            texts = [v for name, v, _k in mk["opts"] if name == "--eval" and v]
+            if any(name in ("-f", "--file", "--makefile") and v in _MAKE_STDIN for name, v, _k in mk["opts"]):
+                texts += [bodies.get(m, "") for m in heredocs] + list(herestr)
+                if idx > 0 and parsed[idx - 1][0] in DATA_ONLY_HEADS:
+                    texts += ["\n".join(_printed_text(parsed[idx - 1][0], parsed[idx - 1][1]))]
+            for t in texts:
+                _make_text_checks(t, cwd, depth)
         if head == "find":
             # KISPROGI 6497 L1: any later xargs in the pipeline gets find's output (find store | sort | xargs rm)
             piped = [[parsed[j][0]] + parsed[j][1] for j in range(idx + 1, len(pipeline))
@@ -2144,15 +2759,7 @@ def _reads_code_from_stdin(head: str, args) -> bool:
 
 def _starts_with_xargs(toks) -> bool:
     """Whether a pipeline member runs xargs (after assignments and other wrappers)."""
-    for t in toks:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", t, re.S) or t.startswith("-"):
-            continue
-        b = os.path.basename(t)
-        if b == "xargs":
-            return True
-        if b not in WRAPPERS and not re.fullmatch(r"[0-9.]+[smhd]?", t):
-            return False
-    return False
+    return "xargs" in _unwrap([t for t in toks if t not in REDIRS])["wrappers"]
 
 
 # grep and its kin: options whose value is the next word (a pattern, a number, a glob), so it is not a file operand.
@@ -2393,34 +3000,9 @@ def _recursive_search_on_store(head: str, args, cwd: str) -> bool:
 
 
 def _env_split_strings(toks):
-    """The -S / --split-string values of an env wrapper before the command word."""
-    out, i = [], 0
-    words = [_unmark(t) for t in toks]
-    while i < len(words):
-        w = words[i]
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w, re.S):
-            i += 1
-            continue
-        if os.path.basename(w) != "env":
-            if os.path.basename(w) in WRAPPERS:
-                i += 1
-                continue
-            break
-        i += 1
-        while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
-            o = words[i]
-            if o in ("-S", "--split-string") and i + 1 < len(words):
-                out.append(words[i + 1])
-                i += 2
-                continue
-            if o.startswith("--split-string="):
-                out.append(o.split("=", 1)[1])
-            elif re.fullmatch(r"-[iv0]*S.+", o):
-                out.append(o[o.index("S") + 1:])
-            elif o in ("-u", "--unset", "-C", "--chdir") and i + 1 < len(words):
-                i += 1
-            i += 1
-    return out
+    """The command lines wrappers run from a string before the command word: env -S / --split-string, flock -c."""
+    u = _unwrap([t for t in toks if t not in REDIRS])
+    return u["splits"] + u["shells"]
 
 
 def _git_clean_on_store(args, cwd: str) -> bool:
