@@ -48,6 +48,7 @@ import {
   buildContinueProbeCommand,
   classifyRunState,
   classifyRunStateFromExit,
+  localProbeFailureProvesStopped,
   sessionInList,
   ensureControlDir,
   cleanStaleSshSockets,
@@ -1381,6 +1382,22 @@ export function agentRunState(name: string): AgentRunState {
 
 export function isAgentRunning(name: string): boolean {
   return agentRunState(name) === 'running'
+}
+
+/**
+ * KISPROGI 6584 K2: true only when a LOCAL agent is positively not running: `tmux list-sessions` succeeded without its
+ * session, or tmux exited with a numeric status (no tmux server). agentRunState() reads every local probe failure as
+ * 'stopped', a 3 s timeout too; a caller that drops state for a stopped agent (the context-restart gate) must not do
+ * so for an agent that is merely behind a stuck tmux. A remote agent is never "positively stopped" here.
+ */
+export function agentPositivelyStopped(name: string): boolean {
+  if (readAgentRemoteHost(name)) return false
+  try {
+    const out = captureTmux(null, ['list-sessions', '-F', '#{session_name}'])
+    return classifyRunState(out, agentSessionName(name), false) === 'stopped'
+  } catch (err) {
+    return localProbeFailureProvesStopped(err)
+  }
 }
 
 // Host-aware "does this tmux session exist" check, shared by the message router

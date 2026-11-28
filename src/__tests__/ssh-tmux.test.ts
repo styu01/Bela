@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  localProbeFailureProvesStopped,
   shQuote,
   buildTmuxInvocation,
   buildSshExec,
@@ -104,5 +105,21 @@ describe('sessionInList', () => {
 
   it('does not match on a substring of a longer session name', () => {
     expect(sessionInList('agent-bbb\n', 'agent-b')).toBe(false)
+  })
+})
+
+// KISPROGI 6584 K2: only a numeric exit status of a failed local probe proves the session is gone.
+describe('localProbeFailureProvesStopped', () => {
+  it('a numeric exit status (no tmux server) proves it', () => {
+    expect(localProbeFailureProvesStopped({ status: 1, signal: null })).toBe(true)
+    expect(localProbeFailureProvesStopped({ status: 1 })).toBe(true)
+  })
+  it('a timeout, a kill or a spawn failure proves nothing', () => {
+    expect(localProbeFailureProvesStopped({ status: null, signal: 'SIGTERM', code: 'ETIMEDOUT' })).toBe(false)
+    expect(localProbeFailureProvesStopped({ status: null, signal: 'SIGKILL' })).toBe(false)
+    expect(localProbeFailureProvesStopped({ code: 'ENOENT', errno: -2 })).toBe(false)
+    expect(localProbeFailureProvesStopped({ status: 1, signal: 'SIGTERM' })).toBe(false)
+    expect(localProbeFailureProvesStopped(null)).toBe(false)
+    expect(localProbeFailureProvesStopped(new Error('x'))).toBe(false)
   })
 })

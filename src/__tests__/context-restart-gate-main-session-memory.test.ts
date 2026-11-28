@@ -42,8 +42,8 @@ vi.mock('../web/usage-fleet-pause.js', () => ({
   readFleetPauseState: vi.fn(() => ({ paused: false })),
 }))
 vi.mock('../web/agent-process.js', () => ({
-  // KISPROGI 6543 F3: checkAgent skips a positively 'stopped' sub-agent.
-  agentRunState: vi.fn(() => 'running'),
+  // KISPROGI 6543 F3, 6584 K2: checkAgent skips a positively stopped sub-agent.
+  agentPositivelyStopped: vi.fn(() => false),
   agentSessionName: (n: string) => `agent-${n}`,
   capturePane: vi.fn(() => 'fake pane content\n$ '),
   sendPromptToSession: vi.fn(async () => 'sent'),

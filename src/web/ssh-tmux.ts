@@ -135,6 +135,17 @@ export function classifyRunStateFromExit(
 }
 
 /**
+ * KISPROGI 6584 K2: whether a FAILED local `tmux list-sessions` probe PROVES the session is not there. Only an exit
+ * with a numeric status does (typically 1, "no server running"). A timeout or a kill (status null, a signal set) and a
+ * spawn failure (no status at all) prove nothing: a running agent may simply be behind a stuck tmux. Pure.
+ */
+export function localProbeFailureProvesStopped(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const e = err as { status?: unknown; signal?: unknown }
+  return typeof e.status === 'number' && Number.isFinite(e.status) && (e.signal === undefined || e.signal === null)
+}
+
+/**
  * Build the channel-less remote launch command run inside `tmux new-session -d`.
  * Uses the laptop's own `~/.claude` login (no token/vault/CLAUDE_CONFIG_DIR env,
  * no --channels). PATH covers both macOS (/opt/homebrew) and Linux ($HOME/.local)

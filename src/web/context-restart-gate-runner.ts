@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { listAllAgentNames, readAgentClaudeConfigDir } from './agent-config.js'
-import { agentRunState, agentSessionName, capturePane, sendPromptToSession } from './agent-process.js'
+import { agentPositivelyStopped, agentSessionName, capturePane, sendPromptToSession } from './agent-process.js'
 import { detectPaneState } from '../pane-state.js'
 import { detectsUsageLimit } from '../model-fallback.js'
 import { readContextTokensFromProjectDir } from './active-model.js'
@@ -549,9 +549,11 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
   // "can't find session: agent-<name>" to the dashboard's stderr on every sweep
   // (tens of thousands of lines for autobot/iris), and its last transcript
   // could start a block clock that ends in a false persistent-block alert. Only
-  // a positive 'stopped' skips: 'running' and a remote 'unreachable' keep the
-  // fail-closed path, and the main agent is never skipped here.
-  if (name !== MAIN_AGENT_ID && agentRunState(name) === 'stopped') {
+  // a POSITIVE stop skips (KISPROGI 6584 K2: tmux answered without the session,
+  // or exited with a status): a timeout / kill / spawn failure of the probe, a
+  // running agent and a remote one keep the fail-closed path with their block
+  // clock, and the main agent is never skipped here.
+  if (name !== MAIN_AGENT_ID && agentPositivelyStopped(name)) {
     const runState = readGateRunState(name)
     if (runState.firstBlockedAt !== null || runState.preClearNoticeAt !== null) {
       // Not waiting for the gate while stopped: the streak and any pre-clear
