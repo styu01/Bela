@@ -385,7 +385,10 @@ def _code_text_checks(text: str, where: str, cwd: str, depth: int) -> None:
 # Bash: heredocs and substitutions out first, then words, segments and pipelines
 # --------------------------------------------------------------------------------------------------------------
 
-_HEREDOC_RX = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z0-9_.\-]+))")
+# (?<!<) and (?!<): a here-string (<<< 'text') is not a heredoc. Read as one, its quoted text became a heredoc
+# delimiter with an empty body, so python3 <<< '...' and source /dev/stdin <<< '...' went unchecked (found 2026-11-28
+# while fixing KISPROGI 6505 L).
+_HEREDOC_RX = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z0-9_.\-]+))")
 
 
 def _strip_heredocs(cmd: str):
@@ -654,6 +657,10 @@ def _search_pattern_positions(head: str, args):
             explicit = True
             k += 2
             continue
+        elif head != "git" and (_gnu_grep_long(a) if head in _GREP_HEADS else a) in (
+                _GREP_VALUE_OPTS if head in _GREP_HEADS else _RG_VALUE_OPTS):
+            k += 2  # an option's value (-d rec, -m 5, -A 3) is not the pattern (KISPROGI 6505: cd store && grep -d rec X)
+            continue
         elif not a.startswith("-") and first_pos is None:
             first_pos = k
         k += 1
@@ -720,6 +727,58 @@ _FIND_ONE_FILE_CMDS = {"cat", "tac", "nl", "head", "tail", "less", "more", "wc",
                        "sha384sum", "sha512sum", "b2sum", "cksum", "sum", "file", "strings", "xxd", "od", "hexdump", "base64",
                        "base32", "grep", "egrep", "fgrep", "zgrep", "jq", "rm", "unlink", "shred", "truncate"}
 _RECURSIVE_FLAG_RX = re.compile(r"^-(?:-recursive|-archive|-dereference-recursive|-directories=recurse|[A-Za-z]*[rRa][A-Za-z]*)$")
+
+
+# GNU grep 3.11's long options: getopt takes any unambiguous prefix of one (KISPROGI 6505 M2)
+_GNU_GREP_LONG = ("--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--regexp", "--file",
+                  "--ignore-case", "--no-ignore-case", "--word-regexp", "--line-regexp", "--null-data", "--no-messages",
+                  "--invert-match", "--version", "--help", "--max-count", "--byte-offset", "--line-number",
+                  "--line-buffered", "--with-filename", "--no-filename", "--label", "--only-matching", "--quiet", "--silent",
+                  "--binary-files", "--text", "--directories", "--devices", "--recursive", "--dereference-recursive",
+                  "--include", "--exclude", "--exclude-from", "--exclude-dir", "--files-without-match",
+                  "--files-with-matches", "--count", "--initial-tab", "--null", "--before-context", "--after-context",
+                  "--context", "--group-separator", "--no-group-separator", "--color", "--colour", "--binary")
+
+
+def _gnu_grep_long(opt: str) -> str:
+    """The full GNU grep long option an abbreviation stands for (--recur -> --recursive), or the word as it is."""
+    if not opt.startswith("--") or opt in _GNU_GREP_LONG:
+        return opt
+    hits = [o for o in _GNU_GREP_LONG if o.startswith(opt)]
+    return hits[0] if len(hits) == 1 else opt
+
+
+def _gnu_long_prefix(word: str, full: str, least: int) -> bool:
+    """GNU getopt takes any unambiguous prefix of a long option (KISPROGI 6505 M2: --recur, --dereference-rec, --dir=rec).
+    least: the shortest prefix that is still unambiguous among GNU grep's long options."""
+    return least <= len(word) <= len(full) and full.startswith(word)
+
+
+def _recurse_value(v) -> bool:
+    """A -d / --directories value that GNU grep reads as "recurse" (it takes a prefix of 3 letters or more)."""
+    return isinstance(v, str) and 3 <= len(v) <= 7 and "recurse".startswith(v)
+
+
+def _gnu_recursive_long(opt: str, val) -> bool:
+    """A GNU grep long option that makes it recursive, abbreviated or not: --recursive (from --rec), --dereference-recursive
+    (from --der), --directories=recurse (from --di, with a value from rec)."""
+    return (_gnu_long_prefix(opt, "--recursive", 5) or _gnu_long_prefix(opt, "--dereference-recursive", 5)
+            or (_gnu_long_prefix(opt, "--directories", 4) and _recurse_value(val)))
+
+
+def _has_recursive_flag(words) -> bool:
+    """Whether a command's words carry a recursive flag: a short cluster with r/R/a (rm -rf, cp -a, grep -R), GNU grep's
+    long forms and their abbreviations, or -d / --directories with a "recurse" value (-d rec, --dir=rec)."""
+    for k, b in enumerate(words):
+        nxt = words[k + 1] if k + 1 < len(words) else None
+        opt, has_val, val = b.partition("=")
+        if _RECURSIVE_FLAG_RX.match(b) or "recurse" in b:
+            return True
+        if b.startswith("--") and _gnu_recursive_long(opt, val if has_val else nxt):
+            return True
+        if (b == "-d" and _recurse_value(nxt)) or (b.startswith("-d") and not b.startswith("--") and _recurse_value(b[2:])):
+            return True
+    return False
 
 
 def _vague_word(word: str) -> bool:
@@ -849,7 +908,7 @@ def _check_find(args, cwd: str, depth: int, piped=(), feeds_interpreter: bool = 
             check_bash(shlex.join(words), UNKNOWN_CWD if kind in ("-execdir", "-okdir") else cwd, depth + 1)
         if not near or cmd in _FIND_NAME_ONLY_CMDS:
             return
-        if cmd in _FIND_ONE_FILE_CMDS and not any(_RECURSIVE_FLAG_RX.match(b) or "recurse" in b for b in words[1:]):
+        if cmd in _FIND_ONE_FILE_CMDS and not _has_recursive_flag(words[1:]):
             if not narrowed():
                 _deny(f"find {kind} {cmd} a store mappan, olyan szurovel, ami a vedett fajlt is kivalaszthatja")
             return
@@ -941,6 +1000,7 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
         return
     text, bodies = _strip_heredocs(cmd)
     text, subs = _strip_substitutions(text)
+    sub_text = {f"__SUBST{k}__": sub for k, sub in enumerate(subs)}
     for s in subs:
         # a substitution is shell that runs: parsed as such (its data positions stay data)
         if depth < 4:
@@ -988,14 +1048,30 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
                 cwd = UNKNOWN_CWD if (_unknown_place(target) or target == "-" or cwd == UNKNOWN_CWD and not os.path.isabs(target)) \
                     else _resolve(target, cwd)
                 continue
-            if head == "eval":
+            if head in ("eval", "trap"):
                 # KISPROGI 6497 M2: eval joins its words with spaces and runs the result as shell again, so a quoted ';'
-                # among them is a separator there ("eval echo x ';' rm store/claudeclaw.db")
-                joined = " ".join(_unmark(a) for a in args)
-                _code_text_checks(joined, "eval", cwd, depth)
-                if depth < 4:
-                    check_bash(joined, cwd, depth + 1)
+                # among them is a separator there ("eval echo x ';' rm store/claudeclaw.db"); bash's eval drops a
+                # leading "--" (KISPROGI 6505 M1). trap runs its first argument as shell when the signal comes (EXIT,
+                # ERR: KISPROGI 6505 L): "trap 'rm store/claudeclaw.db' EXIT".
+                words = [_unmark(a) for a in args]
+                if head == "trap":
+                    words = [w for w in words if not re.fullmatch(r"-[lpP]+", w)]
+                    if words[:1] == ["--"]:
+                        words = words[1:]
+                    words = words[:1] if len(words) >= 2 else []
+                elif words[:1] == ["--"]:
+                    words = words[1:]
+                joined = " ".join(words)
+                if joined.strip():
+                    _code_text_checks(joined, head, cwd, depth)
+                    if depth < 4:
+                        check_bash(joined, cwd, depth + 1)
                 continue
+            if head in ("source", ".") and args and args[0] in sub_text:
+                # source <(CMD) runs CMD's output as shell: the same as CMD | sh (KISPROGI 6505 L). (A here-string to
+                # source /dev/stdin is code like any interpreter's stdin, below.)
+                if depth < 4:
+                    check_bash(sub_text[args[0]] + " | sh", cwd, depth + 1)
             if is_interp:
                 for a in (_unmark(a) for a in args):
                     if _totp_word(a):
@@ -1006,6 +1082,9 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
                 if later_interp:
                     for a in args:
                         _code_text_checks(a, f"{head} -> ertelmezo", cwd, depth)
+                    if len(args) > 1:
+                        # echo joins its words with spaces: "echo rm store/claudeclaw.db | sh" is one line of code
+                        _code_text_checks(" ".join(_unmark(a) for a in args), f"{head} -> ertelmezo", cwd, depth)
                 continue
             data_pos = _curl_data_positions(args) if head in ("curl", "wget", "http", "https", "xh") else set()
             if head in SEARCH_HEADS or head == "git":
@@ -1133,6 +1212,10 @@ def _grep_include_rules_out(order) -> bool:
         readable = bool(g) and not g.startswith("!") and not any(c in g for c in "[\\{")
         if not readable:
             return kind == "include"
+        if kind == "exclude" and "/" in g:
+            # KISPROGI 6505 H1: GNU grep -r compares a base name, so a glob with a slash excludes nothing, and ugrep's
+            # trailing slash matches folders only ("--exclude=x/.dashboard-totp.json", "--exclude='.dash*/'", "*/")
+            return False
         return fnmatch.fnmatchcase(TOTP_NAME, g.rstrip("/").split("/")[-1])
 
     hits = [kind for kind, g in order if matches(kind, g)]
@@ -1164,10 +1247,13 @@ def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
             continue
         if a.startswith("--"):
             opt, has_val, val = a.partition("=")
+            if grep:
+                opt = _gnu_grep_long(opt)
             if not has_val and opt in value_opts:
                 val = nxt
                 k += 1
-            if opt in ("--recursive", "--dereference-recursive") or (opt == "--directories" and val == "recurse"):
+            if _gnu_recursive_long(opt, val if has_val or opt in value_opts else None) or (
+                    grep and not has_val and _gnu_long_prefix(opt, "--directories", 4) and _recurse_value(nxt)):
                 rec = True
             if opt in ("--files-with-matches", "--files-without-match", "--count", "--count-matches", "--quiet",
                        "--silent", "--files"):
@@ -1190,7 +1276,7 @@ def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
                     val = a[pos + 1:] or nxt
                     if not a[pos + 1:]:
                         k += 1
-                    if ch == "d" and grep and val == "recurse":
+                    if ch == "d" and grep and _recurse_value(val):
                         rec = True
                     if ch == "g":
                         globs.append((val, False))

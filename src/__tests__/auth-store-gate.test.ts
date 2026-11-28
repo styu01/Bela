@@ -232,7 +232,7 @@ const CLAUDE_BIN = [
 const CC_FUNCS = (bin: string) => `find(){ ( exec -a bfs ${JSON.stringify(bin)} -S dfs -regextype findutils-default "$@" ); }\n` +
   `grep(){ ( exec -a ugrep ${JSON.stringify(bin)} -G --ignore-files --hidden -I --encoding=UTF-8 "$@" ); }\n`
 function realRun(cmd: string, effect: 'leaks' | 'db', cc: boolean): void {
-  expect(cmd, 'a real-run case must stay relative').not.toMatch(/(^|[\s=])(\/|~)|\.\.\/|\/\.\.|\$HOME/)
+  expect(cmd, 'a real-run case must stay relative').not.toMatch(/(^|[\s=])(\/(?!dev\/std)|~)|\.\.\/|\/\.\.|\$HOME/)
   expect(bash(cmd), cmd).toBe('DENY')
   const box = mkdtempSync(join(tmp, 'real-'))
   mkdirSync(join(box, 'store')); mkdirSync(join(box, 'src'))
@@ -444,6 +444,54 @@ describe('auth-store-gate: bfs, ugrep and the rest of KISPROGI 6497', () => {
     const v = spawnSync('bash', ['--noprofile', '--norc', '-c', CC_FUNCS(CLAUDE_BIN) + 'find -version; grep --version'], { encoding: 'utf-8' })
     expect(v.stdout).toMatch(/bfs/i)
     expect(v.stdout).toMatch(/ugrep/i)
+  })
+})
+
+// KISPROGI 6505: an --exclude glob with a slash excludes nothing (H1, a regression in 3531d745), eval drops a leading
+// -- (M1), GNU grep takes abbreviated long options and values (M2), trap / source run shell text (L), plus the
+// here-string the heredoc parser took for a heredoc (python3 <<< '...' went unchecked) and echo's joined words into sh.
+const R6505_DENY: string[] = [
+  'command grep -r --exclude=x/.dashboard-totp.json TOTPSECRET store', 'grep --exclude=x/.dashboard-totp.json TOTPSECRET store',
+  'command grep -r --exclude=.dashboard-totp.json/ TOTPSECRET store', 'grep --exclude=.dashboard-totp.json/ TOTPSECRET store',
+  `grep -r --exclude='.dash*/' TOTPSECRET store`, `command grep -r --exclude='*/' TOTPSECRET store`, `grep --exclude='*/' TOTPSECRET store`,
+  r`find . -name store -exec grep --recur TOTPSECRET {} +`, 'find . -name store | xargs grep --recurs TOTPSECRET',
+  r`find . -name store -exec grep --dir=recurse TOTPSECRET {} +`, r`find . -name store -exec grep --dereference-rec TOTPSECRET {} +`,
+  r`find . -name store -exec grep -d rec TOTPSECRET {} +`, r`find . -name store -exec grep --directories=rec TOTPSECRET {} +`,
+  r`find . -name store -exec grep -drecu TOTPSECRET {} +`, 'cd store && command grep --recur TOTPSECRET', 'cd store && command grep -d rec TOTPSECRET',
+  'cd store && command grep --di rec TOTPSECRET',
+  'eval -- rm store/claudeclaw.db', 'builtin eval -- rm store/claudeclaw.db', `eval -- echo x ';' rm store/claudeclaw.db`,
+  `trap 'rm store/claudeclaw.db' EXIT`, `trap 'rm store/claudeclaw.db' ERR; false`, `bash -c "trap 'rm store/claudeclaw.db' EXIT"`,
+  `trap -- 'truncate -s0 store/claudeclaw.db' EXIT`,
+  `source /dev/stdin <<< 'rm store/claudeclaw.db'`, `. /dev/stdin <<< 'rm store/claudeclaw.db'`, 'source <(echo rm store/claudeclaw.db)',
+  `bash <<< 'rm store/claudeclaw.db'`, `python3 <<< 'import os; os.remove("store/claudeclaw.db")'`, 'cat <<< x; sh <<< "rm store/claudeclaw.db"',
+  'echo rm store/claudeclaw.db | sh',
+]
+const R6505_PASS: string[] = [
+  'grep -r --exclude=.dashboard-totp.json TOTPSECRET store', `grep -r --exclude='.d*' --include='*.log' x store`,
+  `trap 'rm -f /tmp/x' EXIT; echo hi`, 'trap - EXIT', 'trap -p', 'source ./env.sh', '. ./venv/bin/activate', `python3 <<< 'print(1)'`,
+  'cat <<< hello', 'echo hi | sh', `find src -name '*.ts' -exec grep --recur foo {} +`, 'grep --recur foo src', `eval "$(ssh-agent -s)"`,
+  'find . -name store -exec grep --files-with x {} +', 'find . -maxdepth 1 -name README.md -exec grep -d read x {} +',
+]
+const R6505_REAL: [string, 'leaks' | 'db', boolean][] = [
+  ['command grep -r --exclude=x/.dashboard-totp.json TOTPSECRET store', 'leaks', true],
+  ['grep --exclude=x/.dashboard-totp.json TOTPSECRET store', 'leaks', true],
+  ['command grep -r --exclude=.dashboard-totp.json/ TOTPSECRET store', 'leaks', true],
+  [`grep -r --exclude='.dash*/' TOTPSECRET store`, 'leaks', true], [`command grep -r --exclude='*/' TOTPSECRET store`, 'leaks', true],
+  [r`find . -name store -exec grep --recur TOTPSECRET {} +`, 'leaks', true], ['find . -name store | xargs grep --recurs TOTPSECRET', 'leaks', true],
+  [r`find . -name store -exec grep --dereference-rec TOTPSECRET {} +`, 'leaks', true], [r`find . -name store -exec grep -d rec TOTPSECRET {} +`, 'leaks', true],
+  [r`find . -name store -exec grep --directories=rec TOTPSECRET {} +`, 'leaks', true], ['cd store && command grep --recur TOTPSECRET', 'leaks', true],
+  ['eval -- rm store/claudeclaw.db', 'db', true], ['builtin eval -- rm store/claudeclaw.db', 'db', true],
+  [`trap 'rm store/claudeclaw.db' EXIT`, 'db', true], [`trap 'rm store/claudeclaw.db' ERR; false`, 'db', true],
+  [`source /dev/stdin <<< 'rm store/claudeclaw.db'`, 'db', true], [`. /dev/stdin <<< 'rm store/claudeclaw.db'`, 'db', true],
+  ['source <(echo rm store/claudeclaw.db)', 'db', true], [`bash <<< 'rm store/claudeclaw.db'`, 'db', true],
+  [`python3 <<< 'import os; os.remove("store/claudeclaw.db")'`, 'db', true], ['echo rm store/claudeclaw.db | sh', 'db', true],
+]
+
+describe('auth-store-gate: KISPROGI 6505 (exclude with a slash, eval --, GNU abbreviations, trap/source, here-strings)', () => {
+  for (const c of R6505_DENY) it(`refuses: ${c.slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6505_PASS) it(`passes: ${c.slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it.skipIf(!CLAUDE_BIN)('every refused form above really leaks or hits the DB (bfs / ugrep / GNU, scratch copy)', () => {
+    for (const [cmd, effect, cc] of R6505_REAL) realRun(cmd, effect, cc)
   })
 })
 
