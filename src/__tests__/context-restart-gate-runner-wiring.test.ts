@@ -44,6 +44,8 @@ vi.mock('../web/usage-fleet-pause.js', () => ({
   readFleetPauseState: vi.fn(() => ({ paused: false })),
 }))
 vi.mock('../web/agent-process.js', () => ({
+  // KISPROGI 6543 F3: checkAgent skips a positively 'stopped' sub-agent.
+  agentRunState: vi.fn(() => 'running'),
   agentSessionName: (n: string) => `agent-${n}`,
   capturePane: vi.fn(() => 'fake pane content\n$ '),
   sendPromptToSession: vi.fn(async () => 'sent'),
@@ -82,7 +84,7 @@ const execFileSyncMock = vi.fn((_cmd: string, args?: string[]) => {
 vi.mock('node:child_process', () => ({ execFileSync: execFileSyncMock }))
 
 const { checkAgent, deliverPendingWake, gateWakePrompt } = await import('../web/context-restart-gate-runner.js')
-const { sendPromptToSession } = await import('../web/agent-process.js')
+const { sendPromptToSession, agentRunState } = await import('../web/agent-process.js')
 const { writeGateConfig, readGateRunState, writeGateRunState } = await import('../web/context-restart-gate-store.js')
 const { readContextTokensFromProjectDir } = await import('../web/active-model.js')
 const { PRE_CLEAR_NOTICE_MS, WAKE_DELAY_MS, WAKE_MAX_AGE_MS } = await import('../context-restart-gate.js')
@@ -92,6 +94,8 @@ const { readFleetPauseState } = await import('../web/usage-fleet-pause.js')
 
 beforeEach(() => {
   execFileSyncMock.mockClear()
+  vi.mocked(agentRunState).mockReset()
+  vi.mocked(agentRunState).mockReturnValue('running')
   vi.mocked(hasBlockingKanbanCardForAssignee).mockReset()
   vi.mocked(hasBlockingKanbanCardForAssignee).mockReturnValue(false)
   vi.mocked(openInboundQuestionMessageId).mockReset()
@@ -350,5 +354,78 @@ describe('context-restart-gate persistent-block alert envelope', () => {
     await checkAgent(name, t0 + 130 * 60_000)
     expect(calls().length).toBe(2)
     expect(String(calls()[1][2])).toContain('FIGYELEM: ugyanez az ok 130 perce valtozatlan')
+  })
+})
+
+// KISPROGI 6543 F3: a stopped sub-agent (on-demand autobot/iris, or one stopped on purpose) used to be probed on every
+// sweep: tmux list-panes wrote "can't find session: agent-<name>" to the dashboard's stderr, and its last transcript
+// could start a block clock ending in a false persistent-block alert.
+describe('context-restart-gate: a stopped sub-agent is not probed', () => {
+  it('skips every tmux probe, message and transcript read for a stopped sub-agent', async () => {
+    const name = 'stopped-ondemand'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100, persistentBlockAlertMs: 60_000 })
+    vi.mocked(agentRunState).mockReturnValue('stopped')
+    vi.mocked(readContextTokensFromProjectDir).mockClear()
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    const t0 = Date.now()
+    await checkAgent(name, t0)
+    await checkAgent(name, t0 + 3 * 60 * 60_000)
+    expect(execFileSyncMock).not.toHaveBeenCalled()
+    expect(readContextTokensFromProjectDir).not.toHaveBeenCalled()
+    expect(vi.mocked(createAgentMessage)).not.toHaveBeenCalled()
+    expect(vi.mocked(sendPromptToSession)).not.toHaveBeenCalledWith(`agent-${name}`, expect.anything(), expect.anything(), expect.anything())
+    expect(readGateRunState(name).firstBlockedAt).toBeNull()
+  })
+
+  it('clears a stale block streak and pre-clear notice once the agent is stopped, keeps the rest', async () => {
+    const name = 'stopped-with-streak'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100, persistentBlockAlertMs: 60_000 })
+    writeGateRunState(name, { firstBlockedAt: 1000, lastAlertAt: 2000, lastClearAt: 3000, preClearNoticeAt: 4000, pendingWakeAt: 5000 })
+    vi.mocked(agentRunState).mockReturnValue('stopped')
+    await checkAgent(name, Date.now())
+    expect(readGateRunState(name)).toEqual({ firstBlockedAt: null, lastAlertAt: 2000, lastClearAt: 3000, preClearNoticeAt: null, pendingWakeAt: 5000 })
+    expect(execFileSyncMock).not.toHaveBeenCalled()
+  })
+
+  it("a restarted agent does not inherit the old streak: no immediate persistent-block alert", async () => {
+    const name = 'stopped-then-running'
+    writeGateConfig(name, { enabled: true, thresholdTokens: 100, persistentBlockAlertMs: 60_000 })
+    writeGateRunState(name, { firstBlockedAt: 1000, lastAlertAt: null, lastClearAt: null, preClearNoticeAt: null, pendingWakeAt: null })
+    vi.mocked(agentRunState).mockReturnValue('stopped')
+    const t0 = Date.now()
+    await checkAgent(name, t0)
+    vi.mocked(agentRunState).mockReturnValue('running')
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(500)
+    vi.mocked(hasBlockingKanbanCardForAssignee).mockReturnValue(true)
+    await checkAgent(name, t0 + 1000)
+    const alerts = vi.mocked(createAgentMessage).mock.calls.filter((c) => String(c[2]).startsWith('[CONTEXT-RESTART-GATE-RIASZTAS]'))
+    expect(alerts.length).toBe(0)
+    expect(readGateRunState(name).firstBlockedAt).toBe(t0 + 1000)
+  })
+
+  it("'unreachable' (remote) and 'running' keep the fail-closed probes; the main agent is never skipped", async () => {
+    for (const state of ['unreachable', 'running'] as const) {
+      execFileSyncMock.mockClear()
+      writeGateConfig(`probe-${state}`, { enabled: true, thresholdTokens: 100 })
+      vi.mocked(agentRunState).mockReturnValue(state)
+      vi.mocked(readContextTokensFromProjectDir).mockReturnValue(0)
+      await checkAgent(`probe-${state}`, Date.now())
+      expect(execFileSyncMock.mock.calls.some((c) => c[1]?.[0] === 'list-panes')).toBe(true)
+    }
+    execFileSyncMock.mockClear()
+    vi.mocked(agentRunState).mockClear()
+    vi.mocked(agentRunState).mockReturnValue('stopped')
+    writeGateConfig('testmain', { enabled: true, thresholdTokens: 100 })
+    await checkAgent('testmain', Date.now())
+    expect(vi.mocked(agentRunState)).not.toHaveBeenCalled()
+    expect(execFileSyncMock.mock.calls.some((c) => c[1]?.[0] === 'list-panes')).toBe(true)
+  })
+
+  it('the pane-pid probe pipes tmux stderr instead of inheriting it', async () => {
+    writeGateConfig('stderr-check', { enabled: true, thresholdTokens: 100 })
+    vi.mocked(readContextTokensFromProjectDir).mockReturnValue(0)
+    await checkAgent('stderr-check', Date.now())
+    const call = execFileSyncMock.mock.calls.find((c) => c[1]?.[0] === 'list-panes') as unknown as [string, string[], { stdio?: unknown }]
+    expect(call?.[2]?.stdio).toEqual(['ignore', 'pipe', 'pipe'])
   })
 })

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { listAllAgentNames, readAgentClaudeConfigDir } from './agent-config.js'
-import { agentSessionName, capturePane, sendPromptToSession } from './agent-process.js'
+import { agentRunState, agentSessionName, capturePane, sendPromptToSession } from './agent-process.js'
 import { detectPaneState } from '../pane-state.js'
 import { detectsUsageLimit } from '../model-fallback.js'
 import { readContextTokensFromProjectDir } from './active-model.js'
@@ -293,8 +293,10 @@ function capturePaneOrNull(session: string): string | null {
 
 function getPanePid(session: string): number | null {
   try {
+    // stderr piped: a vanished session's "can't find session" belongs in the
+    // caught error (null => fail-closed), not in the dashboard's stderr log.
     const raw = execFileSync(TMUX, ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'],
-      { timeout: 3000, encoding: 'utf-8' })
+      { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
     const pid = parseInt(raw.split('\n')[0]?.trim() ?? '', 10)
     return Number.isFinite(pid) && pid > 0 ? pid : null
   } catch { return null }
@@ -541,6 +543,24 @@ const NEVER_CLEARS_MIN = 120
 export async function checkAgent(name: string, nowMs: number): Promise<void> {
   const cfg = readGateConfig(name)
   if (!cfg.enabled) return   // fast-exit without touching state
+
+  // A stopped sub-agent (on-demand, or stopped on purpose) has no pane to clear
+  // and nothing to measure (KISPROGI 6543 F3). Probing it anyway wrote tmux's
+  // "can't find session: agent-<name>" to the dashboard's stderr on every sweep
+  // (tens of thousands of lines for autobot/iris), and its last transcript
+  // could start a block clock that ends in a false persistent-block alert. Only
+  // a positive 'stopped' skips: 'running' and a remote 'unreachable' keep the
+  // fail-closed path, and the main agent is never skipped here.
+  if (name !== MAIN_AGENT_ID && agentRunState(name) === 'stopped') {
+    const runState = readGateRunState(name)
+    if (runState.firstBlockedAt !== null || runState.preClearNoticeAt !== null) {
+      // Not waiting for the gate while stopped: the streak and any pre-clear
+      // notice belong to the session that is gone. A pending wake is left for
+      // decideWake, which drops it once it is stale.
+      writeGateRunState(name, { ...runState, firstBlockedAt: null, preClearNoticeAt: null })
+    }
+    return
+  }
 
   const session = sessionFor(name)
   const workingDir = workingDirFor(name)
