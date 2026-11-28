@@ -123,15 +123,26 @@ ENV_PATH = os.path.join(REPO_ROOT, ".env")
 INFO_TOKEN_PATH = os.path.join(STORE_DIR, ".claude-oauth-token.info")
 STYU01_TOKEN_PATHS = (os.path.join(STORE_DIR, ".claude-oauth-token.styu01"),
                       os.path.join(STORE_DIR, "backup-*", "claude-oauth-token.styu01"))
+def _load_usage_accounts():
+    """scripts/usage_accounts.py, the ONE account-rule table, loaded by path (BELA 6587)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage_accounts.py")
+    spec = importlib.util.spec_from_file_location("usage_accounts", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_UA = _load_usage_accounts()
 ACCOUNT_DEFAULT = "styu01"
 ACCOUNT_INFO = "info"
-ACCOUNT_UNKNOWN = "ismeretlen"
-ACCOUNTS = (ACCOUNT_DEFAULT, ACCOUNT_INFO, ACCOUNT_UNKNOWN)
+ACCOUNT_UNKNOWN = _UA.UNKNOWN_ACCOUNT
+ACCOUNTS = _UA.ACCOUNTS
 # Windows an account may legitimately not report: only the 5-hour one, and only
-# on the info account, which has no 5-hour limit (KISPROGI 6584 K1; see
-# _parse_claude_usage_headers). The weekly window is always required.
+# on an account without a 5-hour limit in the shared table (info; KISPROGI 6584
+# K1; see _parse_claude_usage_headers). The weekly window is always required.
 OPTIONAL_CLAUDE_WINDOWS = ("five_hour",)
-ACCOUNTS_WITHOUT_5H = (ACCOUNT_INFO,)
+ACCOUNTS_WITHOUT_5H = _UA.accounts_without("five_hour")
 
 BUDAPEST = ZoneInfo("Europe/Budapest")
 

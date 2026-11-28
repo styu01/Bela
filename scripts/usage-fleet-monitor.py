@@ -29,20 +29,24 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent.parent
 AGENTS = ("progi", "okoska", "iris", "kisprogi")
 METRICS = ("five_hour", "seven_day")
-# Owner decision 2026-11-28 (Telegram 8728, BELA 6580): the thresholds belong to the ACCOUNT the collector measured
-# (snapshot claude.account; none = the default styu01), not to which headers the response carried. warn = caution
-# notice, pause = fleet pause; a pause is released only when every judged window is below its warn value.
-#   styu01: the fleet rule, 5-hour 90/98, weekly 80/90.
-#   info (Ultra): no 5-hour limit at all, weekly 90/96 (release below 90).
-#   ismeretlen (a token matching neither account, or no account in the snapshot): the fleet rule, both windows.
-# Every window an account has a threshold for must be in the snapshot (only info has no 5-hour one: KISPROGI 6584 K1).
-ACCOUNTS = ("styu01", "info", "ismeretlen")
-DEFAULT_ACCOUNT = "ismeretlen"
-THRESHOLDS = {
-    "styu01": {"warn": {"five_hour": 90, "seven_day": 80}, "pause": {"five_hour": 98, "seven_day": 90}},
-    "info": {"warn": {"seven_day": 90}, "pause": {"seven_day": 96}},
-    "ismeretlen": {"warn": {"five_hour": 90, "seven_day": 80}, "pause": {"five_hour": 98, "seven_day": 90}},
-}
+def _load_usage_accounts():
+    """scripts/usage_accounts.py, the ONE account-rule table, loaded by path (BELA 6587)."""
+    import importlib.util
+    path = str(Path(__file__).resolve().parent / "usage_accounts.py")
+    spec = importlib.util.spec_from_file_location("usage_accounts", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_UA = _load_usage_accounts()
+# The thresholds belong to the ACCOUNT the collector measured (snapshot claude.account; none or an unknown one =
+# "ismeretlen", the fleet rule), from the shared table scripts/usage_accounts.py (owner decision 2026-11-28, BELA
+# 6580, 6587): warn = caution notice, pause = fleet pause, release when every judged window is below its warn value.
+# Every window of the account's table is required (only info has no 5-hour one: KISPROGI 6584 K1).
+ACCOUNTS = _UA.ACCOUNTS
+DEFAULT_ACCOUNT = _UA.UNKNOWN_ACCOUNT
+THRESHOLDS = {a: {"warn": _UA.warn_values(a), "pause": _UA.stop_values(a)} for a in _UA.ACCOUNTS}
 # The fleet rule's values, kept for the existing callers and tests.
 WARN = THRESHOLDS["styu01"]["warn"]
 PAUSE_AT = THRESHOLDS["styu01"]["pause"]
@@ -236,10 +240,9 @@ def snapshot(path, now):
         windows = claude["windows"]
         account = claude.get("account")
         account = account if isinstance(account, str) and account in ACCOUNTS else DEFAULT_ACCOUNT
-        limits = THRESHOLDS[account]["pause"]
         # Exactly the windows this account has a limit for are judged, and all of them are required (info: weekly
         # only, even if a 5-hour one came; styu01: a missing 5-hour window is stale, marker or not).
-        metrics = tuple(m for m in METRICS if m in limits)
+        metrics = _UA.required_windows(account)
         if "seven_day" not in metrics:
             return None
         if not all(percent(windows[m]["used_percent"]) for m in metrics):
@@ -564,7 +567,7 @@ class Monitor:
         if not valid_event(pending):
             pending = None
             state.pop("pending", None)
-        both_low = all(values[m] < data["warn"][m] for m in metrics)
+        both_low = _UA.released(data["account"], values)
         at_pause = any(values[m] >= data["pause"][m] for m in metrics)
         # In-flight pause counts as paused: some recipients may already have
         # stopped, including an ambiguous timeout without a saved receipt.

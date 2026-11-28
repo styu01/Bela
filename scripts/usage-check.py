@@ -19,18 +19,23 @@ from datetime import datetime, timezone
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LATEST_PATH = os.environ.get("USAGE_CHECK_LATEST_PATH", os.path.join(REPO_ROOT, "store", "usage-latest.json"))
 FRESH_AFTER_SECONDS = 25 * 60
-ACCOUNTS = ("styu01", "info", "ismeretlen")
-DEFAULT_ACCOUNT = "ismeretlen"
-# Owner decision 2026-11-28 (Telegram 8728, BELA 6580): the thresholds belong to the ACCOUNT, not to which headers a
-# response happened to carry. (warning, STOP) per window; a window an account has no limit for is not judged.
-#   styu01: the fleet rule, 5-hour 90/98, weekly 80/90.
-#   info (Ultra): no 5-hour limit at all, weekly 90/96 (as usage-check-info.py since 11-24).
-#   ismeretlen (a token matching neither account): the stricter fleet rule, both windows required.
-ACCOUNT_THRESHOLDS = {
-    "styu01": {"five_hour": (90, 98), "seven_day": (80, 90)},
-    "info": {"seven_day": (90, 96)},
-    "ismeretlen": {"five_hour": (90, 98), "seven_day": (80, 90)},
-}
+def _load_usage_accounts():
+    """scripts/usage_accounts.py, the ONE account-rule table, loaded by path (BELA 6587)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage_accounts.py")
+    spec = importlib.util.spec_from_file_location("usage_accounts", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_UA = _load_usage_accounts()
+ACCOUNTS = _UA.ACCOUNTS
+DEFAULT_ACCOUNT = _UA.UNKNOWN_ACCOUNT
+# The thresholds belong to the ACCOUNT (owner decision 2026-11-28, BELA 6580, 6587): (warning, STOP) per window, from
+# the shared table scripts/usage_accounts.py; a window an account has no limit for is neither required nor judged.
+ACCOUNT_THRESHOLDS = {a: {w: (_UA.warn_values(a)[w], _UA.stop_values(a)[w]) for w in _UA.required_windows(a)}
+                      for a in _UA.ACCOUNTS}
 
 
 def account_label(claude):
@@ -96,12 +101,7 @@ def main():
     values = {"seven_day": round(seven, 2)}
     if five_judged:
         values["five_hour"] = round(five, 2)
-    if any(values[m] >= limits[m][1] for m in values):
-        status = "STOP"
-    elif any(values[m] >= limits[m][0] for m in values):
-        status = "FIGYELMEZTETÉS"
-    else:
-        status = "OK"
+    status = _UA.verdict(account, values)
     seven = values["seven_day"]
     five_txt = f"{values['five_hour']:g}%" if five_judged else "n/a (ennél a fióknál nincs 5 órás keret)"
     print(f"USAGE {account} Claude 5 órás keret={five_txt} heti keret={seven:g}% friss({int(age_seconds // 60)}p) {status}")
