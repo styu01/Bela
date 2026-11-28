@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect the two agy /usage quota rows without a model call or auth-file reads."""
+"""Collect the agy /usage quota rows without a model call or auth-file reads."""
 import sys
 sys.dont_write_bytecode = True
 import argparse
@@ -27,7 +27,22 @@ LOCK = ".gemini-usage-collect.lock"
 PROCESS_TIMEOUT = 45
 MAX_OUTPUT = 8192
 FRESH_SECONDS = 90 * 60
+# (row label, limit kind) -> snapshot group key. Since agy's 11-26 build the
+# output also carries a "Claude and GPT models / Five Hour Limit Remaining" row.
+ROWS = {
+    ("Gemini Models", "Weekly Limit Remaining"): "gemini",
+    ("Claude and GPT models", "Weekly Limit Remaining"): "claude_gpt",
+    ("Claude and GPT models", "Five Hour Limit Remaining"): "claude_gpt_five_hour",
+}
+REQUIRED_GROUPS = ("gemini", "claude_gpt")
+KNOWN_GROUPS = tuple(ROWS.values())
+# Backwards-compatible name: the groups every snapshot must contain.
 GROUPS = {"Gemini Models": "gemini", "Claude and GPT models": "claude_gpt"}
+# A well-formed row with an unknown label/kind is not a parser failure (a new
+# CLI row must not blind the whole measurement again, as it did 11-26..11-28);
+# it is recorded in the snapshot so the checker can say it was not processed.
+SAFE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ()/&.,+-]{0,63}")
+MAX_ROWS = 8
 TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)")
 ERRORS = {"provider_unavailable", "provider_failed", "provider_timeout", "provider_output_too_large",
           "invalid_output", "snapshot_write_failed", "store_failed", "lock_failed", "busy", "invalid_now"}
@@ -55,7 +70,17 @@ def number(value):
     return type(value) is int or type(value) is float and math.isfinite(value)
 
 
-def parse_usage(text):
+def parse_usage(text, details=None):
+    """Parse agy /usage TSV into {group_key: {...}}.
+
+    Every row must be well-formed (four tab-separated fields, a 0..100 percent,
+    a timezone-aware ISO time). The two required groups must be present exactly
+    once. A known optional row is parsed into its own group; a well-formed row
+    with an unknown label/kind is skipped and, when a dict is passed as
+    details, listed in details["unrecognized_rows"] ("label / kind").
+    A reset of exactly 1970-01-01T00:00:00Z (epoch 0) is agy's "no window in
+    progress" value and is stored as resets_at = null.
+    """
     if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_OUTPUT:
         raise UsageError("invalid_output")
     if any(c in text for c in "\x0c\x0b\x1c\x1d\x1e\x85\u2028\u2029"):
@@ -63,16 +88,16 @@ def parse_usage(text):
     rows = text.replace("\r\n", "\n").split("\n")
     if rows and rows[-1] == "":
         rows.pop()
-    if len(rows) != 2:
+    if not len(REQUIRED_GROUPS) <= len(rows) <= MAX_ROWS:
         raise UsageError("invalid_output")
     result = {}
+    unrecognized = []
     for row in rows:
         fields = row.split("\t")
         if len(fields) != 4:
             raise UsageError("invalid_output")
         label, kind, percentage, reset = fields
-        key = GROUPS.get(label)
-        if key is None or key in result or kind != "Weekly Limit Remaining":
+        if not SAFE_LABEL.fullmatch(label) or not SAFE_LABEL.fullmatch(kind):
             raise UsageError("invalid_output")
         if not re.fullmatch(r"(?:0|[1-9][0-9]?|100)(?:\.[0-9]{1,6})?%", percentage):
             raise UsageError("invalid_output")
@@ -80,8 +105,21 @@ def parse_usage(text):
         stamp = parse_time(reset)
         if not 0 <= remaining <= 100 or stamp is None:
             raise UsageError("invalid_output")
+        key = ROWS.get((label, kind))
+        if key is None:
+            name = label + " / " + kind
+            if name in unrecognized:
+                raise UsageError("invalid_output")
+            unrecognized.append(name)
+            continue
+        if key in result:
+            raise UsageError("invalid_output")
         result[key] = {"remaining_pct": remaining, "used_pct": round(100 - remaining, 6),
-                       "resets_at": utc(stamp)}
+                       "resets_at": None if stamp.timestamp() == 0 else utc(stamp)}
+    if any(key not in result for key in REQUIRED_GROUPS):
+        raise UsageError("invalid_output")
+    if details is not None:
+        details["unrecognized_rows"] = unrecognized
     return result
 
 
@@ -89,9 +127,17 @@ def valid_group(group):
     if not isinstance(group, dict):
         return False
     remaining, used = group.get("remaining_pct"), group.get("used_pct")
+    reset = group.get("resets_at")
     return (number(remaining) and number(used) and 0 <= remaining <= 100 and 0 <= used <= 100
             and abs(remaining + used - 100) <= 0.000001
-            and parse_time(group.get("resets_at")) is not None)
+            and (reset is None or parse_time(reset) is not None))
+
+
+def valid_unrecognized(rows):
+    return (isinstance(rows, list) and len(rows) <= MAX_ROWS
+            and all(isinstance(r, str) and len(r) <= 131 and " / " in r
+                    and all(SAFE_LABEL.fullmatch(p) for p in r.split(" / ", 1)) for r in rows)
+            and len(set(rows)) == len(rows))
 
 
 def run_usage(agy=DEFAULT_AGY, timeout=PROCESS_TIMEOUT):
@@ -256,8 +302,11 @@ def collect(store=DEFAULT_STORE, agy=DEFAULT_AGY, now=None, timeout=PROCESS_TIME
         except BlockingIOError:
             raise UsageError("busy") from None
         try:
-            groups = parse_usage(run_usage(agy, timeout))
+            details = {}
+            groups = parse_usage(run_usage(agy, timeout), details)
             snapshot = {"collectedAt": utc(now), "groups": groups}
+            if details.get("unrecognized_rows"):
+                snapshot["unrecognizedRows"] = details["unrecognized_rows"]
             atomic_write(store / SNAPSHOT, snapshot)
             return snapshot
         finally:

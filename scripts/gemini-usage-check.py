@@ -30,26 +30,47 @@ def status(used):
     return "STOP" if used >= 90 else "FIGYELMEZTETÉS" if used >= 80 else "OK"
 
 
+def reset_text(group, now):
+    reset = group["resets_at"]
+    if reset is None:
+        return "nincs aktív ablak"
+    return reset + (" (reset elmúlt)" if collector.parse_time(reset) <= now else "")
+
+
 def format_snapshot(snapshot, now=None):
     now = datetime.now(timezone.utc) if now is None else now
     if not isinstance(now, datetime) or now.tzinfo is None or not isinstance(snapshot, dict):
         return "Gemini heti keret: ISMERETLEN (missing)"
     observed = collector.parse_time(snapshot.get("collectedAt"))
     groups = snapshot.get("groups")
-    if (observed is None or not isinstance(groups, dict) or set(groups) != set(collector.GROUPS.values())
-            or not all(collector.valid_group(v) for v in groups.values())):
+    unrecognized = snapshot.get("unrecognizedRows", [])
+    if (observed is None or not isinstance(groups, dict)
+            or not set(collector.REQUIRED_GROUPS) <= set(groups) <= set(collector.KNOWN_GROUPS)
+            or not all(collector.valid_group(v) for v in groups.values())
+            or not collector.valid_unrecognized(unrecognized)):
         return "Gemini heti keret: ISMERETLEN (missing)"
     if not 0 <= (now - observed).total_seconds() <= collector.FRESH_SECONDS:
         return "Gemini heti keret: ISMERETLEN (stale)"
     gemini, other = groups["gemini"], groups["claude_gpt"]
-    if collector.parse_time(gemini["resets_at"]) <= now:
-        return "Gemini heti keret: ISMERETLEN (reset)"
-    other_reset = " (reset elmúlt)" if collector.parse_time(other["resets_at"]) <= now else ""
     used = rounded(gemini["used_pct"])
-    return (f"Gemini heti keret {display(used)}% {status(used)}, "
-            f"maradt: {display(gemini['remaining_pct'])}%, reset: {gemini['resets_at']} | "
+    if gemini["resets_at"] is None:
+        # agy reports epoch 0 when no window is in progress; that is only
+        # consistent with an untouched quota.
+        if used != 0:
+            return "Gemini heti keret: ISMERETLEN (reset)"
+    elif collector.parse_time(gemini["resets_at"]) <= now:
+        return "Gemini heti keret: ISMERETLEN (reset)"
+    line = (f"Gemini heti keret {display(used)}% {status(used)}, "
+            f"maradt: {display(gemini['remaining_pct'])}%, reset: {reset_text(gemini, now)} | "
             f"Gemini szolgáltatói Claude/GPT heti keret {display(other['used_pct'])}% használt, maradt: {display(other['remaining_pct'])}%, "
-            f"reset: {other['resets_at']}{other_reset}")
+            f"reset: {reset_text(other, now)}")
+    five = groups.get("claude_gpt_five_hour")
+    if five is not None:
+        line += (f" | Gemini szolgáltatói Claude/GPT 5 órás keret {display(five['used_pct'])}% használt, "
+                 f"maradt: {display(five['remaining_pct'])}%, reset: {reset_text(five, now)}")
+    if unrecognized:
+        line += f" | fel nem dolgozott új sor a kimenetben: {len(unrecognized)}"
+    return line
 
 
 def main(argv=None):

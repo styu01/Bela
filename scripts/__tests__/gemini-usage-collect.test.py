@@ -529,5 +529,101 @@ class GeminiTests(unittest.TestCase):
         self.assertTrue(timer["Timer"].getboolean("Persistent"))
 
 
+# Real agy /usage output since the 11-26 build (captured 2026-11-28).
+THREE_ROWS = ("Gemini Models\tWeekly Limit Remaining\t100%\t2026-12-05T11:19:54Z\n"
+              "Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n"
+              "Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z\n")
+
+
+class ThreeRowOutputTests(unittest.TestCase):
+    setUp = GeminiTests.setUp
+    make_fake = GeminiTests.make_fake
+    main = GeminiTests.main
+    check = GeminiTests.check
+
+    def test_real_three_row_output_parses_with_separate_five_hour_group(self):
+        details = {}
+        groups = c.parse_usage(THREE_ROWS, details)
+        self.assertEqual(set(groups), {"gemini", "claude_gpt", "claude_gpt_five_hour"})
+        self.assertEqual(groups["gemini"], {"remaining_pct": 100, "used_pct": 0, "resets_at": "2026-12-05T11:19:54Z"})
+        self.assertEqual(groups["claude_gpt"]["resets_at"], None)
+        self.assertEqual(groups["claude_gpt_five_hour"], {"remaining_pct": 100, "used_pct": 0, "resets_at": None})
+        self.assertEqual(details["unrecognized_rows"], [])
+
+    def test_epoch_zero_in_any_offset_is_no_window_other_times_stay(self):
+        text = THREE_ROWS.replace("1970-01-01T00:00:00Z", "1970-01-01T01:00:00+01:00", 1)
+        self.assertIsNone(c.parse_usage(text)["claude_gpt"]["resets_at"])
+        text = THREE_ROWS.replace("1970-01-01T00:00:00Z", "1970-01-01T00:00:01Z", 1)
+        self.assertEqual(c.parse_usage(text)["claude_gpt"]["resets_at"], "1970-01-01T00:00:01Z")
+
+    def test_collector_and_checker_end_to_end_on_three_rows(self):
+        self.make_fake("import sys\nsys.stdout.write(" + repr(THREE_ROWS) + ")\n")
+        rc, out, _ = self.main()
+        self.assertEqual(rc, 0, out)
+        snapshot = json.loads((self.store / c.SNAPSHOT).read_text())
+        self.assertNotIn("unrecognizedRows", snapshot)
+        line = self.check()
+        self.assertEqual(line.strip(),
+                         "Gemini heti keret 0% OK, maradt: 100%, reset: 2026-12-05T11:19:54Z | "
+                         "Gemini szolgáltatói Claude/GPT heti keret 0% használt, maradt: 100%, reset: nincs aktív ablak | "
+                         "Gemini szolgáltatói Claude/GPT 5 órás keret 0% használt, maradt: 100%, reset: nincs aktív ablak")
+        self.assertNotIn(" -- ", line)
+        self.assertNotIn("\u2014", line)
+
+    def test_two_row_output_still_valid(self):
+        self.assertEqual(set(c.parse_usage(GOOD)), {"gemini", "claude_gpt"})
+        line = k.format_snapshot({"collectedAt": c.utc(NOW), "groups": c.parse_usage(GOOD)}, NOW)
+        self.assertNotIn("5 órás", line)
+
+    def test_gemini_without_window_is_ok_only_when_untouched(self):
+        text = THREE_ROWS.replace("2026-12-05T11:19:54Z", "1970-01-01T00:00:00Z")
+        line = k.format_snapshot({"collectedAt": c.utc(NOW), "groups": c.parse_usage(text)}, NOW)
+        self.assertIn("Gemini heti keret 0% OK, maradt: 100%, reset: nincs aktív ablak", line)
+        text = text.replace("100%", "60%", 1)
+        line = k.format_snapshot({"collectedAt": c.utc(NOW), "groups": c.parse_usage(text)}, NOW)
+        self.assertEqual(line, "Gemini heti keret: ISMERETLEN (reset)")
+
+    def test_unknown_well_formed_row_is_recorded_not_fatal(self):
+        text = THREE_ROWS + "Gemini Models\tFive Hour Limit Remaining\t90%\t2026-11-28T15:00:00Z\n"
+        details = {}
+        groups = c.parse_usage(text, details)
+        self.assertEqual(details["unrecognized_rows"], ["Gemini Models / Five Hour Limit Remaining"])
+        self.assertNotIn("gemini_five_hour", groups)
+        self.make_fake("import sys\nsys.stdout.write(" + repr(text) + ")\n")
+        rc, _, _ = self.main()
+        self.assertEqual(rc, 0)
+        snapshot = json.loads((self.store / c.SNAPSHOT).read_text())
+        self.assertEqual(snapshot["unrecognizedRows"], ["Gemini Models / Five Hour Limit Remaining"])
+        self.assertIn("| fel nem dolgozott új sor a kimenetben: 1", self.check())
+
+    def test_malformed_unsafe_duplicate_or_too_many_rows_still_fail(self):
+        extra = "Gemini Models\tFive Hour Limit Remaining\t90%\t2026-11-28T15:00:00Z\n"
+        bad = (THREE_ROWS + THREE_ROWS.splitlines(True)[2],                    # duplicate known optional row
+               THREE_ROWS + extra + extra,                                       # duplicate unknown row
+               THREE_ROWS + "New $(id) row\tWeekly\t5%\t2026-11-28T15:00:00Z\n",  # unsafe label
+               THREE_ROWS + "New row\tWeekly\t5\t2026-11-28T15:00:00Z\n",       # bad percent
+               THREE_ROWS + "New row\tWeekly\t5%\tsoon\n",                      # bad time
+               THREE_ROWS + "New row\tWeekly\t5%\n",                             # field count
+               THREE_ROWS + "".join(f"Row {i}\tWeekly\t5%\t2026-11-28T15:00:00Z\n" for i in range(6)),
+               THREE_ROWS.splitlines(True)[0] + THREE_ROWS.splitlines(True)[2])  # required claude_gpt missing
+        for text in bad:
+            with self.subTest(text=text), self.assertRaisesRegex(c.UsageError, "invalid_output"):
+                c.parse_usage(text)
+
+    def test_checker_rejects_unknown_group_and_bad_unrecognized_list(self):
+        base = {"collectedAt": c.utc(NOW), "groups": c.parse_usage(THREE_ROWS)}
+        data = json.loads(json.dumps(base))
+        data["groups"]["mystery"] = dict(data["groups"]["gemini"])
+        self.assertEqual(k.format_snapshot(data, NOW), "Gemini heti keret: ISMERETLEN (missing)")
+        for rows in ("x", [1], ["no separator"], ["A / B", "A / B"], ["$(x) / y"]):
+            with self.subTest(rows=rows):
+                data = json.loads(json.dumps(base))
+                data["unrecognizedRows"] = rows
+                self.assertEqual(k.format_snapshot(data, NOW), "Gemini heti keret: ISMERETLEN (missing)")
+        data = json.loads(json.dumps(base))
+        del data["groups"]["claude_gpt"]
+        self.assertEqual(k.format_snapshot(data, NOW), "Gemini heti keret: ISMERETLEN (missing)")
+
+
 if __name__ == "__main__":
     unittest.main()
