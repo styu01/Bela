@@ -189,10 +189,22 @@ def inspect_db(db_path, quick=False):
         return facts, findings
     db = None
     try:
-        # mode=ro: never creates the file, never writes; WAL readers do not
-        # block the dashboard's writer. No immutable=1: the live WAL must count.
-        db = sqlite3.connect(Path(db_path).as_uri() + "?mode=ro", uri=True,
-                             timeout=5, isolation_level=None)
+        # mode=ro: never creates the DB, never writes it; WAL readers do not
+        # block the dashboard's writer, and the live WAL must count, so no
+        # immutable=1 while the dashboard runs. But with no -shm and no WAL
+        # content (dashboard stopped, SQLite removed both on its last close) a
+        # plain mode=ro open of a WAL-mode DB CREATES empty -wal/-shm files next
+        # to it (PROGI 6582, measured). immutable=1 then reads the file as it is
+        # and creates nothing; a dashboard starting in that very moment can at
+        # worst cause a bogus finding, which the 2 s re-check resolves.
+        try:
+            wal_size = os.stat(db_path + "-wal").st_size
+        except FileNotFoundError:
+            wal_size = 0
+        quiet = wal_size == 0 and not os.path.lexists(db_path + "-shm")
+        facts["immutable"] = quiet
+        db = sqlite3.connect(Path(db_path).as_uri() + ("?mode=ro&immutable=1" if quiet else "?mode=ro"),
+                             uri=True, timeout=5, isolation_level=None)
         db.execute("PRAGMA query_only=ON")
         names = {r[0] for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -556,7 +568,10 @@ def alert_text(findings, db_path, rescue_result, pid, backups, ts, dashboard_see
                              "nem garantáltan egy pillanat állapota; a verified példány ellenőrzése a mérvadó, "
                              "friss kimentés: db-health.py --force-rescue.")
         else:
-            lines.append(f"Kimentés NEM sikerült ({rescue_result.get('reason', 'ismeretlen ok')}).")
+            lines.append(f"Kimentés NEM sikerült ({rescue_result.get('reason', 'ismeretlen ok')}); "
+                         "óránként újrapróbálom.")
+            if rescue_result.get("earlier_dir"):
+                lines.append(f"Korábbi kimentés ugyanerről a példányról: {rescue_result['earlier_dir']}")
     elif not dashboard_seen:
         lines.append("A dashboard folyamata nem fut vagy nem olvasható, nyitott példányból nincs mit kimenteni.")
     lines.append(f"Utolsó napi mentések: {backups}")
@@ -644,26 +659,30 @@ class Runner:
             repeat_due = (prev_rescue.get("key") != ghost_key
                           or ts - (prev_rescue.get("at") or 0) >= RESCUE_REPEAT_SECONDS
                           or not Path(prev_rescue.get("dir") or "/nonexistent").is_dir())
-            if self.args.force_rescue or (repeat_due and not self.args.dry_run):
+            if not self.args.dry_run and (self.args.force_rescue or repeat_due):
                 try:
                     rescue_result = rescue(self.store, pid, ghosts, fds, ts)
                 except OSError:
                     rescue_result = {"ok": False, "reason": "copy_failed"}
                 if rescue_result.get("dir"):
                     prev_rescue = {"key": ghost_key, "at": int(ts), "dir": rescue_result["dir"]}
+                elif prev_rescue.get("key") == ghost_key and prev_rescue.get("dir"):
+                    rescue_result["earlier_dir"] = prev_rescue["dir"]
             elif prev_rescue.get("key") == ghost_key:
                 rescue_result = {"dir": prev_rescue.get("dir"), "verified": {"integrity": "lásd MANIFEST.json"},
                                  "consistent_copy": True, "earlier": True}
 
         codes = sorted({c for c, _ in findings})
         fingerprint = ",".join(codes) + (f"|{ghost_key}" if ghost_key else "")
+        if rescue_result and not rescue_result.get("dir"):
+            fingerprint += f"|rescue_failed:{rescue_result.get('reason', 'unknown')}"
         prev_alert = state.get("alert") if isinstance(state.get("alert"), dict) else {}
         exit_code, delivered, delivery_codes = 0, None, []
 
         if findings:
             due = (prev_alert.get("fingerprint") != fingerprint
                    or ts - (prev_alert.get("sent_at") or 0) >= REMIND_SECONDS
-                   or rescue_result and not rescue_result.get("earlier"))
+                   or bool(rescue_result and rescue_result.get("dir") and not rescue_result.get("earlier")))
             if due and not self.args.dry_run:
                 text = alert_text(findings, self.db_path, rescue_result, pid,
                                   str(ROOT / "backups"), ts, fds is not None)
@@ -688,6 +707,7 @@ class Runner:
 
         entry = {"at": stamp(ts), "result": "ok" if not findings else "problem", "codes": codes,
                  "size": facts.get("size"), "check_ms": facts.get("check_ms"),
+                 "immutable": facts.get("immutable"),
                  "dashboard_pid": pid, "dashboard_fds_seen": fds is not None,
                  "dashboard_db_fds": sum(len(v) for v in fds.values()) if fds else 0}
         if rescue_result:
@@ -719,7 +739,8 @@ def parse_args(argv):
     p.add_argument("--dry-run", action="store_true",
                    help="print the result line; no state, no rescue, no alert")
     p.add_argument("--force-rescue", action="store_true",
-                   help="take a fresh rescue copy now if the dashboard holds a ghost DB")
+                   help="take a fresh rescue copy now if the dashboard holds a ghost DB "
+                        "(ignored with --dry-run, which never writes)")
     args = p.parse_args(argv)
     if args.chat_id and not re.fullmatch(r"-?[0-9]{1,20}", args.chat_id):
         p.error("invalid --chat-id")

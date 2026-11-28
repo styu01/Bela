@@ -19,14 +19,28 @@ Files:
 
 1. `store/claudeclaw.db` exists, is a regular file (not a symlink), is not 0 bytes,
    and did not shrink below half of the last healthy size.
-2. It opens read-only (`mode=ro`, connection closed right after the check, no
-   `immutable`, so the live WAL counts; WAL readers never block the dashboard).
+2. It opens read-only and closes the connection right after the check. While the
+   dashboard runs (a `-shm` or a non-empty `-wal` exists) the open is `mode=ro`, so
+   the live WAL counts and the dashboard's writer is never blocked. With the
+   dashboard stopped (no `-shm`, no WAL content) a plain `mode=ro` open of a
+   WAL-mode database would CREATE empty `-wal`/`-shm` files next to it (SQLite
+   behaviour, measured by PROGI 6582), so it opens `mode=ro&immutable=1` instead
+   and creates nothing. A dashboard starting in that very second can at worst
+   cause a bogus finding, which the 2 s re-check resolves. The only state in which
+   SQLite may still create a file is a `-wal` with content but no `-shm` (an
+   unclean stop): then the open is `mode=ro` and may create the `-shm`, as the
+   dashboard itself would. The run's log line says which mode was used
+   (`immutable`).
 3. `agent_messages`, `conversation_log`, `memories`, `kanban_cards` exist.
 4. `PRAGMA integrity_check` is `ok` (measured on the 61 MB live DB: 0.28 s, the
    whole run 0.41 s; `--quick` switches to `quick_check` for a much larger DB).
 5. The AUTOINCREMENT high-water marks in `sqlite_sequence` of `agent_messages`,
    `conversation_log`, `memories` did not go down (ordinary deletes never lower
-   them; a restore from an older copy does). No core table lost more than half of
+   them; an older copy put on the path with the dashboard STOPPED does). With the
+   dashboard RUNNING the read-only open still sees the dashboard's live WAL laid
+   over the older file, so the sequence may not drop; that case is caught by the
+   ghost check instead (the dashboard's open inode no longer matches the path),
+   so it is never silent (PROGI 6582, measured). No core table lost more than half of
    its rows (and at least 10). `kanban_cards` has a text key, so only the row
    count applies there.
 6. The fds of the dashboard `MainPID` (`<MAIN_AGENT_ID>-dashboard.service`) that
@@ -61,7 +75,8 @@ is consistent, the alert says so, and `consistent_copy=true` was never wrong.
 The live path is never written and the dashboard is never restarted: restoring
 is the main agent's decision. The same ghost is copied again at most every 6
 hours; `--force-rescue` takes a fresh copy on demand (e.g. right before a restore,
-to get the newest rows). A rescue is skipped with a `no_space` note when free
+to get the newest rows; it is ignored together with `--dry-run`, which never
+writes anything). A rescue is skipped with a `no_space` note when free
 space is below 3x the DB+WAL size plus 256 MB.
 
 ## Alerting
@@ -75,7 +90,10 @@ space is below 3x the DB+WAL size plus 256 MB.
   `MARVEEN_ALERT_CHAT_ID`, else `.env ALLOWED_CHAT_ID`, with the `.env` (or
   `~/.claude/channels/telegram/.env`) bot token.
 - The same problem is re-announced at most every 6 hours; a changed problem or a
-  fresh rescue is announced at once; one "back to normal" notice follows an
+  fresh successful rescue is announced at once. A failed rescue (`no_space`,
+  `copy_failed`) is retried every hour but re-announced only when its reason
+  changes, after 6 hours, or when a later attempt succeeds; the alert also names
+  an earlier successful rescue of the same ghost, if there is one; one "back to normal" notice follows an
   announced problem (with a warning when the problem was a drop event, which
   does not heal by itself).
 - No channel accepted it: exit 1 (unit `failed`), nothing is marked as sent, the

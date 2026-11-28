@@ -146,6 +146,22 @@ class HealthyAndPathChecks(Base):
         self.assertEqual(oct(os.stat(self.store / ".db-health-state.json").st_mode & 0o777), "0o600")
         self.assertEqual(oct(os.stat(self.store / "logs" / "db-health.log").st_mode & 0o777), "0o600")
 
+    def test_stopped_dashboard_db_gets_no_wal_or_shm_created(self):
+        make_db(self.db)          # WAL mode; the last close removed -wal/-shm
+        self.assertFalse(os.path.exists(self.db + "-wal") or os.path.exists(self.db + "-shm"))
+        self.assertEqual(self.run_once(), 0)
+        self.assertEqual(self.transport.sent, [])
+        self.assertFalse(os.path.exists(self.db + "-wal"), "check must not create -wal")
+        self.assertFalse(os.path.exists(self.db + "-shm"), "check must not create -shm")
+        self.assertTrue(self.state()["baseline"]["seq"]["agent_messages"] == 50)
+
+    def test_running_writer_wal_is_read_not_ignored(self):
+        make_db(self.db)
+        dash = self.start_dashboard(rows=30)    # 30 rows only in the live WAL
+        self.run_once()
+        self.assertEqual(self.state()["baseline"]["seq"]["agent_messages"], 80)
+        self.assertEqual(self.log_lines()[-1]["result"], "ok")
+
     def test_missing_db_alerts_main_agent(self):
         self.assertEqual(self.run_once(), 0)
         (kind, text), = self.transport.sent
@@ -484,6 +500,56 @@ class GhostRescue(Base):
         self.run_once(pid=dash.pid, dry_run=True)
         self.assertEqual(self.rescue_dirs(), [])
         self.assertEqual(self.transport.sent, [])
+
+    def test_dry_run_with_force_rescue_still_writes_nothing(self):
+        make_db(self.db)
+        dash = self.start_dashboard()
+        os.unlink(self.db)
+        before = sorted(os.listdir(self.store))
+        self.assertEqual(self.run_once(pid=dash.pid, dry_run=True, force_rescue=True), 0)
+        self.assertEqual(self.rescue_dirs(), [])
+        self.assertEqual(sorted(os.listdir(self.store)), before)
+        self.assertEqual(self.transport.sent, [])
+
+    def test_failed_rescue_is_not_reannounced_every_hour(self):
+        make_db(self.db)
+        dash = self.start_dashboard()
+        os.unlink(self.db)
+        real = dh.shutil.disk_usage
+        dh.shutil.disk_usage = lambda p: SimpleNamespace(free=1, total=1, used=0)
+        try:
+            self.run_once(pid=dash.pid)
+            self.assertIn("no_space", self.transport.sent[0][1])
+            for _ in range(5):
+                self.now += 3600
+                self.run_once(pid=dash.pid)
+                self.assertEqual(self.transport.sent, [], "same failed rescue: quiet within 6 h")
+            self.now += 3600
+            self.run_once(pid=dash.pid)
+            self.assertEqual(len(self.transport.sent), 1, "reminder after 6 h")
+        finally:
+            dh.shutil.disk_usage = real
+        self.now += 60
+        self.run_once(pid=dash.pid)            # space is back: the rescue works
+        self.assertEqual(len(self.rescue_dirs()), 1)
+        self.assertIn(str(self.rescue_dirs()[0]), self.transport.sent[0][1], "success announced at once")
+
+    def test_failed_repeat_rescue_points_at_the_earlier_one(self):
+        make_db(self.db)
+        dash = self.start_dashboard()
+        os.unlink(self.db)
+        self.run_once(pid=dash.pid)
+        first, = self.rescue_dirs()
+        self.now += 6 * 3600
+        real = dh.shutil.disk_usage
+        dh.shutil.disk_usage = lambda p: SimpleNamespace(free=1, total=1, used=0)
+        try:
+            self.run_once(pid=dash.pid)
+        finally:
+            dh.shutil.disk_usage = real
+        text = self.transport.sent[0][1]
+        self.assertIn("no_space", text)
+        self.assertIn(f"Korábbi kimentés ugyanerről a példányról: {first}", text)
 
     def test_dashboard_gone_with_missing_db_says_so(self):
         self.run_once(pid=999999999)
