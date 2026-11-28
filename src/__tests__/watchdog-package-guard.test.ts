@@ -129,11 +129,19 @@ describe('watchdog.sh: a package update in progress', () => {
 })
 
 // The sub-agent loop's order (source pins: the loop needs a live tmux to run, and must never be run by a test: its
-// own PATH export would reach the real systemctl and tmux). H1: after the spawn the guard is asked again and a refusal
-// withdraws the session.
-describe('watchdog.sh: the sub-agent loop order (KISPROGI 6464 H1)', () => {
+// own PATH export would reach the real systemctl and tmux). KISPROGI 6464 M3: the package guard after the bot-token
+// check. H1: after the spawn the guard is asked again and a refusal withdraws the session.
+describe('watchdog.sh: the sub-agent loop order (KISPROGI 6464 M3, H1)', () => {
   const sh = readFileSync(join(process.cwd(), 'scripts', 'watchdog.sh'), 'utf-8')
   const loop = sh.slice(sh.indexOf('for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do'))
+  it('the package guard runs after the bot-token skip, and before the spawn', () => {
+    const token = loop.indexOf('if [ -z "$BOT_TOKEN" ]; then')
+    const guard = loop.indexOf('PKG_REFUSAL="$(package_start_refusal "$AGENT_DIR" "$AGENT_ID" "$PACKAGE_HIDDEN_LIST")"')
+    const spawn = loop.indexOf('tmux new-session -d -s "$SESSION_NAME" "$CMD"')
+    expect(token).toBeGreaterThan(0)
+    expect(guard).toBeGreaterThan(token)
+    expect(spawn).toBeGreaterThan(guard)
+  })
   it('right after the spawn: the guard again, and a refusal kills the fresh session and skips the agent', () => {
     const spawn = loop.indexOf('tmux new-session -d -s "$SESSION_NAME" "$CMD"')
     const after = loop.slice(spawn).split('\n').slice(1).filter((l) => l.trim() !== '' && !l.trim().startsWith('#'))

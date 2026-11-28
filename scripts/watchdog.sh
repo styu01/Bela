@@ -420,12 +420,6 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
     fi
   fi
 
-  PKG_REFUSAL="$(package_start_refusal "$AGENT_DIR" "$AGENT_ID" "$PACKAGE_HIDDEN_LIST")"
-  if [ -n "$PKG_REFUSAL" ]; then
-    echo "$(timestamp) [watchdog] $AGENT_ID: not started: $PKG_REFUSAL" >> "$LOG"
-    continue
-  fi
-
   echo "$(timestamp) [watchdog] $AGENT_ID missing, restarting..." >> "$LOG"
 
   resolve_agent_provider "$AGENT_DIR"
@@ -436,6 +430,14 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
 
   if [ -z "$BOT_TOKEN" ]; then
     echo "$(timestamp) [watchdog] $AGENT_ID: no $AGENT_PROVIDER bot token, skipping" >> "$LOG"
+    continue
+  fi
+
+  # The package start guard, after the token check (KISPROGI 6464 M3): an agent with no token is skipped above anyway,
+  # so a package agent waiting for approval no longer costs a python3 run and a log line every tick for nothing.
+  PKG_REFUSAL="$(package_start_refusal "$AGENT_DIR" "$AGENT_ID" "$PACKAGE_HIDDEN_LIST")"
+  if [ -n "$PKG_REFUSAL" ]; then
+    echo "$(timestamp) [watchdog] $AGENT_ID: not started: $PKG_REFUSAL" >> "$LOG"
     continue
   fi
 
