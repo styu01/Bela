@@ -29,12 +29,19 @@ read the bfs way (a path anywhere, -f PATH, -rm; an unknown dash word near the s
 store folder as an operand counts as recursive (ugrep searches it without -r); the GNU tools by full path are covered
 by the same reading.
 
+The cwd is a set of places (KISPROGI 6524 P5): a cd adds its target and keeps the old place, since it may fail or sit
+in a branch, a function body, a background job or a case arm; only the commands joined to it by && run in the target
+alone. A path is checked under every place the command may be in, so "cd X; rm -rf store" from the install root is
+refused (if the cd fails it removes the live store) and "cd X && rm -rf store" passes. Heredocs and comments are found
+by one scan of the whole text with bash's quoting, arithmetic and expansion contexts (P2).
+
 Data positions pass, so a message or a note that QUOTES such a command is not a write: curl's -d/--data*/--json/
 -F/--form values (but not an @file value, which reads the file), echo/printf arguments and a heredoc fed to cat or
 tee, unless the same pipeline feeds an interpreter.
 
 A text brake, not an OS boundary (the same user can always build the name or the SQL at run time, e.g. from
-variables, base64 or string concatenation). It closes the direct and the accidental routes; the dashboard itself
+variables, base64 or string concatenation, a cd to a variable or through shopt -s cdable_vars, or output that a
+command other than echo / printf / cat <<< prints and transforms: rev, tr, sed). It closes the direct and the accidental routes; the dashboard itself
 writes these files as before. Known routes it does not close (KISPROGI 6483, 6490): a recursive search from the
 install root or above (grep -rn x . reads the store's hidden file; it cannot be told from everyday searches), a copy of
 the whole store folder read afterwards (cp -r store /tmp/s, then /tmp/s/.d*), a script or an SQL file written in one
@@ -172,6 +179,10 @@ _BIG_TEXT_STORE_RX = re.compile(r"\bstore\b|(?<![\w.])\.[\w.-]{0,40}[*?\[{]")
 def _resolve(path: str, cwd: str) -> str:
     """The real path; a relative path under an unknown cwd (a cd to a variable) resolves to a place that is never the
     store, so only a spelled-out name can still match there (the callers check the name for unknown places)."""
+    if re.match(r"~-(?:/|$)", path):
+        return UNKNOWN_CWD  # bash's ~- is the previous cwd (KISPROGI 6524 P5): not known here
+    if re.match(r"~\+(?:/|$)", path):
+        path = "." + path[2:]  # ~+ is the cwd itself
     p = os.path.expanduser(path)
     if not os.path.isabs(p):
         if cwd == UNKNOWN_CWD:
@@ -204,7 +215,7 @@ def _db_name_matches(base: str) -> bool:
 
 def _unknown_place(path: str) -> bool:
     """A variable, a substitution, or find's {} (the matched path, e.g. "{}/claudeclaw.db" under -exec or xargs -I{})."""
-    return bool(re.search(r"[$`]|__SUBST\d+__|\{\}", path))
+    return bool(re.search(r"[$`]|__SUBST\d+__|\{\}|^~-(?:/|$)", path))
 
 
 _BRACE_LIST_RX = re.compile(r"\{([^{}]*,[^{}]*)\}")
@@ -385,87 +396,204 @@ def _code_text_checks(text: str, where: str, cwd: str, depth: int) -> None:
 # Bash: heredocs and substitutions out first, then words, segments and pipelines
 # --------------------------------------------------------------------------------------------------------------
 
-# (?<!<) and (?!<): a here-string (<<< 'text') is not a heredoc. Read as one, its quoted text became a heredoc
-# delimiter with an empty body, so python3 <<< '...' and source /dev/stdin <<< '...' went unchecked (found 2026-11-28
-# while fixing KISPROGI 6505 L).
-_HEREDOC_RX = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z0-9_.\-]+))")
+# The heredoc operator and its delimiter word, matched at a "<<" the scanner has already found in shell code (so a
+# here-string's "<<<" never gets here).
+_HEREDOC_RX = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z0-9_.\-]+))")
+_ASSIGN_INDEX_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
+_CODE_CTX = ("top", "cs", "bq")  # shell code: a heredoc starts here (and a comment, except inside backticks)
 
 
-def _arith_spans(line: str):
-    """(start, end) of the arithmetic parts of a line: $((...)), ((...)) and $[...], where << is a shift, not a heredoc
-    (KISPROGI 6511 AR: "echo $((1<<2))" made "2" a heredoc delimiter and hid every following line from the gate)."""
-    spans, i, n = [], 0, len(line)
-    while i < n:
-        if line.startswith("$((", i) or line.startswith("((", i):
-            j = i + (3 if line[i] == "$" else 2)
-            depth = 2
-            while j < n and depth:
-                if line[j] == "(":
-                    depth += 1
-                elif line[j] == ")":
-                    depth -= 1
-                j += 1
-            spans.append((i, j))
-            i = j
-        elif line.startswith("$[", i):
-            j = line.find("]", i + 2)
-            j = n if j < 0 else j + 1
-            spans.append((i, j))
-            i = j
-        else:
-            i += 1
-    return spans
+def _assignment_index_end(cmd: str, i: int) -> int:
+    """For NAME[ at i: the index of its "[" when the word is an array assignment (NAME[...]= or NAME[...]+=), else -1.
+    bash reads the index as arithmetic there (a[1<<2]=x), but in any other word a << is a heredoc (echo a[1<<2])."""
+    m = _ASSIGN_INDEX_RX.match(cmd, i)
+    if not m:
+        return -1
+    j, depth = m.end(), 1
+    while j < len(cmd) and depth:
+        if cmd[j] == "[":
+            depth += 1
+        elif cmd[j] == "]":
+            depth -= 1
+        elif cmd[j] == "\n":
+            return -1
+        j += 1
+    return m.end() - 1 if depth == 0 and (cmd.startswith("=", j) or cmd.startswith("+=", j)) else -1
 
 
 def _strip_heredocs(cmd: str):
-    """Heredoc bodies out of the text: (text with a marker word per heredoc, {marker: body})."""
-    lines = cmd.split("\n")
-    out, bodies, i, n = [], {}, 0, 0
-    while i < len(lines):
-        line = lines[i]
-        pending = []
+    """Heredoc bodies and comments out of the text: (text with a marker word per heredoc, {marker: body}).
 
-        arith = _arith_spans(line) if "((" in line or "$[" in line else []
+    One left-to-right scan of the WHOLE text with bash's lexical contexts (KISPROGI 6524 P2): quotes ('...', "...",
+    $'...') carry across lines, a backslash escapes, and a << is a heredoc only in shell code: not after an escape
+    (echo \\<<2), not in a comment (true # <<2), not in arithmetic ($((...)), ((...)), $[...], also over several lines),
+    not in ${...} (${PATH:1<<2}) and not in an array assignment's index (a[1<<2]=x). Read as heredocs, each of these hid
+    every following line from the gate. A comment (a # starting a word in shell code, not inside backticks) is cut out
+    as bash does, so a quote inside it (# it's) can no longer swallow the following lines into one quoted word. The
+    bodies start after the next newline in shell code, one per pending heredoc, each up to its delimiter line."""
+    out, bodies, pending = [], {}, []
+    stack = [["top", 0]]
+    i, n, count, word_start = 0, len(cmd), 0, True
 
-        def repl(m):
-            nonlocal n
-            if _in_quotes(line, m.start()) or any(a <= m.start() < b for a, b in arith):
-                return m.group(0)
-            delim = m.group(2) if m.group(2) is not None else (m.group(3) if m.group(3) is not None else m.group(4))
-            marker = f"__HEREDOC{n}__"
-            n += 1
-            pending.append((marker, delim, m.group(1) == "-"))
-            return "<< " + marker
+    def push(kind: str, depth: int = 0) -> None:
+        stack.append([kind, depth])
 
-        new = _HEREDOC_RX.sub(repl, line) if "<<" in line else line
-        out.append(new)
-        i += 1
-        for marker, delim, strip_tabs in pending:
-            body = []
-            while i < len(lines):
-                cur = lines[i].lstrip("\t") if strip_tabs else lines[i]
-                i += 1
-                if cur == delim:
-                    break
-                body.append(lines[i - 1])
-            bodies[marker] = "\n".join(body)
-    return "\n".join(out), bodies
-
-
-def _in_quotes(line: str, pos: int) -> bool:
-    sq = dq = False
-    k = 0
-    while k < pos:
-        c = line[k]
-        if c == "\\" and not sq:
-            k += 2
+    while i < n:
+        kind = stack[-1][0]
+        c = cmd[i]
+        if c == "\n" and kind in _CODE_CTX:
+            out.append(c)
+            i += 1
+            word_start = True
+            for marker, delim, strip_tabs in pending:
+                body = []
+                while i < n:
+                    j = cmd.find("\n", i)
+                    j = n if j < 0 else j
+                    line = cmd[i:j]
+                    i = j + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delim:
+                        break
+                    body.append(line)
+                bodies[marker] = "\n".join(body)
+            pending = []
             continue
-        if c == "'" and not dq:
-            sq = not sq
-        elif c == '"' and not sq:
-            dq = not dq
-        k += 1
-    return sq or dq
+        if kind == "sq":
+            out.append(c)
+            i += 1
+            if c == "'":
+                stack.pop()
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(cmd[i:i + 2])
+            if cmd[i + 1] != "\n":
+                word_start = False
+            i += 2
+            continue
+        if kind == "ansi":
+            out.append(c)
+            i += 1
+            if c == "'":
+                stack.pop()
+            continue
+        if kind == "dq":
+            if c == '"':
+                stack.pop()
+                out.append(c)
+                i += 1
+                continue
+        elif kind in ("ar", "arb", "pe", "ix"):
+            opener, closer = {"ar": "()", "arb": "[]", "pe": "{}", "ix": "[]"}[kind]
+            if c == opener:
+                stack[-1][1] += 1
+            elif c == closer:
+                stack[-1][1] -= 1
+                if stack[-1][1] == 0:
+                    stack.pop()
+                    out.append(c)
+                    i += 1
+                    word_start = False
+                    continue
+            if kind == "pe" and c in "'\"":
+                push("sq" if c == "'" else "dq")
+                out.append(c)
+                i += 1
+                continue
+        else:  # shell code: top, cs (inside $( )), bq (inside backticks)
+            if c == "#" and word_start and kind != "bq":
+                j = cmd.find("\n", i)
+                i = n if j < 0 else j
+                continue
+            if c == "'":
+                push("sq")
+            elif c == '"':
+                push("dq")
+            elif c == "`" and kind == "bq":
+                stack.pop()
+                out.append(c)
+                i += 1
+                word_start = False
+                continue
+            elif cmd.startswith("<<", i):
+                if cmd.startswith("<<<", i):
+                    out.append("<<<")
+                    i += 3
+                    word_start = True
+                    continue
+                m = _HEREDOC_RX.match(cmd, i)
+                if m:
+                    delim = m.group(2) if m.group(2) is not None else (m.group(3) if m.group(3) is not None else m.group(4))
+                    marker = f"__HEREDOC{count}__"
+                    count += 1
+                    pending.append((marker, delim, m.group(1) == "-"))
+                    out.append("<< " + marker)
+                    i = m.end()
+                    word_start = False
+                    continue
+            elif cmd.startswith("((", i) and word_start:
+                push("ar", 2)
+                out.append("((")
+                i += 2
+                continue
+            elif word_start and _assignment_index_end(cmd, i) >= 0:
+                j = _assignment_index_end(cmd, i)
+                out.append(cmd[i:j + 1])
+                push("ix", 1)
+                i = j + 1
+                word_start = False
+                continue
+            elif kind == "cs" and c == "(":
+                stack[-1][1] += 1
+            elif kind == "cs" and c == ")":
+                stack[-1][1] -= 1
+                if stack[-1][1] == 0:
+                    stack.pop()
+                    out.append(c)
+                    i += 1
+                    word_start = False
+                    continue
+        # the $ forms open a context wherever they stand (shell code, "...", arithmetic, ${...}, an index)
+        if c == "$" and kind not in ("sq", "ansi"):
+            if cmd.startswith("$((", i):
+                push("ar", 2)
+                out.append("$((")
+                i += 3
+                continue
+            if cmd.startswith("$(", i):
+                push("cs", 1)
+                out.append("$(")
+                i += 2
+                word_start = True
+                continue
+            if cmd.startswith("${", i):
+                push("pe", 1)
+                out.append("${")
+                i += 2
+                continue
+            if cmd.startswith("$[", i):
+                push("arb", 1)
+                out.append("$[")
+                i += 2
+                continue
+            if kind in _CODE_CTX and cmd.startswith("$'", i):
+                push("ansi")
+                out.append("$'")
+                i += 2
+                word_start = False
+                continue
+        if c == "`" and kind != "bq":
+            push("bq")
+            out.append(c)
+            i += 1
+            word_start = True
+            continue
+        out.append(c)
+        i += 1
+        if kind in _CODE_CTX:
+            word_start = c in " \t\r;&|()<>"
+    for marker, _delim, _strip in pending:
+        bodies[marker] = ""
+    return "".join(out), bodies
 
 
 def _strip_substitutions(cmd: str):
@@ -519,39 +647,38 @@ _ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n"
 
 
 def _ansi_c_decode(body: str) -> str:
-    """The text of bash's $'...' quoting: \\n \\t ... \\xHH \\NNN (octal) \\uHHHH \\UHHHHHHHH \\cX \\' \\\\."""
+    """The text of bash's $'...' quoting: \\n \\t ... \\xHH \\NNN (octal) \\uHHHH \\UHHHHHHHH \\cX \\' \\\\. A NUL ends
+    it: bash drops the rest of the $'...' part (KISPROGI 6524 V3, measured: $'ab\\0cd'ef is abef), so
+    rm $'store/claudeclaw.db\\0x' removes the DB file; \\0, \\x00, \\c@, \\u0000, \\U00000000 and \\000 all count."""
     out, i, n = [], 0, len(body)
     while i < n:
         c = body[i]
         if c != "\\" or i + 1 >= n:
-            out.append(c)
-            i += 1
-            continue
-        e = body[i + 1]
-        if e in _ANSI_C_SIMPLE:
-            out.append(_ANSI_C_SIMPLE[e])
-            i += 2
-        elif e in "01234567":
-            m = re.match(r"[0-7]{1,3}", body[i + 1:])
-            out.append(chr(int(m.group(0), 8) & 0xFF))
-            i += 1 + len(m.group(0))
-        elif e in "xuU":
-            m = re.match(r"[0-9A-Fa-f]{1,%d}" % {"x": 2, "u": 4, "U": 8}[e], body[i + 2:])
-            if m:
-                try:
-                    out.append(chr(int(m.group(0), 16)))
-                except ValueError:
-                    out.append("?")
-                i += 2 + len(m.group(0))
-            else:
-                out.append(body[i:i + 2])
-                i += 2
-        elif e == "c" and i + 2 < n:
-            out.append(chr(ord(body[i + 2]) & 0x1F))
-            i += 3
+            ch, i = c, i + 1
         else:
-            out.append(body[i:i + 2])
-            i += 2
+            e = body[i + 1]
+            if e in _ANSI_C_SIMPLE:
+                ch, i = _ANSI_C_SIMPLE[e], i + 2
+            elif e in "01234567":
+                m = re.match(r"[0-7]{1,3}", body[i + 1:])
+                ch, i = chr(int(m.group(0), 8) & 0xFF), i + 1 + len(m.group(0))
+            elif e in "xuU":
+                m = re.match(r"[0-9A-Fa-f]{1,%d}" % {"x": 2, "u": 4, "U": 8}[e], body[i + 2:])
+                if m:
+                    try:
+                        ch = chr(int(m.group(0), 16))
+                    except ValueError:
+                        ch = "?"
+                    i += 2 + len(m.group(0))
+                else:
+                    ch, i = body[i:i + 2], i + 2
+            elif e == "c" and i + 2 < n:
+                ch, i = chr(ord(body[i + 2]) & 0x1F), i + 3
+            else:
+                ch, i = body[i:i + 2], i + 2
+        if ch == "\0":
+            break
+        out.append(ch)
     return "".join(out)
 
 
@@ -669,32 +796,96 @@ def _split_ops(tok: str):
 SUBSHELL_OPEN, SUBSHELL_CLOSE = QOP + "subshell(", QOP + "subshell)"
 
 
+_CMD_PREFIX_WORDS = {"then", "do", "else", "elif", "if", "while", "until", "{", "!", "time"}
+
+
 def _pipelines(toks):
-    """[[simple command tokens, ...] per pipeline]."""
-    pipes, cur, cmd, last = [], [], [], None
-    for t in toks:
+    """([[simple command tokens, ...] per pipeline], [the separator that ends each one]). A subshell's ( and ) are
+    pipelines of their own (a ")" gets the separator after it). KISPROGI 6524 V2:
+    a function head (NAME ( ), function NAME [( )]) is no subshell, and a case pattern is no command: its ) closes
+    the pattern, not a subshell ((case a in a) cd /tmp;; esac) closed the subshell early), and ;; ;& ;;& end an arm."""
+    pipes, ends, cur, cmd, last = [], [], [], [], None
+    case = []  # per open case: "header" (up to "in"), "pattern" (up to its ")"), "body" (up to ;; / ;& / ;;& / esac)
+    fn_name = False  # "function NAME" seen: a "( )" right after it is part of the head
+    i, n = 0, len(toks)
+
+    def end_command(sep=None):
+        nonlocal cur, cmd
+        if cmd:
+            cur.append(cmd)
+        if cur:
+            pipes.append(cur)
+            ends.append(sep)
+        elif sep is not None and pipes and pipes[-1] == [[SUBSHELL_CLOSE]] and ends[-1] is None:
+            ends[-1] = sep  # "( ... ) && next"
+        cur, cmd = [], []
+
+    def command_position() -> bool:
+        return all(w in _CMD_PREFIX_WORDS for w in cmd)
+
+    while i < n:
+        t = toks[i]
+        nxt = toks[i + 1] if i + 1 < n else None
+        i += 1
         if t == "\n" and last in ("|", "|&", "&&", "||"):
             continue  # a line ending in | && || goes on in the next line
+        if case and case[-1] == "pattern":
+            last = t
+            if t == "esac":
+                case.pop()
+            elif t == ")":
+                case[-1] = "body"
+            continue  # pattern words, its "(" and "|", newlines: not commands
+        if case and case[-1] == "header":
+            last = t
+            if t == "in" and len(cmd) >= 2:
+                end_command()
+                case[-1] = "pattern"
+            elif t != "\n":
+                cmd.append(t)
+            continue
+        if t == "case" and command_position():
+            cmd.append(t)
+            case.append("header")
+            last = t
+            continue
+        if case and t == "esac" and command_position():
+            end_command(";")
+            case.pop()
+            last = t
+            continue
+        if case and t in (";;", ";") and (t == ";;" or nxt == "&"):
+            end_command(";")
+            if nxt == "&":
+                i += 1
+            case[-1] = "pattern"
+            last = t
+            continue
+        if t == "(" and nxt == ")" and (fn_name or (len(cmd) == 1 and re.fullmatch(r"[^\s=$`'\"/]+", cmd[0]) and not cur)):
+            cmd, fn_name = [], False  # a function head: NAME ( )
+            i += 1
+            last = ")"
+            continue
+        if cmd == ["function"] and t not in SEPARATORS and t not in PIPES:
+            cmd, fn_name = [], True  # function NAME: the body follows
+            last = t
+            continue
+        if t != "\n":
+            fn_name = False
         last = t
         if t in SEPARATORS:
-            if cmd:
-                cur.append(cmd)
-            if cur:
-                pipes.append(cur)
-            cur, cmd = [], []
+            end_command(t if t not in ("(", ")") else ";")
             if t in ("(", ")"):
                 pipes.append([[SUBSHELL_OPEN if t == "(" else SUBSHELL_CLOSE]])
+                ends.append(None)
         elif t in PIPES:
             if cmd:
                 cur.append(cmd)
             cmd = []
         else:
             cmd.append(t)
-    if cmd:
-        cur.append(cmd)
-    if cur:
-        pipes.append(cur)
-    return pipes
+    end_command()
+    return pipes, ends
 
 
 def _split_command(toks):
@@ -768,56 +959,10 @@ def _curl_data_positions(args):
 
 
 def _search_pattern_positions(head: str, args, skip_values: bool = True):
-    """Indexes of a search command's PATTERN arguments (a search string is data, not a file): the values of
-    -e/--regexp, ugrep's --and/--andnot/--not (and git's -S/-G), else the first positional. The file operands stay
-    checked. skip_values: an option's value (-d rec, -m 5, -A 3, a short group ending in one: -sd rec) is not the
-    pattern (KISPROGI 6505). The protected-name exemption uses only the words that are a pattern in BOTH readings, with
-    and without the skipping (KISPROGI 6511 R1: a wrong value table must not turn a file operand into a pattern)."""
-    pats, k, first_pos, explicit = set(), 0, None, False
-    positional_pattern = head != "git"
-    if head == "git":
-        if not args or args[0] not in ("grep", "log"):
-            return set()
-        positional_pattern = args[0] == "grep"
-        offset, args = 1, args[1:]
-    else:
-        offset = 0
-    grep = head in _GREP_HEADS
-    while k < len(args):
-        a = args[k]
-        if grep and a in ("--and", "--andnot", "--not") and k + 1 < len(args) and args[k + 1] != "-e":
-            pats.add(k + 1 + offset)  # ugrep: --and [-e] PATTERN
-            explicit = True
-            k += 2
-            continue
-        if a in ("-e", "--regexp", "-S", "-G") and k + 1 < len(args):
-            pats.add(k + 1 + offset)
-            explicit = True
-            k += 2
-            continue
-        if re.fullmatch(r"-[eSG].+|--regexp=.+", a):
-            pats.add(k + offset)
-            explicit = True
-        elif a in ("-f", "--file"):
-            explicit = True
-            k += 2
-            continue
-        elif skip_values and head != "git" and (_gnu_grep_long(a) if grep else a) in (
-                _GREP_VALUE_OPTS if grep else _RG_VALUE_OPTS):
-            k += 2
-            continue
-        elif skip_values and head != "git" and re.fullmatch(r"-[A-Za-z0-9]+", a):
-            letters = _GREP_VALUE_LETTERS if grep else _RG_VALUE_LETTERS
-            hit = next((n for n, ch in enumerate(a[1:], 1) if ch in letters), None)
-            if hit is not None and hit == len(a) - 1:
-                k += 2  # a short group ending in a value letter: the next word is its value (-sd rec)
-                continue
-        elif not a.startswith("-") and first_pos is None:
-            first_pos = k
-        k += 1
-    if not explicit and first_pos is not None and positional_pattern:
-        pats.add(first_pos + offset)
-    return pats
+    """Indexes of a search command's PATTERN arguments (a search string is data, not a file), read by the one
+    normalizer _search_walk. The protected-name exemption uses only the words that are a pattern in BOTH readings, with
+    and without the value skipping (KISPROGI 6511 R1: a wrong value table must not turn a file operand into a pattern)."""
+    return _search_walk(head, args, skip_values)["pats"]
 
 
 def _destinations(head: str, args):
@@ -1160,212 +1305,494 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
     text = _decode_dollar_quotes(text)
     text, subs = _strip_substitutions(text)
     sub_text = {f"__SUBST{k}__": sub for k, sub in enumerate(subs)}
-    for s in subs:
-        # a substitution is shell that runs: parsed as such (its data positions stay data)
-        if depth < 4:
-            check_bash(s, cwd, depth + 1, best_effort)
-        elif _unparsable_hits(s):
-            _deny("tul mely parancs-behelyettesites a vedett nevekkel (fail-closed)")
     try:
-        toks = _tokens(text)
+        pipes, ends = _pipelines(_tokens(text))
     except ValueError:
+        pipes = ends = None
+    # KISPROGI 6524 V2/P5: the cwd is a SET of places a command may run in. A cd adds its target and does not drop the
+    # old place (it may fail: a missing folder; it may sit in a branch, a function body, a background job or a case
+    # arm); only the commands joined to it by && run in the target alone (they run only if it succeeded). cd - / ~- /
+    # popd add an unknown place, and every path is checked under every candidate. A subshell's own cds end with it.
+    sets, every = [], {cwd: None}
+    if pipes is not None:
+        cur, base, stack = [cwd], [cwd], []
+        for pl, end in zip(pipes, ends):
+            if pl == [[SUBSHELL_OPEN]]:
+                stack.append((cur, base))
+                base = cur
+                sets.append(None)
+                continue
+            if pl == [[SUBSHELL_CLOSE]]:
+                cur, base = stack.pop() if stack else (cur, base)
+                if end != "&&":
+                    cur = base
+                sets.append(None)
+                continue
+            sets.append(cur)
+            targets = None
+            if len(pl) == 1:
+                head, args = _split_command(pl[0])[:2]
+                if head in ("cd", "pushd", "popd"):
+                    targets = _cd_targets(cur, head, args, cmd)
+                    every.update(dict.fromkeys(targets))
+            if targets is not None and end == "&&" and pl[0][:1] != ["!"]:
+                cur, base = targets, list(dict.fromkeys(base + targets))
+            elif targets is not None:
+                base = list(dict.fromkeys(base + targets))
+                cur = base
+            elif end != "&&":
+                cur = base
+    for s_ in subs:
+        # a substitution is shell that runs, in any place the command may be by then (its data positions stay data)
+        for c in every:
+            if depth < 4:
+                check_bash(s_, c, depth + 1, best_effort)
+            elif _unparsable_hits(s_):
+                _deny("tul mely parancs-behelyettesites a vedett nevekkel (fail-closed)")
+    if pipes is None:
         if not best_effort and _unparsable_hits(cmd):
             _deny("nem elemezheto parancs a vedett nevekkel (fail-closed)")
         return
-    cwd_stack = []
-    for pipeline in _pipelines(toks):
-        # a cd inside ( ... ) is a subshell's own: the cwd comes back after it ("(cd /tmp)" then rm store/...)
-        if pipeline == [[SUBSHELL_OPEN]]:
-            cwd_stack.append(cwd)
+    for pipeline, cands in zip(pipes, sets):
+        if cands is None:
             continue
-        if pipeline == [[SUBSHELL_CLOSE]]:
-            cwd = cwd_stack.pop() if cwd_stack else cwd
+        for c in cands:
+            try:
+                _check_pipeline(pipeline, c, depth, bodies, sub_text)
+            except Deny as d:
+                if len(cands) > 1 and c != cands[-1] and c != UNKNOWN_CWD and "cd MAPPA &&" not in str(d):
+                    raise Deny(f"{d}; ha egy korabbi cd nem sikerul, ez a(z) {c} mappaban futna (cd MAPPA && PARANCS "
+                               "alakban csak a cd celjaban fut)") from None
+                raise
+
+
+_CDPATH_RX = re.compile(r"\bCDPATH=(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|()<>]*))")
+
+
+def _cd_targets(cur, head: str, args, cmd: str):
+    """Where a cd / pushd / popd goes when it succeeds, from each cwd candidate (KISPROGI 6524 P5). cd -, ~-, popd,
+    pushd with no folder or +N/-N, and a variable target go to an unknown place. A relative target is also looked up
+    in CDPATH (the hook's own and any CDPATH= the command sets; a variable in it is an unknown place)."""
+    if head == "popd":
+        return [UNKNOWN_CWD]
+    words = [_unmark(a) for a in args]
+    k = 0
+    while k < len(words) and re.fullmatch(r"-[LPe@]+", words[k]):
+        k += 1
+    if k < len(words) and words[k] == "--":
+        k += 1
+    target = words[k] if k < len(words) else ("" if head == "pushd" else "~")
+    if not target or target == "-" or re.fullmatch(r"[+-]\d+", target) or _unknown_place(target) \
+            or (target.startswith("~") and re.match(r"~[-+]\d*(?:/|$)", target)):
+        return [UNKNOWN_CWD]
+    out = {}
+    for c in cur:
+        if c == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(target)):
+            out[UNKNOWN_CWD] = None
+        else:
+            out[_resolve(target, c)] = None
+    if not os.path.isabs(os.path.expanduser(target)) and not re.match(r"\.\.?(?:/|$)", target):
+        cdpaths = [os.environ.get("CDPATH", "")] + [next(g for g in m.groups() if g is not None)
+                                                     for m in _CDPATH_RX.finditer(cmd)]
+        for entry in (e for v in cdpaths for e in v.split(":") if e):
+            if _unknown_place(entry):
+                out[UNKNOWN_CWD] = None
+            else:
+                for c in cur:
+                    out[_resolve(os.path.join(entry, target), c)] = None
+    return list(out)
+
+
+def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
+    """One pipeline under one cwd candidate: every rule on every member."""
+    feeds_interpreter = False
+    parsed = [_split_command(c) for c in pipeline]
+    heads = [p[0] for p in parsed]
+    for idx, (head, args, redirs, herestr, heredocs, assigns) in enumerate(parsed):
+        is_interp = head in INTERPRETERS or re.fullmatch(r"python\d[\d.]*|pypy\d*|node\d*|perl\d[\d.]*|ruby\d[\d.]*|php\d[\d.]*", head or "")
+        later_interp = any(h in INTERPRETERS or re.fullmatch(r"python\d[\d.]*", h or "") for h in heads[idx + 1:])
+        feeds_interpreter = feeds_interpreter or bool(is_interp)
+        # values of assignments are data unless something runs them; a protected name there is still refused
+        for v in assigns:
+            if _is_live_totp_word(v, cwd):
+                _deny("a masodik faktor taranak neve egy valtozoban")
+        # redirection targets: any protected file is a write/read of it
+        for op, target in redirs:
+            if _is_live_totp_word(target, cwd):
+                _deny("atiranyitas a masodik faktor tarara")
+            if (">" in op) and _is_live_db_path(target, cwd):
+                _deny("atiranyitas a dashboard adatbazis-fajljara")
+        # heredoc bodies and here-strings: code when an interpreter reads them (directly or down the pipe)
+        for m in heredocs:
+            body = bodies.get(m, "")
+            if is_interp or (head in STDIN_TO_FILE_HEADS and later_interp):
+                _code_text_checks(body, "heredoc", cwd, depth)
+        for h in herestr:
+            if is_interp or later_interp:
+                _code_text_checks(h, "here-string", cwd, depth)
+            elif _is_live_totp_word(h, cwd):
+                _deny("a masodik faktor taranak neve")
+        if not head:
             continue
-        feeds_interpreter = False
-        parsed = [_split_command(c) for c in pipeline]
-        heads = [p[0] for p in parsed]
-        for idx, (head, args, redirs, herestr, heredocs, assigns) in enumerate(parsed):
-            is_interp = head in INTERPRETERS or re.fullmatch(r"python\d[\d.]*|pypy\d*|node\d*|perl\d[\d.]*|ruby\d[\d.]*|php\d[\d.]*", head or "")
-            later_interp = any(h in INTERPRETERS or re.fullmatch(r"python\d[\d.]*", h or "") for h in heads[idx + 1:])
-            feeds_interpreter = feeds_interpreter or bool(is_interp)
-            # values of assignments are data unless something runs them; a protected name there is still refused
-            for v in assigns:
-                if _is_live_totp_word(v, cwd):
-                    _deny("a masodik faktor taranak neve egy valtozoban")
-            # redirection targets: any protected file is a write/read of it
-            for op, target in redirs:
-                if _is_live_totp_word(target, cwd):
-                    _deny("atiranyitas a masodik faktor tarara")
-                if (">" in op) and _is_live_db_path(target, cwd):
-                    _deny("atiranyitas a dashboard adatbazis-fajljara")
-            # heredoc bodies and here-strings: code when an interpreter reads them (directly or down the pipe)
-            for m in heredocs:
-                body = bodies.get(m, "")
-                if is_interp or (head in STDIN_TO_FILE_HEADS and later_interp):
-                    _code_text_checks(body, "heredoc", cwd, depth)
+        # KISPROGI 6511 HS3: a code reader (a shell, an interpreter, eval, trap, source) that gets a substitution's
+        # output as its script, its stdin (< <(...), <<< "$(...)"), its -c text or an eval word runs that output as
+        # code: the same as CMD | sh (bash <(echo rm ...), eval "$(echo rm ...)", sh -c "$(echo rm ...)"). KISPROGI
+        # 6524 P4: any command before an interpreter in the pipeline that reads a substitution's output (as a file
+        # operand or its stdin) passes it on, as cat does (tac <(echo rm ...) | sh, head <(...) | sh).
+        later_heads = [h for h in heads[idx + 1:] if h in INTERPRETERS or re.fullmatch(r"python\d[\d.]*", h or "")]
+        if (is_interp or head in ("eval", "trap", "source", ".") or later_heads) and depth < 4:
+            sink = later_heads[0] if not is_interp and later_heads else head
+            sink = "sh" if sink in _SHELLS or sink in ("eval", "trap", "source", ".") else sink
+            places = list(args) + [t for op, t in redirs if "<" in op and ">" not in op] + list(herestr)
+            for w in places:
+                for mk in re.findall(r"__SUBST\d+__", w):
+                    if mk in sub_text:
+                        check_bash(sub_text[mk] + " | " + sink, cwd, depth + 1)
+        if depth < 4:
+            _check_substituted_words(pipeline[idx], head, cwd, depth, sub_text)
+        # KISPROGI 6511 (7), 6524 P4: xargs appends what it reads to its command: a here-string or a heredoc of its
+        # own, what an echo/printf (or a cat-like command's here-string, heredoc or substitution) before it in the
+        # pipeline prints, and a substitution it reads through "<" or -a / --arg-file ("xargs rm <<< store/...",
+        # "cat <<< store/... | xargs rm", "xargs rm < <(echo store/...)", "xargs -a <(echo store/...) rm").
+        if depth < 4 and _starts_with_xargs(pipeline[idx]):
+            extra = []
             for h in herestr:
-                if is_interp or later_interp:
-                    _code_text_checks(h, "here-string", cwd, depth)
-                elif _is_live_totp_word(h, cwd):
-                    _deny("a masodik faktor taranak neve")
-            if not head:
-                continue
-            # KISPROGI 6511 HS3: a code reader (a shell, an interpreter, eval, trap, source) that gets a substitution's
-            # output as its script, its stdin (< <(...), <<< "$(...)"), its -c text or an eval word runs that output as
-            # code: the same as CMD | sh (bash <(echo rm ...), eval "$(echo rm ...)", sh -c "$(echo rm ...)").
-            later_heads = [h for h in heads[idx + 1:] if h in INTERPRETERS or re.fullmatch(r"python\d[\d.]*", h or "")]
-            if (is_interp or head in ("eval", "trap", "source", ".") or (head in STDIN_TO_FILE_HEADS and later_heads)) \
-                    and depth < 4:
-                # (cat <(echo rm ...) | sh: cat passes the output on to the interpreter down the pipe)
-                sink = later_heads[0] if not is_interp and head in STDIN_TO_FILE_HEADS else head
-                sink = "sh" if sink in _SHELLS or sink in ("eval", "trap", "source", ".") else sink
-                places = list(args) + [t for op, t in redirs if "<" in op and ">" not in op] + list(herestr)
-                for w in places:
-                    for mk in re.findall(r"__SUBST\d+__", w):
-                        if mk in sub_text:
-                            check_bash(sub_text[mk] + " | " + sink, cwd, depth + 1)
-            # KISPROGI 6511 (7): xargs appends what it reads to its command: a here-string, or an echo/printf before it
-            # in the pipeline ("xargs rm <<< store/claudeclaw.db", "echo store/claudeclaw.db | xargs rm")
-            if depth < 4 and _starts_with_xargs(pipeline[idx]):
-                extra = []
-                for h in herestr:
-                    try:
-                        extra += shlex.split(h)
-                    except ValueError:
-                        extra += h.split()
-                if idx > 0 and parsed[idx - 1][0] in DATA_ONLY_HEADS:
-                    for line in _printed_text(parsed[idx - 1][0], parsed[idx - 1][1]):
+                try:
+                    extra += shlex.split(h)
+                except ValueError:
+                    extra += h.split()
+            for m in heredocs:
+                extra += bodies.get(m, "").split()
+            own, rest = _xargs_input_substitutions(pipeline[idx])
+            for mk in own:
+                if mk in sub_text:
+                    check_bash(sub_text[mk] + " | " + _join_tokens(rest), cwd, depth + 1)
+            if idx > 0:
+                ph, pargs, predirs, pherestr, pheredocs, _ = parsed[idx - 1]
+                if ph in DATA_ONLY_HEADS:
+                    for line in _printed_text(ph, pargs):
                         extra += line.split()
-                if extra:
-                    check_bash(shlex.join([head] + [_unmark(a) for a in args] + extra), cwd, depth + 1)
-            if head in ("cd", "pushd") and len(pipeline) == 1:
-                target = next((a for a in args if not a.startswith("-")), os.path.expanduser("~"))
-                cwd = UNKNOWN_CWD if (_unknown_place(target) or target == "-" or cwd == UNKNOWN_CWD and not os.path.isabs(target)) \
-                    else _resolve(target, cwd)
-                continue
-            if head in ("eval", "trap"):
-                # KISPROGI 6497 M2: eval joins its words with spaces and runs the result as shell again, so a quoted ';'
-                # among them is a separator there ("eval echo x ';' rm store/claudeclaw.db"); bash's eval drops a
-                # leading "--" (KISPROGI 6505 M1). trap runs its first argument as shell when the signal comes (EXIT,
-                # ERR: KISPROGI 6505 L): "trap 'rm store/claudeclaw.db' EXIT".
-                words = [_unmark(a) for a in args]
-                if head == "trap":
-                    words = [w for w in words if not re.fullmatch(r"-[lpP]+", w)]
-                    if words[:1] == ["--"]:
-                        words = words[1:]
-                    words = words[:1] if len(words) >= 2 else []
-                elif words[:1] == ["--"]:
+                elif ph in _PASS_THROUGH_HEADS:
+                    for h in pherestr:
+                        extra += h.split()
+                    for m in pheredocs:
+                        extra += bodies.get(m, "").split()
+                    for w in list(pargs) + [t for op, t in predirs if "<" in op and ">" not in op]:
+                        for mk in re.findall(r"__SUBST\d+__", w):
+                            if mk in sub_text:
+                                check_bash(sub_text[mk] + " | " + _join_tokens(pipeline[idx]), cwd, depth + 1)
+            if extra:
+                check_bash(shlex.join([head] + [_unmark(a) for a in args] + extra), cwd, depth + 1)
+        if head in ("cd", "pushd", "popd") and len(pipeline) == 1:
+            continue  # the cwd candidates were worked out before (check_bash)
+        if head in ("eval", "trap"):
+            # KISPROGI 6497 M2: eval joins its words with spaces and runs the result as shell again, so a quoted ';'
+            # among them is a separator there ("eval echo x ';' rm store/claudeclaw.db"); bash's eval drops a
+            # leading "--" (KISPROGI 6505 M1). trap runs its first argument as shell when the signal comes (EXIT,
+            # ERR: KISPROGI 6505 L): "trap 'rm store/claudeclaw.db' EXIT".
+            words = [_unmark(a) for a in args]
+            if head == "trap":
+                words = [w for w in words if not re.fullmatch(r"-[lpP]+", w)]
+                if words[:1] == ["--"]:
                     words = words[1:]
-                joined = " ".join(words)
-                if joined.strip():
-                    _code_text_checks(joined, head, cwd, depth)
-                    if depth < 4:
-                        check_bash(joined, cwd, depth + 1)
+                words = words[:1] if len(words) >= 2 else []
+            elif words[:1] == ["--"]:
+                words = words[1:]
+            joined = " ".join(words)
+            if joined.strip():
+                _code_text_checks(joined, head, cwd, depth)
+                if depth < 4:
+                    check_bash(joined, cwd, depth + 1)
+            continue
+        if is_interp:
+            for a in (_unmark(a) for a in args):
+                if _totp_word(a):
+                    _deny("a masodik faktor tara egy ertelmezo argumentumaban")
+                _code_text_checks(a, f"{head} argumentum", cwd, depth)
+            continue
+        if head in DATA_ONLY_HEADS:
+            if later_interp:
+                for a in args:
+                    _code_text_checks(a, f"{head} -> ertelmezo", cwd, depth)
+                # what echo / printf actually prints is one line of code ("echo -n rm store/... | sh",
+                # "printf '%s ' rm store/... | sh"; KISPROGI 6505, 6511)
+                for line in _printed_text(head, args):
+                    _code_text_checks(line, f"{head} -> ertelmezo", cwd, depth)
+            continue
+        data_pos = _curl_data_positions(args) if head in ("curl", "wget", "http", "https", "xh") else set()
+        search_pats = set()
+        if head in SEARCH_HEADS or head == "git":
+            search_pats = _search_pattern_positions(head, args)
+            data_pos |= search_pats & _search_pattern_positions(head, args, skip_values=False)
+        for k, a in enumerate(args):
+            if k in data_pos or head in METADATA_HEADS:
                 continue
-            if is_interp:
-                for a in (_unmark(a) for a in args):
-                    if _totp_word(a):
-                        _deny("a masodik faktor tara egy ertelmezo argumentumaban")
-                    _code_text_checks(a, f"{head} argumentum", cwd, depth)
-                continue
-            if head in DATA_ONLY_HEADS:
-                if later_interp:
-                    for a in args:
-                        _code_text_checks(a, f"{head} -> ertelmezo", cwd, depth)
-                    # what echo / printf actually prints is one line of code ("echo -n rm store/... | sh",
-                    # "printf '%s ' rm store/... | sh"; KISPROGI 6505, 6511)
-                    for line in _printed_text(head, args):
-                        _code_text_checks(line, f"{head} -> ertelmezo", cwd, depth)
-                continue
-            data_pos = _curl_data_positions(args) if head in ("curl", "wget", "http", "https", "xh") else set()
-            search_pats = set()
-            if head in SEARCH_HEADS or head == "git":
-                search_pats = _search_pattern_positions(head, args)
-                data_pos |= search_pats & _search_pattern_positions(head, args, skip_values=False)
-            for k, a in enumerate(args):
-                if k in data_pos or head in METADATA_HEADS:
-                    continue
-                for piece in [a] + ([a.split("=", 1)[1]] if "=" in a else []):
-                    if _is_live_totp_word(piece, cwd):
-                        _deny(f"a masodik faktor tara a(z) {head} parancsban")
-            if head in FILE_OP_HEADS and any("{" in a for a in args):
-                # bash expands a brace list into separate words before the command sees them (mv {store,/tmp/s})
-                args = [v for a in args for v in (_brace_variants(a) if "{" in a else [a])]
-            for d in _destinations(head, args):
-                if _is_live_db_path(d, cwd):
-                    _deny(f"a dashboard adatbazis-fajlja a(z) {head} celjakent")
-            pos_args = [a for a in args if not a.startswith("-")]
-            gone = []
-            if head in ("rm", "shred", "srm", "trash", "trash-put", "unlink"):
-                gone = pos_args
-            elif head == "mv":
-                gone = pos_args[:-1]  # the store (or a folder holding it) moved away; moving INTO the root is fine
-            elif head == "rsync" and any(a.startswith("--delete") for a in args):
-                gone = pos_args[-1:]
-            for d in gone:
-                if _is_store_or_ancestor(d, cwd):
-                    _deny(f"a store mappa (benne a dashboard adatbazisaval) a(z) {head} celjakent")
-            # cp/install/rsync/mv INTO the live store folder: a source named like the DB lands on the live DB
-            if head in ("cp", "install", "rsync", "scp", "mv", "ln", "ditto"):
-                pos = [a for a in args if not a.startswith("-")]
-                tdirs = [d for d in _destinations(head, args) if not _db_name_matches(os.path.basename(d.rstrip("/")))]
-                if len(pos) >= 2 and any(_resolve(t, cwd) == os.path.realpath(STORE) for t in tdirs):
-                    if any(_db_name_matches(os.path.basename(src.rstrip("/"))) for src in pos[:-1]):
-                        _deny(f"a dashboard adatbazis-fajljanak felulirasa a store mappaba masolva ({head})")
-            if head in SEARCH_HEADS and _recursive_search_on_store(head, args, search_pats | data_pos, cwd):
-                _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
-            if head == "git" and _git_grep_on_store(args, cwd):
-                _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
-            if head == "find":
-                # KISPROGI 6497 L1: any later xargs in the pipeline gets find's output (find store | sort | xargs rm)
-                piped = [[parsed[j][0]] + parsed[j][1] for j in range(idx + 1, len(pipeline))
-                         if parsed[j][0] and _starts_with_xargs(pipeline[j])]
-                code_sink = any(_reads_code_from_stdin(h, a) for h, a, *_ in parsed[idx + 1:])
-                _check_find(args, cwd, depth, piped=piped, feeds_interpreter=code_sink)
+            for piece in [a] + ([a.split("=", 1)[1]] if "=" in a else []):
+                if _is_live_totp_word(piece, cwd):
+                    _deny(f"a masodik faktor tara a(z) {head} parancsban")
+        if head in FILE_OP_HEADS and any("{" in a for a in args):
+            # bash expands a brace list into separate words before the command sees them (mv {store,/tmp/s})
+            args = [v for a in args for v in (_brace_variants(a) if "{" in a else [a])]
+        for d in _destinations(head, args):
+            if _is_live_db_path(d, cwd):
+                _deny(f"a dashboard adatbazis-fajlja a(z) {head} celjakent")
+        pos_args = [a for a in args if not a.startswith("-")]
+        gone = []
+        if head in ("rm", "shred", "srm", "trash", "trash-put", "unlink"):
+            gone = pos_args
+        elif head == "mv":
+            gone = pos_args[:-1]  # the store (or a folder holding it) moved away; moving INTO the root is fine
+        elif head == "rsync" and any(a.startswith("--delete") for a in args):
+            gone = pos_args[-1:]
+        for d in gone:
+            if _is_store_or_ancestor(d, cwd):
+                _deny(f"a store mappa (benne a dashboard adatbazisaval) a(z) {head} celjakent")
+        # cp/install/rsync/mv INTO the live store folder: a source named like the DB lands on the live DB
+        if head in ("cp", "install", "rsync", "scp", "mv", "ln", "ditto"):
+            pos = [a for a in args if not a.startswith("-")]
+            tdirs = [d for d in _destinations(head, args) if not _db_name_matches(os.path.basename(d.rstrip("/")))]
+            if len(pos) >= 2 and any(_resolve(t, cwd) == os.path.realpath(STORE) for t in tdirs):
+                if any(_db_name_matches(os.path.basename(src.rstrip("/"))) for src in pos[:-1]):
+                    _deny(f"a dashboard adatbazis-fajljanak felulirasa a store mappaba masolva ({head})")
+        if head in SEARCH_HEADS and _recursive_search_on_store(head, args, cwd):
+            _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
+        if head == "git" and _git_grep_on_store(args, cwd):
+            _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
+        if head == "find":
+            # KISPROGI 6497 L1: any later xargs in the pipeline gets find's output (find store | sort | xargs rm)
+            piped = [[parsed[j][0]] + parsed[j][1] for j in range(idx + 1, len(pipeline))
+                     if parsed[j][0] and _starts_with_xargs(pipeline[j])]
+            code_sink = any(_reads_code_from_stdin(h, a) for h, a, *_ in parsed[idx + 1:])
+            _check_find(args, cwd, depth, piped=piped, feeds_interpreter=code_sink)
 
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "busybox"}
-_PRINTF_CONV = re.compile(r"%(?:%|[-+ #0-9.*]*[sbdiouxXcqfFeEgGaA])")
+_PRINTF_SPEC = re.compile(r"%([-+ #0]*)(\*|\d+)?(?:\.(\*|\d*))?([diouxXeEfFgGaAcsbq%])")
+_SIMPLE_ESC = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+               "\\": "\\"}
+
+
+def _bash_escapes(text: str, mode: str):
+    r"""bash's backslash escapes as one of its builtins prints them (KISPROGI 6524 P3), measured in bash 5:
+    mode "echo" (echo -e): \0nnn is octal (a 0 and up to three digits), \1..\7 stay as they are, \c ends ALL output;
+    mode "b" (printf's %b argument): \0nnn and \nnn are octal, \c ends all output;
+    mode "fmt" (printf's format): \nnn is octal, \c stays as it is.
+    \xHH, \uHHHH, \UHHHHHHHH and \a \b \e \f \n \r \t \v \\ in all three; any other \X stays (printf's format drops the
+    backslash of \' \" \?). Returns (text, ended)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        e = text[i + 1]
+        if e in _SIMPLE_ESC:
+            out.append(_SIMPLE_ESC[e])
+            i += 2
+        elif e in "01234567" and (mode != "echo" or e == "0"):
+            most = 4 if (e == "0" and mode in ("echo", "b")) else 3
+            m = re.match(r"[0-7]{1,%d}" % most, text[i + 1:])
+            out.append(chr(int(m.group(0), 8) & 0xFF))
+            i += 1 + len(m.group(0))
+        elif e in "xuU":
+            m = re.match(r"[0-9A-Fa-f]{1,%d}" % {"x": 2, "u": 4, "U": 8}[e], text[i + 2:])
+            if m:
+                try:
+                    out.append(chr(int(m.group(0), 16)))
+                except ValueError:
+                    out.append("?")
+                i += 2 + len(m.group(0))
+            else:
+                out.append(text[i:i + 2])
+                i += 2
+        elif e == "c" and mode in ("echo", "b"):
+            return "".join(out), True
+        elif e in "'\"?" and mode == "fmt":
+            out.append(e)
+            i += 2
+        else:
+            out.append(text[i:i + 2])
+            i += 2
+    return "".join(out), False
+
+
+def _printf_output(fmt: str, args):
+    r"""What bash's printf prints (KISPROGI 6524 P3): the format's own escapes, %s / %b / %c / %q with width, - flag,
+    precision and * (taken from the words), %b's escapes (\c ends all output), the format reused while words remain."""
+    fmt_text, _ = _bash_escapes(fmt, "fmt")
+    words, out, rounds = list(args), [], 0
+    while True:
+        used, ended = False, False
+
+        def take():
+            nonlocal used
+            used = True
+            return words.pop(0) if words else ""
+
+        def number(w: str) -> int:
+            try:
+                return int(w)
+            except ValueError:
+                return 0
+        pos = 0
+        for m in _PRINTF_SPEC.finditer(fmt_text):
+            out.append(fmt_text[pos:m.start()])
+            pos = m.end()
+            flags, width, prec, conv = m.groups()
+            if conv == "%":
+                out.append("%")
+                continue
+            if width == "*":
+                width = str(number(take()))
+            if prec == "*":
+                prec = str(number(take()))
+            arg = take()
+            if conv == "s":
+                val = arg
+            elif conv == "b":
+                val, ended = _bash_escapes(arg, "b")
+            elif conv == "c":
+                val = arg[:1]
+            elif conv == "q":
+                val = shlex.quote(arg) if arg else "''"
+            else:
+                val = str(number(arg))
+            if prec is not None and conv in "sbq":
+                val = val[:number(prec or "0")]
+            w = number(width) if width else 0
+            val = val.ljust(w) if "-" in flags else val.rjust(w)
+            out.append(val)
+            if ended:
+                break
+        if ended:
+            break
+        out.append(fmt_text[pos:])
+        rounds += 1
+        if not used or not words or rounds > 32:
+            break
+    return "".join(out)
 
 
 def _printed_text(head: str, args):
-    """What echo / printf print, as the lines to check (KISPROGI 6511 (6)): echo without its leading -n/-e/-E words
-    (escapes decoded with -e), joined by spaces; printf without a leading --, its words after the format joined, and
-    the format filled with them (reused while words remain, as printf does)."""
+    r"""What echo / printf print, as the lines to check (KISPROGI 6511 (6), 6524 P3): echo without its leading -n/-e/-E
+    words (the last of -e/-E decides; escapes decoded the echo -e way, \c ends the output), joined by spaces; printf
+    without a leading -- (and -v NAME), its output as bash makes it, plus its words joined (a second, plain reading)."""
     words = [_unmark(a) for a in args]
     if head == "echo":
-        flags = ""
+        escapes = False
         while words and re.fullmatch(r"-[neE]+", words[0]):
-            flags += words.pop(0)
+            for ch in words.pop(0)[1:]:
+                if ch in "eE":
+                    escapes = ch == "e"
         if not words:
             return []
-        if "e" in flags:
-            words = [_ansi_c_decode(w) for w in words]
-        return [" ".join(words)]
+        if not escapes:
+            return [" ".join(words)]
+        printed = []
+        for w in words:
+            text, ended = _bash_escapes(w, "echo")
+            printed.append(text)
+            if ended:
+                break
+        return [" ".join(printed)]
+    if words[:1] == ["-v"]:
+        words = words[2:]
     if words[:1] == ["--"]:
         words = words[1:]
     if not words:
         return []
-    fmt, rest = _ansi_c_decode(words[0]), words[1:]
-    out, it, rounds = [], iter(rest), 0
-    while True:
-        used = [False]
-
-        def fill(m):
-            if m.group(0) == "%%":
-                return "%"
-            used[0] = True
-            return next(it, "")
-        out.append(_PRINTF_CONV.sub(fill, fmt))
-        rounds += 1
-        remaining = list(it)
-        if not used[0] or not remaining or rounds > 32:
-            break
-        it = iter(remaining)
-    lines = ["".join(out)]
-    if rest:
-        lines.append(" ".join(rest))
+    lines = [_printf_output(words[0], words[1:])]
+    if words[1:]:
+        lines.append(" ".join(words[1:]))
     return lines
+
+
+_PASS_THROUGH_HEADS = {"cat", "tac", "head", "tail", "sort", "uniq", "tee"}
+
+
+def _join_tokens(toks) -> str:
+    """Tokens back to shell text: operators as they are, every other word quoted."""
+    return " ".join(t if (t in REDIRS or t == "<<" or re.fullmatch(r"[<>&|]+", t)) else shlex.quote(_unmark(t))
+                    for t in toks)
+
+
+def _printer_output(sub: str):
+    """What a substitution prints when it is ONE echo / printf (or cat <<< WORD / cat <<EOF) command, else None."""
+    if re.search(r"[$`]\(|`", sub):
+        return None
+    try:
+        text, bodies = _strip_heredocs(sub)
+        pipes, _ends = _pipelines(_tokens(_decode_dollar_quotes(text)))
+    except ValueError:
+        return None
+    if len(pipes) != 1 or len(pipes[0]) != 1:
+        return None
+    head, args, _redirs, herestr, heredocs, _assigns = _split_command(pipes[0][0])
+    if head in DATA_ONLY_HEADS:
+        lines = _printed_text(head, args)
+        return lines[0] if lines else ""
+    if head == "cat" and not args and herestr:
+        return herestr[0]
+    if head == "cat" and not args and heredocs:
+        return bodies.get(heredocs[0], "")
+    return None
+
+
+def _check_substituted_words(toks, head: str, cwd: str, depth: int, sub_text) -> None:
+    """KISPROGI 6524 P4: a substitution standing as the command itself runs its output as a command: checked as
+    SUB | sh ($(echo rm store/...), `echo rm store/...`). And a word built from an echo / printf substitution is the
+    text it prints, so the command is checked again with it in place, word-split and as one word (rm $(echo
+    store/claudeclaw.db), $(echo rm) store/..., r$(echo m) store/...)."""
+    for mk in re.findall(r"__SUBST\d+__", head):
+        if mk in sub_text:
+            check_bash(sub_text[mk] + " | sh", cwd, depth + 1)
+    known = {}
+    for t in toks:
+        for mk in re.findall(r"__SUBST\d+__", t):
+            if mk in sub_text and mk not in known:
+                out = _printer_output(sub_text[mk])
+                if out is not None:
+                    known[mk] = out.rstrip("\n")
+    if not known:
+        return
+    for split in (True, False):
+        words = []
+        for t in toks:
+            if split and t in known:
+                words.extend(known[t].split())
+                continue
+            for mk, out in known.items():
+                t = t.replace(mk, out)
+            words.append(t)
+        check_bash(_join_tokens(words), cwd, depth + 1)
+
+
+def _xargs_input_substitutions(toks):
+    """An xargs member's input substitutions, "< SUBST" and -a / --arg-file SUBST, and its tokens without them."""
+    srcs, rest, k, in_opts = [], [], 0, False
+    while k < len(toks):
+        t = toks[k]
+        nxt = toks[k + 1] if k + 1 < len(toks) else ""
+        if t == "<" and re.search(r"__SUBST\d+__", nxt):
+            srcs += re.findall(r"__SUBST\d+__", nxt)
+            k += 2
+            continue
+        if os.path.basename(t) == "xargs":
+            in_opts = True
+        elif in_opts and not t.startswith("-"):
+            in_opts = False
+        elif in_opts and t in ("-a", "--arg-file") and re.search(r"__SUBST\d+__", nxt):
+            srcs += re.findall(r"__SUBST\d+__", nxt)
+            k += 2
+            continue
+        elif in_opts and re.fullmatch(r"(?:-a|--arg-file=).*__SUBST\d+__.*", t):
+            srcs += re.findall(r"__SUBST\d+__", t)
+            k += 1
+            continue
+        rest.append(t)
+        k += 1
+    return srcs, rest
 
 
 def _reads_code_from_stdin(head: str, args) -> bool:
@@ -1458,7 +1885,148 @@ def _grep_include_rules_out(order) -> bool:
     return order[0][0] == "include"
 
 
-def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
+# Explicit pattern sources (KISPROGI 6524 V1/P1): with one of them no positional word is the pattern, so every
+# positional word is a file operand. A value option is a PATTERN (a search string, data) or a FILE of patterns (read,
+# so its value stays checked as a path). ugrep's --and/--andnot/--not take a pattern ("--and -e P" is the flag alone).
+_GREP_PATTERN_LONG = ("--regexp", "--and", "--andnot", "--not")
+_RG_PATTERN_LONG = ("--regexp",)
+_PATTERN_FILE_LONG = ("--file",)
+
+
+def _search_walk(head: str, args, skip_values: bool = True) -> dict:
+    """KISPROGI 6524 V1/P1: the ONE reading of a search command's words that both the pattern exemption and the
+    recursive-search rule use (two hand-written readers drifted apart twice: R1, then V1). An explicit pattern source
+    is found in every spelling: -e P / -f F, --regexp P, --regexp=P, --file=F, attached -eP / -fF, and as the first
+    value letter of a short group (-rie P, -rf F, -uue P, -fpats), for grep (GNU and ugrep) and rg alike; git grep / log
+    take -e / -f / -S / -G. skip_values: a value option (-m 5, -d rec, -sd rec) takes its value; without it only a
+    pattern source does (the second reading of the exemption). Returns pats (indexes that are pattern text), explicit,
+    operands (indexes of the file operands), and for the recursive rule rec, quiet, plain, order, globs, select."""
+    r = {"pats": set(), "explicit": False, "operands": [], "rec": False, "quiet": False, "plain": True, "order": [],
+         "globs": [], "select": False}
+    git = head == "git"
+    offset = 0
+    positional_pattern = True
+    if git:
+        if not args or args[0] not in ("grep", "log"):
+            return r
+        positional_pattern = args[0] == "grep"
+        offset, args = 1, args[1:]
+    grep = head in _GREP_HEADS
+    value_opts = _GREP_VALUE_OPTS if grep else _RG_VALUE_OPTS
+    value_letters = _GREP_VALUE_LETTERS if grep else _RG_VALUE_LETTERS
+    pattern_long = _GREP_PATTERN_LONG if grep else _RG_PATTERN_LONG
+    r["rec"] = head == "rgrep" or not grep
+    positionals, k, n, after_dd = [], 0, len(args), False
+    while k < n:
+        a = args[k]
+        nxt = args[k + 1] if k + 1 < n else ""
+        if after_dd or a == "-" or not a.startswith("-"):
+            positionals.append(k)
+            k += 1
+            continue
+        if a == "--":
+            after_dd = True
+            k += 1
+            continue
+        if git:
+            if a in ("-e", "--regexp", "-S", "-G") and k + 1 < n:
+                r["pats"].add(k + 1 + offset)
+                r["explicit"] = True
+                k += 2
+                continue
+            if re.fullmatch(r"-[eSG].+|--regexp=.+", a):
+                r["pats"].add(k + offset)
+                r["explicit"] = True
+            elif a in ("-f", "--file"):
+                r["explicit"] = True
+                k += 1
+            elif re.fullmatch(r"-f.+|--file=.+", a):
+                r["explicit"] = True
+            k += 1
+            continue
+        if a.startswith("--"):
+            opt, has_val, val = a.partition("=")
+            if grep:
+                opt = _gnu_grep_long(opt)
+            if opt not in _NAMES_ONLY_LONG:
+                r["plain"] = False
+            if opt in pattern_long:
+                r["explicit"] = True
+                if has_val:
+                    r["pats"].add(k + offset)
+                elif opt in ("--and", "--andnot", "--not") and nxt == "-e":
+                    pass  # ugrep: --and -e PATTERN, the -e comes next
+                elif k + 1 < n:
+                    r["pats"].add(k + 1 + offset)
+                    k += 1
+                k += 1
+                continue
+            if opt in _PATTERN_FILE_LONG:
+                r["explicit"] = True
+                k += 1 if has_val else 2
+                continue
+            takes = not has_val and opt in value_opts
+            if takes:
+                val = nxt
+            if _gnu_recursive_long(opt, val if has_val or takes else None) or (
+                    grep and not has_val and _gnu_long_prefix(opt, "--directories", 4) and _recurse_value(nxt)):
+                r["rec"] = True
+            if opt in ("--files-with-matches", "--files-without-match", "--count", "--count-matches", "--quiet",
+                       "--silent", "--files"):
+                r["quiet"] = True
+            if opt in ("--include", "--exclude"):
+                r["order"].append((opt[2:], val))
+            elif opt in ("--glob", "--iglob"):
+                r["globs"].append((val, opt == "--iglob"))
+            if (grep and opt in _GREP_SELECT_OPTS) or (not grep and opt in ("--type", "--type-not", "--type-add")):
+                r["select"] = True
+            k += 2 if takes and skip_values else 1
+            continue
+        # a short group: letters left to right; the first one that takes a value takes the rest of the word, or else
+        # the next word (getopt): -rie P, -ieP, -rf F, -fF, -sd rec, -C5
+        consumed = 0
+        for pos, ch in enumerate(a[1:], 1):
+            rest = a[pos + 1:]
+            if ch in "rR":
+                r["rec"] = r["rec"] or grep
+            if ch in "lLcq" and (grep or ch in "lc"):
+                r["quiet"] = True
+            if ch == "e":
+                r["explicit"] = True
+                if rest:
+                    r["pats"].add(k + offset)
+                elif k + 1 < n:
+                    r["pats"].add(k + 1 + offset)
+                    consumed = 1
+                break
+            if ch == "f":
+                r["explicit"] = True
+                consumed = 0 if rest else 1
+                break
+            if ch in value_letters:
+                val = rest or nxt
+                if not rest and skip_values:
+                    consumed = 1
+                if ch == "d" and grep and _recurse_value(val):
+                    r["rec"] = True
+                if ch == "g":
+                    r["globs"].append((val, False))
+                if ch not in "efmdD":
+                    r["plain"] = False
+                if (grep and ch in "gOtM") or (not grep and ch in "tT"):
+                    r["select"] = True
+                break
+            if ch not in _NAMES_ONLY_SHORT:
+                r["plain"] = False
+        k += 1 + consumed
+    if not r["explicit"] and positionals and positional_pattern:
+        r["pats"].add(positionals[0] + offset)
+        positionals = positionals[1:]
+    r["operands"] = [p + offset for p in positionals]
+    return r
+
+
+def _recursive_search_on_store(head: str, args, cwd: str) -> bool:
     """KISPROGI 6490 M1 and 6497 H2/M3/L2: a search that can read the second-factor store in the live store folder and
     print its lines. Aimed at the store: a folder operand that is (or a glob / brace that expands to) the store, or the
     store as cwd with grep -r and no operand. The grep family counts as recursive on a folder operand even without -r
@@ -1467,63 +2035,12 @@ def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
     option outside a small known set), or when its --include / --exclude rule the file out in GNU's order; for rg, when
     its include globs (-g / --glob / --iglob, the last case-insensitively) cannot match the file. A search below the
     store cannot reach the file (it sits in the store itself); a search from the install root or above stays a known
-    open route (it is every everyday search), and so does a names-only search used as an oracle (L3)."""
+    open route (it is every everyday search), and so does a names-only search used as an oracle (L3). The words are
+    read by _search_walk, the same reader the pattern exemption uses (KISPROGI 6524 V1)."""
     grep = head in _GREP_HEADS
-    value_opts = _GREP_VALUE_OPTS if grep else _RG_VALUE_OPTS
-    value_letters = _GREP_VALUE_LETTERS if grep else _RG_VALUE_LETTERS
-    rec = head == "rgrep" or not grep
-    operands, order, globs, quiet, plain, select, k = [], [], [], False, True, False, 0
-    while k < len(args):
-        a = args[k]
-        nxt = args[k + 1] if k + 1 < len(args) else ""
-        if k in data_pos:
-            k += 1
-            continue
-        if a.startswith("--"):
-            opt, has_val, val = a.partition("=")
-            if grep:
-                opt = _gnu_grep_long(opt)
-            if not has_val and opt in value_opts:
-                val = nxt
-                k += 1
-            if _gnu_recursive_long(opt, val if has_val or opt in value_opts else None) or (
-                    grep and not has_val and _gnu_long_prefix(opt, "--directories", 4) and _recurse_value(nxt)):
-                rec = True
-            if opt in ("--files-with-matches", "--files-without-match", "--count", "--count-matches", "--quiet",
-                       "--silent", "--files"):
-                quiet = True
-            if opt not in _NAMES_ONLY_LONG:
-                plain = False
-            if opt in ("--include", "--exclude"):
-                order.append((opt[2:], val))
-            elif opt in ("--glob", "--iglob"):
-                globs.append((val, opt == "--iglob"))
-            if (grep and opt in _GREP_SELECT_OPTS) or (not grep and opt in ("--type", "--type-not", "--type-add")):
-                select = True
-        elif re.fullmatch(r"-[A-Za-z0-9.%+^?]+", a):
-            for pos, ch in enumerate(a[1:], 1):
-                if ch in "rR":
-                    rec = rec or grep
-                if ch in "lLcq" and (grep or ch in "lc"):
-                    quiet = True
-                if ch in value_letters:
-                    val = a[pos + 1:] or nxt
-                    if not a[pos + 1:]:
-                        k += 1
-                    if ch == "d" and grep and _recurse_value(val):
-                        rec = True
-                    if ch == "g":
-                        globs.append((val, False))
-                    if ch not in "efmdD":
-                        plain = False
-                    if (grep and ch in "gOtM") or (not grep and ch in "tT"):
-                        select = True
-                    break
-                if ch not in _NAMES_ONLY_SHORT:
-                    plain = False
-        elif not a.startswith("-"):
-            operands.append(a)
-        k += 1
+    w = _search_walk(head, args)
+    operands = [args[k] for k in w["operands"]]
+    rec = w["rec"]
     if operands:
         aimed = any(_is_store_dir(o, cwd) for o in operands)
     else:
@@ -1531,13 +2048,13 @@ def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
     if not aimed:
         return False
     if grep:
-        if quiet and plain:
+        if w["quiet"] and w["plain"]:
             return False  # names or counts only: the real everyday store searches are all grep -rl (replay 2026-11-28)
-        if not select and _grep_include_rules_out(order):
+        if not w["select"] and _grep_include_rules_out(w["order"]):
             return False
         return True
-    if head == "rg" and not select and globs:
-        include = [(g, ci) for g, ci in globs if not g.startswith("!")]
+    if head == "rg" and not w["select"] and w["globs"]:
+        include = [(g, ci) for g, ci in w["globs"] if not g.startswith("!")]
         if include and not any(_glob_may_match_totp(g, ci) for g, ci in include):
             return False
     return True

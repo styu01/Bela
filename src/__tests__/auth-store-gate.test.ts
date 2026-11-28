@@ -574,6 +574,111 @@ describe('auth-store-gate: KISPROGI 6511 (R1, $\'...\', arithmetic <<, -sd rec, 
   })
 })
 
+// KISPROGI 6524: three regressions of e21f7724 (V1 a short group ending in e/f, V2 a function head read as an empty
+// subshell, V3 a NUL inside $'...') and five older families (P1 the =/attached pattern-file forms, P2 the rest of the
+// heredoc look-alikes, P3 echo -e / printf as bash prints them, P4 substitution output, P5 the cwd as a set of places).
+// Plus the forms found while fixing them (a cd before a substitution, a cd to a missing folder, a word made by an echo
+// substitution, printf %c / width, a comment's quote swallowing the following lines, CDPATH).
+const R6524_DENY: string[] = [
+  // V1 + P1: one reader of explicit pattern sources
+  'grep -rie TOTPSECRET store', 'grep -ie TOTPSECRET store', 'grep -rse TOTPSECRET store', 'grep -re TOTPSECRET store',
+  'grep -rf /dev/stdin store <<< TOTPSECRET', 'grep -rif /dev/stdin store <<< TOTPSECRET', 'rg --hidden -ie TOTPSECRET store',
+  'rg -uuie TOTPSECRET store', 'rg -uue TOTPSECRET store', 'grep -r --file=/dev/stdin store <<< TOTPSECRET',
+  'grep -rf/dev/stdin store <<< TOTPSECRET', 'grep -r -fpats store', 'grep --and=TOTPSECRET store',
+  'grep --file=/dev/stdin store/.dashboard-totp.json <<< secret', 'grep -f/dev/stdin store/.dashboard-totp.json <<< secret',
+  'grep -fpats store/.dashboard-totp.json', 'rg --hidden --file=/dev/stdin store <<< TOTPSECRET', 'rg --hidden -f/dev/stdin store',
+  'grep -ieTOTPSECRET store', 'grep -r --reg=TOTPSECRET store',
+  // V3: a NUL ends a $'...' part
+  r`rm -rf $'store\0x'`, r`rm $'store/claudeclaw.db\0x'`, r`rm $'store/claudeclaw.db\x00'`, r`rm $'store/claudeclaw.db\c@'`,
+  r`rm $'store/claudeclaw.db\u0000'`, r`rm $'store/claudeclaw.db\U00000000'`, r`rm $'store/claudeclaw.db\000'`, r`mv $'store\0' moved`,
+  // V2 + P5: function heads, case patterns, the cwd as a set
+  'f() { cd /tmp; }; rm store/claudeclaw.db', 'f () { cd /tmp; }; rm store/claudeclaw.db', 'function f() { cd /tmp; }; rm store/claudeclaw.db',
+  'f() { cd /tmp; }\nrm store/claudeclaw.db', 'f() { cd /tmp; }; cat store/.dashboard-totp.json', 'f() { cd /tmp; }; grep -r TOTPSECRET store',
+  'f() { cd /tmp; }; rm -rf store', 'false && cd /tmp; rm store/claudeclaw.db', 'cd /tmp &\nrm store/claudeclaw.db',
+  '(case a in a) cd /tmp;; esac); rm store/claudeclaw.db', 'pushd /tmp; popd; rm store/claudeclaw.db', 'cd /tmp; cd ~-; rm store/claudeclaw.db',
+  'cd /tmp; cd -; rm store/claudeclaw.db', 'cd /nonexistent-folder; rm store/claudeclaw.db', 'cd /nonexistent-folder; rm -rf store',
+  'cd /tmp && echo a; rm store/claudeclaw.db', 'cd /tmp && echo a || rm store/claudeclaw.db', '! cd /tmp && rm store/claudeclaw.db',
+  'rm ~-/store/claudeclaw.db', 'if true; then case a in a) cd /tmp;; esac; fi; rm store/claudeclaw.db',
+  // P2: heredoc look-alikes, and a comment's quote
+  'echo \\<<2\nrm store/claudeclaw.db', 'true # <<2\nrm store/claudeclaw.db', 'echo ${PATH:1<<2}\nrm store/claudeclaw.db',
+  'echo $((1\n<<2))\nrm store/claudeclaw.db', '((\ny = 1 << 4 ))\nrm store/claudeclaw.db', 'a[1<<2]=x\nrm store/claudeclaw.db',
+  'echo ${a[1<<2]}\nrm store/claudeclaw.db', "true # it's\nrm -rf store\n# it's", 'echo a #<<X\nrm store/claudeclaw.db',
+  // P3: what echo -e / printf really print
+  r`echo -e 'rm store/claudeclaw.d\0142' | sh`, r`echo -e 'rm store/claudeclaw.db\cX' | sh`, r`echo -e 'rm store/claudeclaw.db\c' | sh`,
+  r`printf '%b' 'r\x6d store/claudeclaw.db' | sh`, r`printf '%b' 'rm store/claudeclaw.d\0142' | sh`, `printf '%.2s store/claudeclaw.db' rmxx | sh`,
+  `printf '%.2s %s' rmxx store/claudeclaw.db | sh`, r`printf '%b %s' 'r\x6d' store/claudeclaw.db | sh`, `printf '%cm store/claudeclaw.db' rxx | sh`,
+  `printf '%-3sstore/claudeclaw.db' rm | sh`, `printf '%.*s store/claudeclaw.db' 2 rmxx | sh`, r`echo -Ee 'rm store/claudeclaw.d\x62' | sh`,
+  // P4: substitution output
+  '$(echo rm store/claudeclaw.db)', '`echo rm store/claudeclaw.db`', 'tac <(echo rm store/claudeclaw.db) | sh',
+  'head <(echo rm store/claudeclaw.db) | sh', 'cat <<< store/claudeclaw.db | xargs rm', 'xargs rm < <(echo store/claudeclaw.db)',
+  'xargs -a <(echo store/claudeclaw.db) rm', 'xargs rm <<E\nstore/claudeclaw.db\nE', 'cat <<E | xargs rm\nstore/claudeclaw.db\nE',
+  'rm $(echo store/claudeclaw.db)', '$(echo rm) store/claudeclaw.db', 'r$(echo m) store/claudeclaw.db', 'rm "$(printf %s store/claudeclaw.db)"',
+  'xargs rm < <(find store -name claudeclaw.db)', '$(echo rm store/claudeclaw.db | cat)', 'rm ~+/store/claudeclaw.db',
+]
+const R6524_PASS: string[] = [
+  'grep -rie foo src', 'echo a;\necho b', 'ls src |\nwc -l', '(cd src; ls)\nls', 'case x in x) echo y;; esac', 'f() { echo hi; }; f',
+  'echo $((1<<2))\necho ok', 'for ((i=0;i<2;i++)); do echo $i; done', r`echo -e 'rm store/claudeclaw.d\142' | sh`,
+  r`echo -eE 'rm store/claudeclaw.d\x62' | sh`, r`printf 'rm store/claudeclaw.d\0142' | sh`, "true # it's fine\necho ok",
+  'x=$(cat <<EOF\nrm store/claudeclaw.db\nEOF\n)\necho ok', "echo 'a\nb' <<X\nrm store/claudeclaw.db\nX", 'echo x\\\\\n#c; rm store/claudeclaw.db',
+  'cd /tmp && rm store/claudeclaw.db', 'cd /tmp && (rm store/claudeclaw.db; ls)', 'cd /tmp && cd /var && rm store/claudeclaw.db',
+  'false && cd /tmp && rm store/claudeclaw.db', 'ls $(echo src)', '$(npm bin)/vitest run', 'echo $(date) ok', 'xargs -a <(echo src) ls',
+  "printf '%s\\n' hello | sh", 'echo a[1<<2]\nls', 'declare -A m; m[x]=1', 'case $x in (a|b) echo y;; *) echo z;; esac',
+  // a function head is no subshell: the body after an && chain stays in the cd's target
+  'cd /tmp && f() ( rm store/claudeclaw.db )', 'cd /tmp && function f() ( rm store/claudeclaw.db )',
+]
+const R6524_REAL: [string, 'leaks' | 'db', boolean][] = [
+  ['grep -rie TOTPSECRET store', 'leaks', true], ['grep -ie TOTPSECRET store', 'leaks', true], ['grep -rf /dev/stdin store <<< TOTPSECRET', 'leaks', true],
+  ['rg --hidden -ie TOTPSECRET store', 'leaks', false], ['rg -uue TOTPSECRET store', 'leaks', false],
+  ['grep --file=/dev/stdin store/.dashboard-totp.json <<< secret', 'leaks', false], ['grep -f/dev/stdin store/.dashboard-totp.json <<< secret', 'leaks', false],
+  ['grep -r --file=/dev/stdin store <<< TOTPSECRET', 'leaks', true], ['grep --and=TOTPSECRET store', 'leaks', true],
+  ['rg --hidden --file=/dev/stdin store <<< TOTPSECRET', 'leaks', false],
+  [r`rm $'store/claudeclaw.db\0x'`, 'db', false], [r`rm $'store/claudeclaw.db\c@'`, 'db', false], [r`rm -rf $'store\0x'`, 'db', false],
+  [r`mv $'store\0' moved`, 'db', false],
+  ['f() { cd src; }; rm store/claudeclaw.db', 'db', false], ['function f() { cd src; }; cat store/.dashboard-totp.json', 'leaks', false],
+  ['false && cd src; rm store/claudeclaw.db', 'db', false], ['(case a in a) cd src;; esac); rm store/claudeclaw.db', 'db', false],
+  ['cd src; cd -; rm store/claudeclaw.db', 'db', false], ['pushd src; popd; rm store/claudeclaw.db', 'db', false],
+  ['cd nonexistent-folder; rm store/claudeclaw.db', 'db', false], ['cd src &\nrm store/claudeclaw.db', 'db', false],
+  ['echo \\<<2\nrm store/claudeclaw.db', 'db', false], ['true # <<2\nrm store/claudeclaw.db', 'db', false],
+  ['echo ${PATH:1<<2}\nrm store/claudeclaw.db', 'db', false], ['echo $((1\n<<2))\nrm store/claudeclaw.db', 'db', false],
+  ['((\ny = 1 << 4 ))\nrm store/claudeclaw.db', 'db', false], ['a[1<<2]=x\nrm store/claudeclaw.db', 'db', false],
+  ["true # it's\nrm -rf store\n# it's", 'db', false],
+  [r`echo -e 'rm store/claudeclaw.d\0142' | sh`, 'db', false], [r`echo -e 'rm store/claudeclaw.db\c' | sh`, 'db', false],
+  [r`printf '%b' 'r\x6d store/claudeclaw.db' | sh`, 'db', false], [`printf '%.2s store/claudeclaw.db' rmxx | sh`, 'db', false],
+  [`printf '%cm store/claudeclaw.db' rxx | sh`, 'db', false], [`printf '%-3sstore/claudeclaw.db' rm | sh`, 'db', false],
+  ['$(echo rm store/claudeclaw.db)', 'db', false], ['`echo rm store/claudeclaw.db`', 'db', false],
+  ['tac <(echo rm store/claudeclaw.db) | sh', 'db', false], ['cat <<< store/claudeclaw.db | xargs rm', 'db', false],
+  ['xargs rm < <(echo store/claudeclaw.db)', 'db', false], ['xargs -a <(echo store/claudeclaw.db) rm', 'db', false],
+  ['xargs rm <<E\nstore/claudeclaw.db\nE', 'db', false], ['rm $(echo store/claudeclaw.db)', 'db', false],
+  ['$(echo rm) store/claudeclaw.db', 'db', false], ['r$(echo m) store/claudeclaw.db', 'db', false],
+  ['$(echo rm store/claudeclaw.db | cat)', 'db', false],
+]
+
+describe('auth-store-gate: KISPROGI 6524 (pattern sources, NUL in $\'...\', the cwd as a set, heredoc look-alikes, echo/printf, substitution output)', () => {
+  for (const c of R6524_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6524_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('a cd before a substitution or through CDPATH counts there too; a cd that must succeed is the only place after &&', () => {
+    const sub = join(ROOT, 'scripts')
+    expect(bash('cd .. && echo $(rm store/claudeclaw.db)', sub)).toBe('DENY')
+    expect(bash('cd ..; x=`rm store/claudeclaw.db`', sub)).toBe('DENY')
+    expect(bash(`CDPATH=${tmp} cd install && rm store/claudeclaw.db`, sub)).toBe('DENY')
+    expect(bash(`export CDPATH=${tmp}; cd install && rm -rf store`, sub)).toBe('DENY')
+    expect(bash('cd .. && ls store', sub)).toBe('pass')
+    expect(bash('rm store/claudeclaw.db', sub)).toBe('pass')
+    expect(bash('cd hooks && rm store/claudeclaw.db', sub)).toBe('pass')
+    // cd - / popd as the first move go to a folder the command does not name (OLDPWD, the stack): an unknown place,
+    // where a spelled-out protected name is still refused
+    expect(bash('cd -; rm store/claudeclaw.db', '/tmp')).toBe('DENY')
+    expect(bash('popd; rm store/claudeclaw.db', '/tmp')).toBe('DENY')
+    expect(bash('popd && cat store/.dashboard-totp.json', '/tmp')).toBe('DENY')
+    // a case pattern's ")" (and the next arm after ;;) closes no subshell: the cd before it still counts inside
+    expect(bash(`(cd ${ROOT}; case a in a) true;; b) true;; esac; rm store/claudeclaw.db)`, '/tmp')).toBe('DENY')
+    expect(bash(`(cd ${ROOT}; case a in a) true;; esac); rm store/claudeclaw.db`, '/tmp')).toBe('pass')  // rm runs in /tmp
+  })
+  it.skipIf(!CLAUDE_BIN)('every refused form above that is relative really leaks or hits the DB (bfs / ugrep / GNU, scratch copy)', () => {
+    for (const [cmd, effect, cc] of R6524_REAL) realRun(cmd, effect, cc)
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')
