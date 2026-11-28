@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 import { CALLERS, RELAY_PORT, fleetDeps, call, type Auth, type CallOptions } from './helpers/vault-route.js'
 
-// VAULTMAINONLY (KISPROGI 6431 point 5, route level; BELA 6432 decisions): a protected vault
+// VAULTMAINONLY (KISPROGI 6431 point 5, route level; BELA 6432 decisions; KISPROGI 6440 V): a protected vault
 // entry's value only to the main agent's process or the owner's login session; changing one needs the same; a
 // binding of one is refused for everyone; with VAULT_MAIN_ONLY=audit a refusal is only logged. Unprotected entries
 // stay as they were for every caller. The caller is told by the (in-memory) /proc, never by the token.
@@ -34,6 +34,7 @@ vi.mock('../env.js', async (importOriginal) => {
 
 const { tryHandleConnectors } = await import('../web/routes/connectors.js')
 const { setCallerIdentityDepsForTest, VAULT_PROTECTED_ERROR } = await import('../web/vault-guard.js')
+const { validateCustomProvider } = await import('../web/custom-providers.js')
 const vault = await import('../web/vault.js')
 const bindings = await import('../web/vault-bindings.js')
 const { logger } = await import('../logger.js')
@@ -161,5 +162,16 @@ describe('vault main-only: changing a protected entry, bindings, import', () => 
     expect(() => vaultAndBindEnvSecretsMultiTarget('vault', [{ mcpFilePath: '/nonexistent/.mcp.json', serverName: 'vault' }], { 'VEDETT-KANARI': 'x' }))
       .toThrow(/protected/)
     expect(vault.setSecret).not.toHaveBeenCalled()
+  })
+})
+
+describe('vault main-only: a custom provider never names a protected entry (KISPROGI 6440 V)', () => {
+  const def = (vaultKey: string) => ({ id: 'p1', label: 'P', baseUrl: 'https://api.example.com', authHeader: 'Bearer', vaultKey })
+  it('validateCustomProvider refuses it (so a stored one reads back as invalid and no launch path uses it)', () => {
+    expect(validateCustomProvider(def(PROTECTED))).toMatch(/protected vault entry/)
+    expect(validateCustomProvider(def('Moho claude token'))).toMatch(/protected vault entry/)
+    expect(validateCustomProvider(def(PLAIN))).toBeNull()
+    envState.VAULT_MAIN_ONLY = 'audit'
+    expect(validateCustomProvider(def(PROTECTED))).toBeNull()
   })
 })

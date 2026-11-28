@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { protectedVaultIdUsable } from './vault-protected.js'
 
 const PROVIDERS_PATH = join(PROJECT_ROOT, 'store', 'custom-providers.json')
 
@@ -126,6 +127,12 @@ export function validateCustomProvider(data: unknown): string | null {
   const vaultKey = d.vaultKey === null || d.vaultKey === undefined ? null : String(d.vaultKey).trim()
   if (authHeader !== 'none' && !vaultKey) {
     return 'vaultKey is required unless authHeader is none'
+  }
+  // KISPROGI 6440 V (vault plan): a provider's key is sent to the provider's address and written to a sub-agent's
+  // launch file, around the vault's HTTP rule. A protected entry (vault-protected.ts) is never a provider key; a stored
+  // definition naming one reads back as invalid, so no launch path (agents, the main agent's launcher) uses it.
+  if (authHeader !== 'none' && vaultKey && !protectedVaultIdUsable(vaultKey, `custom provider ${id}`)) {
+    return 'vaultKey names a protected vault entry (a mail, web host or Claude credential), which a provider may not use'
   }
 
   return null
