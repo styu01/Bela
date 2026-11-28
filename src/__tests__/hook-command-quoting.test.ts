@@ -134,9 +134,12 @@ describe('ensure* migrations are idempotent (true, then false)', () => {
     expect(commands.some((c) => c.includes('email-send-gate.mjs'))).toBe(true)
     expect(commands.some((c) => c.includes('self-pace-gate.mjs'))).toBe(true)
     for (const cmd of commands) {
+      // LOCAL (BELA 6410): the auth-store gate is Python (python3 -I, fail-closed tail), not a node gate.
+      if (cmd.includes('auth-store-gate.py')) { expect(cmd).toContain('python3 -I "'); continue }
       expect(cmd.includes(`"${HOOK_NODE_BIN}" "`)).toBe(true)
       expect(cmd).not.toMatch(/^node /)
     }
+    expect(commands.some((c) => c.includes('auth-store-gate.py'))).toBe(true)
   })
 
   // 2026-08-10: the second silently-non-enforcing shape. Here the command is

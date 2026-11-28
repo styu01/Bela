@@ -26,6 +26,7 @@ export const GATE_SCRIPT_NAMES: readonly string[] = [
   'kanban-write-gate.mjs',
   'egress-gate.mjs',
   'outgoing-copy-gate.py',
+  'auth-store-gate.py',
 ]
 
 export const GATE_SELF_TEST_INITIAL_DELAY_MS = 90_000

@@ -6,7 +6,7 @@ import {
   collectGateEntries, benignToolCall, classifyGateRun, diffGateStates, runGateCommand, runGateSelfTest,
   reportPruneKept, resetGateSelfTestState, gateFailureText, gateScriptPath, type GateEntry, type GateTarget,
 } from '../web/gate-self-test.js'
-import { hookCommand, GATE_FAIL_CLOSED_TAG, injectEmailSendGate, injectSelfPaceGate, injectKanbanWriteGate, injectEgressGate } from '../web/agent-scaffold.js'
+import { hookCommand, GATE_FAIL_CLOSED_TAG, injectEmailSendGate, injectSelfPaceGate, injectKanbanWriteGate, injectEgressGate, injectAuthStoreGate } from '../web/agent-scaffold.js'
 import { PROJECT_ROOT } from '../config.js'
 
 // BELA 6223 a: every wired gate command is run exactly as the settings file holds it, with a benign call;
@@ -152,14 +152,14 @@ describe('the real gates, as the injectors wire them, on a disposable copy', () 
     const root = join(tmp, 'install'); mkdirSync(join(root, 'store'), { recursive: true })
     cpSync(join(PROJECT_ROOT, 'scripts'), join(root, 'scripts'), { recursive: true })
     const s: Record<string, unknown> = {}
-    injectEmailSendGate(s); injectSelfPaceGate(s); injectKanbanWriteGate(s); injectEgressGate(s)
+    injectEmailSendGate(s); injectSelfPaceGate(s); injectKanbanWriteGate(s); injectEgressGate(s); injectAuthStoreGate(s)
     // point every command at the copy
     const json = JSON.stringify(s).split(JSON.stringify(PROJECT_ROOT).slice(1, -1)).join(JSON.stringify(root).slice(1, -1))
     const sp = join(tmp, 'real.json'); writeFileSync(sp, json)
     const targets = [{ agent: 'progi', settingsPath: sp, projectDir: root }]
     const sent: string[] = []
     const res = await runGateSelfTest({ targets, send: (t) => { sent.push(t) }, port: 3420 })
-    expect(res.map((r) => r.entry.gate).sort()).toEqual(['egress-gate.mjs', 'email-send-gate.mjs', 'kanban-write-gate.mjs', 'self-pace-gate.mjs'])
+    expect(res.map((r) => r.entry.gate).sort()).toEqual(['auth-store-gate.py', 'egress-gate.mjs', 'email-send-gate.mjs', 'kanban-write-gate.mjs', 'self-pace-gate.mjs'])
     expect(res.filter((r) => !r.ok).map((r) => `${r.entry.gate}: ${r.detail}`)).toEqual([])
     expect(sent).toEqual([])
     appendFileSync(join(root, 'scripts', 'self-pace-gate.mjs'), '\nconst = ;\n')
@@ -171,11 +171,13 @@ describe('the real gates, as the injectors wire them, on a disposable copy', () 
     expect(sent.some((t) => t.includes('kapu: kanban-write-gate.mjs'))).toBe(true)
   }, 60_000)
 
-  it('the main agent project settings (outgoing-copy-gate arms) pass their benign calls', async () => {
+  it('the main agent project settings (outgoing-copy-gate and auth-store-gate arms) pass their benign calls', async () => {
     const targets = [{ agent: 'bela', settingsPath: join(PROJECT_ROOT, '.claude', 'settings.json'), projectDir: PROJECT_ROOT }]
     const sent: string[] = []
     const res = await runGateSelfTest({ targets, send: (t) => { sent.push(t) } })
-    expect(res.length).toBe(4)
+    // 4 outgoing-copy-gate arms + 2 auth-store-gate arms (BELA 6410: Bash fail-closed, path tools fail-open).
+    expect(res.length).toBe(6)
+    expect(res.filter((r) => r.entry.gate === 'auth-store-gate.py').map((r) => r.entry.matcher).sort()).toEqual(['Bash', 'Read|Write|Edit|MultiEdit|NotebookEdit|Grep'])
     expect(res.filter((r) => !r.ok).map((r) => r.detail)).toEqual([])
   }, 60_000)
 })

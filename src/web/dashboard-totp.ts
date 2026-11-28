@@ -5,12 +5,15 @@
 // Whether it is ON is also recorded in the database (dashboard_users.totp_enabled, Dani 81107 B2): the file alone would
 // let any process of the same OS user turn the second factor off by deleting it. On = the flag or a record; off (the
 // default) = neither. The secret is never logged and never in an API response after the setup step; the backup codes
-// are stored hashed only. Upstream's agent DB-write gate protects both the file (writes) and the table; THIS FORK HAS
-// NO SUCH GATE (KISPROGI 6416 K1): only the sub-agents' Read deny on the file (agent-scaffold.ts), see the limit below.
+// are stored hashed only. Upstream's agent DB-write gate protects both the file (writes) and the table; this fork has
+// a NARROW gate instead (BELA 6410, scripts/hooks/auth-store-gate.py, every agent): this file by name in any agent
+// tool call, an SQL write on dashboard_users in text a program runs, the DB file as a write target. A text brake, see
+// the limit below.
 // The limit: the agents run as the same OS user, so a process of that user can read this file; the second factor
 // protects against a remote attacker who knows the password, not against a process on the machine (which still does
 // not have the password: only its hash is stored). The sub-agents' Read deny on the file (SUBAGENT_TOTP_STORE_DENY in
-// agent-scaffold.ts) is a text fence on the Read tool, not an OS boundary.
+// agent-scaffold.ts) and the auth-store gate are text fences on agent tool calls, not an OS boundary: a name or an SQL
+// statement built at run time, or a script written first and run later, is not seen.
 //
 // Fail closed: a file that exists but cannot be read or parsed THROWS (TotpStoreError), and so does a user whose flag is
 // on with no record in the file (getTotpForUser). Reading either as "off" would turn a damaged or deleted file into a
@@ -87,8 +90,8 @@ export function getTotpRecord(userId: number): TotpRecord | undefined {
 }
 
 /** The second factor of this dashboard user, the ONE reading every login and owner route uses (Dani 81107 B2): the
- *  record when it is on, undefined when it is off. On = the database flag (dashboard_users.totp_enabled; upstream's
- *  DB-write gate protects that table, this fork has none) OR a record in the file. The flag set with no record in the file (the file deleted,
+ *  record when it is on, undefined when it is off. On = the database flag (dashboard_users.totp_enabled; agent writes
+ *  on that table are refused by the narrow auth-store gate, BELA 6410) OR a record in the file. The flag set with no record in the file (the file deleted,
  *  emptied or the entry removed) THROWS TotpStoreError: fail closed, never a password-only login. */
 export function getTotpForUser(user: { id: number; totp_enabled?: number }): TotpRecord | undefined {
   const rec = getTotpRecord(user.id)

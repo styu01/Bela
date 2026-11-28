@@ -554,6 +554,8 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsEmailGate(name)) injectEmailSendGate(existing)
   if (agentGetsGovernanceGates(name)) injectSelfPaceGate(existing)
   if (agentGetsKanbanWriteGate(name)) injectKanbanWriteGate(existing)
+  // BELA 6410: every sub-agent (the main agent's arms live in the tracked project settings).
+  if (agentGetsGovernanceGates(name)) injectAuthStoreGate(existing)
   injectEgressGate(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
 }
@@ -679,6 +681,35 @@ export function injectKanbanWriteGate(existing: Record<string, unknown>): void {
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
     ...prev.filter((e) => !JSON.stringify(e).includes('kanban-write-gate.mjs')),
+    entry,
+  ]
+}
+
+// BELA 6410 (the wave-end item): the dashboard login's second-factor state is written by no agent. The gate
+// (scripts/hooks/auth-store-gate.py, Python like the main agent's outgoing-copy-gate) refuses the second-factor
+// store by name in any use, an SQL write on dashboard_users in text a program runs, and the DB file as a write
+// target. Wired for EVERY sub-agent here (fail-closed, like the other gates) and for the main agent in the tracked
+// project settings (Bash fail-closed; its Read/Write/Edit arm fail-open, since those tools are the main agent's way
+// out when a gate file is broken). A text brake, not an OS boundary: see the gate's own header.
+export const AUTH_STORE_GATE_MATCHER = 'Bash|Read|Write|Edit|MultiEdit|NotebookEdit|Grep'
+export function authStoreGateCommand(hookTimeoutSec = 10): string {
+  const script = join(PROJECT_ROOT, 'scripts', 'hooks', 'auth-store-gate.py')
+  // python3 -I: no PYTHON* variable and no script-directory module shadows the gate's imports (the settings "env"
+  // block reaches hook processes); the same form as the main agent's outgoing-copy-gate arms.
+  return failClosedGateRun(`python3 -I "${script}"`, 'auth-store-gate.py', hookTimeoutSec)
+}
+
+export function injectAuthStoreGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = authStoreGateCommand()
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = { matcher: AUTH_STORE_GATE_MATCHER, hooks: [{ type: 'command', command, timeout: 10 }] }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('auth-store-gate.py')),
     entry,
   ]
 }
@@ -924,11 +955,14 @@ export function ensureGovernanceGateCommands(name: string): boolean {
   const needEmail = agentGetsEmailGate(name)
     && (!hookCommandWired(ptuJson, emailCmd) || emailGateMatcherStale(ptu))
   const needPace = agentGetsGovernanceGates(name) && !hookCommandWired(ptuJson, paceCmd)
-  if (!needEmail && !needPace) return false
+  // BELA 6410: the auth-store gate reaches an existing sub-agent at boot too (effective at its next spawn).
+  const needAuthStore = agentGetsGovernanceGates(name) && !hookCommandWired(ptuJson, authStoreGateCommand())
+  if (!needEmail && !needPace && !needAuthStore) return false
   // The injectors dedupe by script basename, so a stale bare-`node` entry is
   // replaced in place rather than accumulated.
   if (needEmail) injectEmailSendGate(settings)
   if (needPace) injectSelfPaceGate(settings)
+  if (needAuthStore) injectAuthStoreGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

@@ -60,5 +60,8 @@ Remove `WEB_PUBLIC_PORT` (and `WEB_PUBLIC_URL`) from `.env` and restart the dash
 ## The limit
 
 The second factor protects against a remote attacker who knows the password. It does not protect against a process
-of the same OS user on this machine (any agent with a shell could clear the flag and the store); that is a separate
-item (a narrow gate on agent writes to `store/.dashboard-totp.json` and the `dashboard_users` table).
+of the same OS user on this machine. The agents are fenced by a narrow PreToolUse gate (`scripts/hooks/auth-store-gate.py`,
+every agent, BELA 6410): `store/.dashboard-totp.json` in any agent tool call (reading too), an SQL write on the
+`dashboard_users` table in text a program runs, and the `store/claudeclaw.db` file as a write target. It is a text
+brake, not an OS boundary: a file name or an SQL statement assembled at run time (variables, encoding), a script
+written first and run in a later call, or any process outside an agent tool call is not stopped by it.
