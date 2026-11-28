@@ -7,17 +7,23 @@ any agent's Bash could replace the secret, read it, or clear the flag, and the s
 against a remote password-knower. This is the narrow gate BELA asked for instead of porting upstream's whole
 db-write-gate (BELA 6410): three rules, for every agent, the main one included.
 
-  R1  The second-factor store, by name or by a glob that matches it: any use outside a data position (Bash), any
-      path tool on it (Read, Write, Edit, MultiEdit, NotebookEdit, Grep), and a script written with its name in it.
-      Reading is refused too: the secret is the factor.
-  R2  An SQL write naming dashboard_users (INSERT/REPLACE/UPDATE/DELETE/DROP/ALTER/CREATE TRIGGER ON), and the
-      schema route around a table name (PRAGMA writable_schema, writes on sqlite_master/sqlite_schema), in text a
-      program runs: an interpreter's arguments, its stdin (heredoc, here-string, a pipe from echo/printf/cat), a
-      command substitution, sh -c / eval, and a script file written with it.
+  R1  The second-factor store, by name or by a glob or brace list that matches it: any use outside a data position
+      (Bash), any path tool on it (Read, Write, Edit, MultiEdit, NotebookEdit, Grep), a recursive search aimed at the
+      store folder (grep -r, rg, ag, ack; the Grep tool there needs a glob that cannot match it), and a script written
+      with its name in it. Reading is refused too: the secret is the factor.
+  R2  An SQL write naming dashboard_users (INSERT/REPLACE/UPDATE/DELETE/DROP/ALTER/CREATE TRIGGER ON, the sqlite3
+      shell's .import), and the schema route around a table name (PRAGMA writable_schema, writes on
+      sqlite_master/sqlite_schema), in text a program runs: an interpreter's arguments, its stdin (heredoc,
+      here-string, a pipe from echo/printf/cat), a command substitution, sh -c / eval, and a script file written with it.
   R3  The dashboard DB file as a write target: rm, mv (either side), cp/install/rsync/ln/scp destination, dd of=,
-      tee, truncate, shred, sed/perl -i, a redirection, a Write/Edit of it, and interpreter code that both names the
-      file and calls a file-writing API. Opening it through sqlite3 to write other tables passes (the kanban,
-      memories and messages are written that way).
+      tee, truncate, shred, sed/perl -i, a redirection, find -fprint/-fls, the sqlite3 shell's .backup/.save/.clone,
+      a Write/Edit of it, and interpreter code that both names the file and calls a file-writing API; the store folder
+      (or a folder holding it) removed or moved away. Opening it through sqlite3 to write other tables passes (the
+      kanban, memories and messages are written that way).
+
+A find is read in its own left-to-right order (KISPROGI 6490 L1): only the filters before an action count, near the
+store only name-printing commands and one-file readers/removers may run, and every -exec command is checked as a
+command of its own; a find piped into xargs counts as -exec of the xargs command.
 
 Data positions pass, so a message or a note that QUOTES such a command is not a write: curl's -d/--data*/--json/
 -F/--form values (but not an @file value, which reads the file), echo/printf arguments and a heredoc fed to cat or
@@ -25,12 +31,15 @@ tee, unless the same pipeline feeds an interpreter.
 
 A text brake, not an OS boundary (the same user can always build the name or the SQL at run time, e.g. from
 variables, base64 or string concatenation). It closes the direct and the accidental routes; the dashboard itself
-writes these files as before. Known routes it does not close (KISPROGI 6483): a recursive grep from the install root or
-above (grep -rn x . reads the store's hidden file; it cannot be told from everyday searches), a copy of the whole store
-folder read afterwards (cp -r store /tmp/s, then /tmp/s/.d*), a script written in one call and run in a later one, and
-sqlite3 .restore / Connection.backup() INTO the live DB (it replaces the whole DB; the direction cannot be told from a
-legitimate backup in text). Matched against a fixed vocabulary only: anything else passes. Unparsable Bash that mentions one of the
-protected names is refused (fail closed); unparsable Bash without them passes.
+writes these files as before. Known routes it does not close (KISPROGI 6483, 6490): a recursive search from the
+install root or above (grep -rn x . reads the store's hidden file; it cannot be told from everyday searches), a copy of
+the whole store folder read afterwards (cp -r store /tmp/s, then /tmp/s/.d*), a script or an SQL file written in one
+step and run in a later one (in the same call or a later one: echo ... > /tmp/x.sql; sqlite3 db ".read /tmp/x.sql"),
+names listed by something other than find and fed to xargs (ls -a store | xargs ...), and sqlite3 .restore /
+Connection.backup() INTO the live DB (it replaces the whole DB; the direction cannot be told from a legitimate backup in
+text). Matched against a fixed vocabulary only: anything else passes. Unparsable Bash that mentions one of the
+protected names is refused (fail closed); unparsable Bash without them passes. Above 200 KB only the text rules run,
+and then the word "store" or a dot-name glob is refused too.
 
 Protocol: JSON on stdin ({tool_name, tool_input, cwd}); a refusal is a PreToolUse deny decision on stdout, exit 0.
 """
@@ -52,22 +61,29 @@ DB_RX = re.compile(r"claudeclaw\.db(?:-wal|-shm|-journal)?\b", re.I)
 
 # KISPROGI 6483 H (measured in real SQLite, every one rewrote the row): an alias (AS u), NOT INDEXED / INDEXED BY, a
 # comment in place of the white space, a line comment, a single-quoted identifier, and ATTACH with any schema prefix all
-# passed the first version. Now: any schema prefix, ' as well as " ` [ ] (an optional backslash before it, for raw code
-# text), no SET required after UPDATE <table>, a word boundary after the name (dashboard_users_archive passes), and the
-# text is matched with its SQL comments cut out as well as as it stands.
+# passed the first version. KISPROGI 6490 H: then a quoted schema name with a non-word character ("m x", [m x], `m x`,
+# "m-1", """q") and a quoted name with no space before it (UPDATE`t`SET, FROM"t", FROM[t]). Now: a schema prefix is any
+# quoted identifier ("..." and `...` with their doubled quote inside, [...], '...') or a bare word, every quote may carry
+# a backslash before it (raw code text), no white space is required before a quoted name, no SET is required after
+# UPDATE <table>, a word boundary follows the name (dashboard_users_archive passes), and the text is matched with its SQL
+# comments cut out as well as as it stands.
+_SCHEMA = (r"(?:(?:\\?\"(?:[^\"]|\"\"){0,64}\\?\"|\\?`(?:[^`]|``){0,64}\\?`|\\?\[[^\]]{0,64}\\?\]"
+           r"|\\?'(?:[^']|''){0,64}\\?'|\w+)\s*\.\s*)?")
 _Q = r"\\?[\"`\['\]]?"
-_TABLE = r"(?:" + _Q + r"\w+" + _Q + r"\s*\.\s*)?" + _Q + r"dashboard_users" + _Q + r"(?!\w)"
-_SCHEMA_TABLE = r"(?:" + _Q + r"\w+" + _Q + r"\s*\.\s*)?" + _Q + r"sqlite_(?:temp_)?(?:master|schema)\b"
+_TABLE = _SCHEMA + _Q + r"dashboard_users" + _Q + r"(?!\w)"
+_SCHEMA_TABLE = _SCHEMA + _Q + r"sqlite_(?:temp_)?(?:master|schema)\b"
 SQL_WRITE_RXS = [
-    re.compile(r"\binsert\s+(?:or\s+\w+\s+)?into\s+" + _TABLE, re.I),
-    re.compile(r"\breplace\s+into\s+" + _TABLE, re.I),
-    re.compile(r"\bupdate\s+(?:or\s+\w+\s+)?" + _TABLE, re.I),
-    re.compile(r"\bdelete\s+from\s+" + _TABLE, re.I),
-    re.compile(r"\bdrop\s+table\s+(?:if\s+exists\s+)?" + _TABLE, re.I),
-    re.compile(r"\balter\s+table\s+" + _TABLE, re.I),
-    re.compile(r"\bcreate\s+(?:temp\w*\s+)?trigger\b[\s\S]{0,400}?\bon\s+" + _TABLE, re.I),
+    re.compile(r"\binsert\s+(?:or\s+\w+\s+)?into\s*" + _TABLE, re.I),
+    re.compile(r"\breplace\s+into\s*" + _TABLE, re.I),
+    re.compile(r"\bupdate\s*(?:or\s+\w+\s*)?" + _TABLE, re.I),
+    re.compile(r"\bdelete\s+from\s*" + _TABLE, re.I),
+    re.compile(r"\bdrop\s+table\s*(?:if\s+exists\s*)?" + _TABLE, re.I),
+    re.compile(r"\balter\s+table\s*" + _TABLE, re.I),
+    re.compile(r"\bcreate\s+(?:temp\w*\s+)?trigger\b[\s\S]{0,400}?\bon\s*" + _TABLE, re.I),
     re.compile(r"\bwritable_schema\b", re.I),
-    re.compile(r"\b(?:insert\s+(?:or\s+\w+\s+)?into|update(?:\s+or\s+\w+)?|delete\s+from|replace\s+into)\s+" + _SCHEMA_TABLE, re.I),
+    re.compile(r"\b(?:insert\s+(?:or\s+\w+\s+)?into|update(?:\s+or\s+\w+)?|delete\s+from|replace\s+into)\s*" + _SCHEMA_TABLE, re.I),
+    # the sqlite3 shell's .import inserts a file's rows into the named table (a new login row, no SQL keyword at all)
+    re.compile(r"(?:^|[\s;'\"])\.import\s[^\n]{0,300}?\s" + _TABLE + r"\s*(?:$|[\n;'\"\\])", re.I),
 ]
 _SQL_COMMENT = re.compile(r"/\*[\s\S]*?(?:\*/|$)|--[^\n]*")
 # Interpreter code that hands the DB file to a file-writing call (R3 inside a script): the name inside the call's
@@ -80,6 +96,22 @@ FILE_WRITE_API_RXS = [
     re.compile(r"\bopen\s*\(\s*[^,)]{0,200}?" + _DBN + r"[^,)]{0,40},\s*['\"][rbt]*[wax+]", re.I),
     re.compile(_DBN + r"[^)\n]{0,80}\)\s*\.\s*(?:unlink|write_bytes|write_text|rename|replace|touch|open\s*\(\s*['\"][rbt]*[wax+])", re.I),
 ]
+# the sqlite3 shell's .backup / .save / .clone write a whole DB file to the path they name (the last word)
+_SQLITE_DOT_WRITE_RX = re.compile(r"(?:^|[\s;'\"])\.(?:backup|save|clone)[ \t]+([^\n;]{1,400})", re.I)
+
+
+def _sqlite_dot_writes_live_db(text: str, cwd: str) -> bool:
+    """A .backup / .save / .clone whose target resolves to the live DB file (a backup INTO it replaces the whole DB). A
+    target in a variable folder ($DEST/claudeclaw.db) is a backup copy, not the live file."""
+    for m in _SQLITE_DOT_WRITE_RX.finditer(text):
+        try:
+            words = shlex.split(m.group(1).strip().rstrip("'\""))
+        except ValueError:
+            words = m.group(1).split()
+        target = words[-1].strip("'\"") if words else ""
+        if target and not _unknown_place(target) and _is_live_db_path(target, cwd):
+            return True
+    return False
 
 
 def _code_writes_db(text: str) -> bool:
@@ -100,6 +132,8 @@ CURL_DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-ascii"
                    "-F", "--form", "--form-string"}
 METADATA_HEADS = {"ls", "stat", "test", "[", "[[", "realpath", "readlink", "dirname", "basename"}
 SEARCH_HEADS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "zgrep"}
+FILE_OP_HEADS = {"rm", "unlink", "shred", "truncate", "srm", "trash", "trash-put", "mv", "cp", "install", "rsync", "scp", "ln",
+                 "link", "ditto", "dd", "tee", "sed", "gsed", "perl"}
 SEPARATORS = {";", "&", "&&", "||", "\n", ";;", "(", ")"}
 PIPES = {"|", "|&"}
 REDIRS = {">", ">>", ">|", "&>", "&>>", "<", "<>", "<<<", ">&", "<&"}
@@ -126,6 +160,7 @@ def _deny(why: str) -> None:
 
 UNKNOWN_CWD = "\0unknown-cwd"
 BIG_TEXT = 200 * 1024
+_BIG_TEXT_STORE_RX = re.compile(r"\bstore\b|(?<![\w.])\.[\w.-]{0,40}[*?\[{]")
 
 
 def _resolve(path: str, cwd: str) -> str:
@@ -162,12 +197,60 @@ def _db_name_matches(base: str) -> bool:
 
 
 def _unknown_place(path: str) -> bool:
-    return bool(re.search(r"[$`]|__SUBST\d+__", path))
+    """A variable, a substitution, or find's {} (the matched path, e.g. "{}/claudeclaw.db" under -exec or xargs -I{})."""
+    return bool(re.search(r"[$`]|__SUBST\d+__|\{\}", path))
+
+
+_BRACE_LIST_RX = re.compile(r"\{([^{}]*,[^{}]*)\}")
+_BRACE_SEQ_RX = re.compile(r"\{(-?\d{1,4}|[A-Za-z])\.\.(-?\d{1,4}|[A-Za-z])\}")
+
+
+def _brace_variants(word: str, limit: int = 64):
+    """Bash brace expansion of a word (store/.dashboard-{totp,x}.json, claudeclaw.d{a..c}, {store,x}), innermost first,
+    at most `limit` words; a word without a brace list or sequence is returned as it is."""
+    out = [word]
+    for _ in range(8):
+        nxt, changed = [], False
+        for w in out:
+            m = _BRACE_LIST_RX.search(w)
+            if m:
+                parts = m.group(1).split(",")
+            else:
+                m = _BRACE_SEQ_RX.search(w)
+                if m:
+                    a, b = m.group(1), m.group(2)
+                    if a.lstrip("-").isdigit() and b.lstrip("-").isdigit():
+                        lo, hi = sorted((int(a), int(b)))
+                        parts = [str(k) for k in range(lo, min(hi, lo + limit) + 1)]
+                    elif a.isalpha() and b.isalpha():
+                        lo, hi = sorted((ord(a), ord(b)))
+                        parts = [chr(k) for k in range(lo, min(hi, lo + limit) + 1)]
+                    else:
+                        parts = None
+                    if parts is None:
+                        m = None
+            if m:
+                changed = True
+                nxt.extend(w[:m.start()] + p + w[m.end():] for p in parts)
+            else:
+                nxt.append(w)
+        out = nxt[:limit]
+        if not changed:
+            break
+    return out
+
+
+def _any_variant(fn, word: str, cwd: str) -> bool:
+    return any(fn(v, cwd) for v in (_brace_variants(word) if "{" in word else [word]))
 
 
 def _is_live_db_path(path: str, cwd: str) -> bool:
     """The live DB file (or a sidecar): its folder resolves to the live store and its name (or glob) matches; or the
-    place is not known (a variable, a substitution) and the name is spelled out."""
+    place is not known (a variable, a substitution) and the name is spelled out. Brace lists count as their words."""
+    return _any_variant(_is_live_db_path1, path, cwd)
+
+
+def _is_live_db_path1(path: str, cwd: str) -> bool:
     base = os.path.basename(path.rstrip("/"))
     if _unknown_place(path):
         return bool(DB_RX.search(base))
@@ -176,14 +259,17 @@ def _is_live_db_path(path: str, cwd: str) -> bool:
     where = _resolve(os.path.dirname(path) or ".", cwd)
     if where == UNKNOWN_CWD:
         return bool(DB_RX.search(base))
-    return where == os.path.realpath(STORE)
+    return _is_store_dir(os.path.dirname(path) or ".", cwd)  # a glob folder counts (rm st*/claudeclaw.db)
 
 
 def _is_live_totp_word(word: str, cwd: str) -> bool:
     """A Bash word naming the live second-factor store: its folder resolves to the live store and the name (or a glob)
     matches it; or the place is not known and the name is spelled out. A worktree's or a test copy's own store is not
-    the live one (resolved through links, so a link to the live store still counts)."""
-    w = word[1:] if word.startswith("@") else word
+    the live one (resolved through links, so a link to the live store still counts). Brace lists count as their words."""
+    return _any_variant(_is_live_totp_word1, word[1:] if word.startswith("@") else word, cwd)
+
+
+def _is_live_totp_word1(w: str, cwd: str) -> bool:
     base = os.path.basename(w.rstrip("/"))
     if _unknown_place(w):
         return bool(TOTP_RX.search(w))
@@ -192,16 +278,59 @@ def _is_live_totp_word(word: str, cwd: str) -> bool:
     where = _resolve(os.path.dirname(w) or ".", cwd)
     if where == UNKNOWN_CWD:
         return bool(TOTP_RX.search(base))
-    return where == os.path.realpath(STORE)
+    return _is_store_dir(os.path.dirname(w) or ".", cwd)  # a glob folder counts (cat st*/.dashboard-totp.json)
+
+
+def _store_and_ancestors():
+    store = os.path.realpath(STORE)
+    out = [store]
+    while os.path.dirname(out[-1]) != out[-1]:
+        out.append(os.path.dirname(out[-1]))
+    return out
+
+
+def _glob_names_dir(word: str, cwd: str, targets) -> bool:
+    """Whether a Bash glob word can expand to one of the target folders: component by component, as bash matches it (a
+    * stays inside one component and does not match a leading dot)."""
+    p = os.path.expanduser(word.rstrip("/") or "/")
+    if not os.path.isabs(p):
+        if cwd == UNKNOWN_CWD:
+            return False
+        p = os.path.join(os.path.realpath(cwd or ROOT), p)
+    pc = [c for c in os.path.normpath(p).split(os.sep) if c]
+    for t in targets:
+        tc = [c for c in t.split(os.sep) if c]
+        if len(tc) == len(pc) and all(fnmatch.fnmatchcase(a, b) and not (a.startswith(".") and not b.startswith((".", "[")))
+                                      for a, b in zip(tc, pc)):
+            return True
+    return False
 
 
 def _is_store_or_ancestor(path: str, cwd: str) -> bool:
-    """The live store folder itself or a folder that holds it (removing or moving it removes the live DB)."""
-    if re.search(r"[$`{*?\[]", path):
+    """The live store folder itself or a folder that holds it (removing or moving it removes the live DB); a brace list
+    or a glob that can expand to one of them counts (rm -rf st*, rm -rf {store,x}). A variable is not known here."""
+    return _any_variant(_is_store_or_ancestor1, path, cwd)
+
+
+def _is_store_or_ancestor1(path: str, cwd: str) -> bool:
+    if re.search(r"[$`{]|__SUBST\d+__", path):
         return False
+    if re.search(r"[*?\[]", path):
+        return _glob_names_dir(path, cwd, _store_and_ancestors())
     real = _resolve(path, cwd).rstrip(os.sep) or os.sep
     store = os.path.realpath(STORE)
     return real == store or store.startswith(real + os.sep) or real == os.sep
+
+
+def _is_store_dir(path: str, cwd: str) -> bool:
+    """The live store folder itself (a glob or brace list that can expand to it counts)."""
+    def one(p: str, c: str) -> bool:
+        if re.search(r"[$`{]|__SUBST\d+__", p):
+            return False
+        if re.search(r"[*?\[]", p):
+            return _glob_names_dir(p, c, [os.path.realpath(STORE)])
+        return _resolve(p, c) == os.path.realpath(STORE)
+    return _any_variant(one, path, cwd)
 
 
 def _glob_matches_totp(word: str) -> bool:
@@ -220,7 +349,8 @@ def _glob_matches_totp(word: str) -> bool:
 
 
 def _totp_word(word: str) -> bool:
-    return bool(TOTP_RX.search(word)) or _glob_matches_totp(word)
+    vs = _brace_variants(word) if "{" in word else [word]
+    return any(bool(TOTP_RX.search(v)) or _glob_matches_totp(v) for v in vs)
 
 
 def _sql_write(text: str) -> bool:
@@ -234,7 +364,7 @@ def _code_text_checks(text: str, where: str, cwd: str, depth: int) -> None:
         _deny(f"SQL-iras a dashboard_users tablara ({where})")
     if TOTP_RX.search(text):
         _deny(f"a masodik faktor tara egy futtatott szovegben ({where})")
-    if _code_writes_db(text):
+    if _code_writes_db(text) or _sqlite_dot_writes_live_db(text, cwd):
         _deny(f"a dashboard adatbazis-fajljanak irasa egy futtatott kodban ({where})")
     if depth < 4 and re.search(r"[;&|<>$`\n]|\b(?:rm|mv|cp|tee|dd|truncate|ln|install|rsync|find)\b", text):
         try:
@@ -347,12 +477,48 @@ def _strip_substitutions(cmd: str):
     return "".join(out), subs
 
 
+_OP_CHARS = ";&|<>()"
+_QUOTED_OP_RX = re.compile(r"\\([;&|<>()])|'([;&|<>()]{1,3})'|\"([;&|<>()]{1,3})\"")
+
+
+def _protect_quoted_ops(text: str):
+    """A quoted or escaped operator standing as a word (find's \\; and \\( \\), a ';' or '|' argument) is a word to
+    the shell, not an operator, but shlex returns it as the same bare ';' or '(' an operator gives, so the find
+    expression after it was cut off as a separate command (KISPROGI 6490 L1: "-exec cat {} ';' -name nope", and
+    "-exec ls {} \\; -o -delete", whose -delete then went unseen). Each one becomes a placeholder word first:
+    (text, {placeholder: backslash + operator}), so the token reads e.g. \\; and never equals an operator."""
+    out, ph, i, n, sq, dq = [], {}, 0, len(text), False, False
+    while i < n:
+        c = text[i]
+        if not sq and not dq and (i == 0 or text[i - 1] in " \t\r\n" + _OP_CHARS):
+            m = _QUOTED_OP_RX.match(text, i)
+            if m and (m.end() == n or text[m.end()] in " \t\r\n" + _OP_CHARS):
+                key = f"__QOP{len(ph)}__"
+                ph[key] = "\\" + (m.group(1) or m.group(2) or m.group(3))
+                out.append(key)
+                i = m.end()
+                continue
+        if c == "\\" and not sq and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == "'" and not dq:
+            sq = not sq
+        elif c == '"' and not sq:
+            dq = not dq
+        out.append(c)
+        i += 1
+    return "".join(out), ph
+
+
 def _tokens(text: str):
+    text, ph = _protect_quoted_ops(text)
     lx = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()\n")
     lx.whitespace = " \t\r"
     lx.whitespace_split = True
     lx.commenters = ""
-    return list(lx)
+    toks = list(lx)
+    return [ph.get(t, t) for t in toks] if ph else toks
 
 
 def _pipelines(toks):
@@ -414,7 +580,8 @@ def _split_command(toks):
             # skip the wrapper's own options and operands (env assignments, durations, nice levels)
             while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", words[i])
                                       or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
-                if re.fullmatch(r"-[nkus]|--signal|--kill-after|-o|-e|-i", words[i]) and i + 1 < len(words):
+                takes_arg = r"-[IiLPdEansx]|-[nkus]" if base == "xargs" else r"-[nkus]|--signal|--kill-after|-o|-e|-i"
+                if re.fullmatch(takes_arg, words[i]) and i + 1 < len(words):
                     i += 1
                 i += 1
             continue
@@ -505,77 +672,167 @@ def _destinations(head: str, args):
     return []
 
 
-_FIND_ACTIONS = ("-delete", "-exec", "-execdir", "-ok", "-okdir")
-# -exec commands that only show names or metadata: a find that runs only these reads no file's content.
-_FIND_NAME_ONLY_CMDS = {"echo", "printf", "ls", "stat", "basename", "dirname", "realpath", "readlink", "test", "[", "true", "du"}
+_FIND_FILTERS = ("-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex")
+_FIND_ALTERNATIVES = ("!", "\\!", "-not", "-o", "-or", ",", "\\,")
+_FIND_EXECS = ("-exec", "-execdir", "-ok", "-okdir")
+_FIND_WRITE_TARGETS = ("-fprint", "-fprint0", "-fls", "-fprintf")
+_FIND_STDOUT_ACTIONS = ("-print", "-print0", "-printf", "-ls")
 _PROTECTED_NAMES = (TOTP_NAME,) + DB_NAMES
-# -exec commands that can act on a whole folder (or run arbitrary code): a name filter proves nothing for them, since
-# a matched directory carries the protected files inside it.
-_FIND_FOLDER_CMDS = {"tar", "zip", "7z", "7za", "cpio", "rsync", "scp", "find", "xargs", "sudo", "env", "nice", "timeout",
-                     "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "perl", "ruby", "php", "awk",
-                     "gawk", "bun", "deno", "eval"}
-_RECURSIVE_FLAG_RX = re.compile(r"^-(?:-recursive|-archive|[A-Za-z]*[rRa][A-Za-z]*)$")
+# -exec commands that only show names or metadata: they read no file's content.
+_FIND_NAME_ONLY_CMDS = {"echo", "printf", "ls", "stat", "basename", "dirname", "realpath", "readlink", "test", "[", "true", "du"}
+# -exec commands that read or remove ONE file and fail on a directory without a recursive flag: for these a filter that
+# cannot select a protected file proves the call safe, since a matched folder gives them nothing. (diff and cmp are not
+# here: diff on two folders prints the content of the files they share.)
+_FIND_ONE_FILE_CMDS = {"cat", "tac", "nl", "head", "tail", "less", "more", "wc", "md5sum", "sha1sum", "sha224sum", "sha256sum",
+                       "sha384sum", "sha512sum", "b2sum", "cksum", "sum", "file", "strings", "xxd", "od", "hexdump", "base64",
+                       "base32", "grep", "egrep", "fgrep", "zgrep", "jq", "rm", "unlink", "shred", "truncate"}
+_RECURSIVE_FLAG_RX = re.compile(r"^-(?:-recursive|-archive|-dereference-recursive|-directories=recurse|[A-Za-z]*[rRa][A-Za-z]*)$")
 
 
-def _find_filter_may_match(flag: str, value: str) -> bool:
-    """Whether one find filter can select a protected file (the second-factor store, the DB file or a sidecar)."""
-    if flag in ("-regex", "-iregex"):
-        return True
-    last = value.rstrip("/").split("/")[-1] if flag in ("-path", "-ipath", "-wholename", "-iwholename") else value
-    if not last:
+def _vague_word(word: str) -> bool:
+    """A word whose place or name is not known from the text: a variable, a substitution, a glob, a brace."""
+    return bool(re.search(r"[$`*?\[{]|__SUBST\d+__", word))
+
+
+def _find_starts(args):
+    """(starting points, index of the first expression word); -H/-L/-P, -D x, -Ox and -- before them are skipped (KISPROGI
+    6490: "find -L /abs/store" was read as a start-less find from the cwd)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-H", "-L", "-P") or re.fullmatch(r"-O\d*", a):
+            i += 1
+        elif a == "-D":
+            i += 2
+        elif a == "--":
+            i += 1
+            break
+        else:
+            break
+    starts = []
+    while i < len(args) and not args[i].startswith("-") and args[i] not in ("(", "\\(", "!", "\\!", ",", "\\,"):
+        starts.append(args[i])
+        i += 1
+    return starts, i
+
+
+def _find_reach(args, starts, cwd: str):
+    """(near, printed paths of the protected files, place unknown). near: a start is the live store, holds it, sits below
+    it, or is not known (a variable, a glob, -files0-from, an unknown cwd). The printed paths are what -path sees."""
+    store = os.path.realpath(STORE)
+    near, unknown, printed = False, False, []
+    if "-files0-from" in args:
+        near = unknown = True
+    for st in starts or ["."]:
+        r = _resolve(st, cwd)
+        if _vague_word(st) or r == UNKNOWN_CWD:
+            near = unknown = True
+            continue
+        if r == store or store.startswith(r.rstrip(os.sep) + os.sep):
+            near = True
+            for n in _PROTECTED_NAMES:
+                rel = os.path.relpath(os.path.join(store, n), r)
+                printed.append((st if st.endswith("/") else st + "/") + rel)
+        elif r.startswith(store + os.sep):
+            near = unknown = True  # below the store: the protected files only through a link, at a path not known
+    return near, printed, unknown
+
+
+def _find_filter_may_match(flag: str, value: str, printed, unknown: bool) -> bool:
+    """Whether one find filter can select a protected file (the second-factor store, the DB file or a sidecar). -name
+    against the file names; -path / -wholename against the whole printed path, since find's * matches a slash too
+    (KISPROGI 6490 follow-up: -path '*/s*' from the install root selects ./store/claudeclaw.db, its last segment does
+    not). A [ or a backslash may match (Python's fnmatch reads [^x] and \\w differently from find), and -regex always."""
+    if flag in ("-regex", "-iregex") or "[" in value or "\\" in value:
         return True
     ci = flag.startswith("-i")
-    try:
-        return any(fnmatch.fnmatchcase(n.lower() if ci else n, last.lower() if ci else last) for n in _PROTECTED_NAMES)
-    except re.error:
+    v = value.lower() if ci else value
+    if flag in ("-name", "-iname"):
+        names = _PROTECTED_NAMES
+    elif unknown:
         return True
+    else:
+        names = printed
+    return any(fnmatch.fnmatchcase(n.lower() if ci else n, v) for n in names)
 
 
-def _find_on_store(args, cwd: str) -> bool:
-    """KISPROGI 6483 L1: a find that starts at, below or above the live store and deletes, or runs a command that can
-    read a file's content, is refused only when its filters can select a protected file. The filters of an expression
-    without -o / ! / -not / a comma are ANDed, so one filter that cannot match (-name, -iname, the last segment of
-    -path, -type d) is enough; -regex and the alternatives count as "may match"."""
-    starts = []
-    for a in args:
-        if a.startswith("-") or a in ("(", "!", "\\("):
-            break
-        starts.append(a)
-    if not starts:
-        starts = ["."]
-    store = os.path.realpath(STORE)
-    near = False
-    for st in starts:
-        r = _resolve(st, cwd)
-        if r == store or r.startswith(store + os.sep) or store.startswith(r.rstrip(os.sep) + os.sep):
-            near = True
-    if not near:
-        return False
-    reading = False
-    for k, a in enumerate(args):
-        if a == "-delete":
-            reading = True
-        elif a in _FIND_ACTIONS[1:] and k + 1 < len(args):
-            cmd = os.path.basename(args[k + 1])
-            cargs = []
-            for b in args[k + 2:]:
-                if b in (";", "\\;", "+"):
+def _check_find(args, cwd: str, depth: int, piped=None, feeds_interpreter: bool = False) -> None:
+    """KISPROGI 6483 L1, redone after KISPROGI 6490. find runs its expression left to right, so only the filters BEFORE
+    an action decide what the action gets ("find store -type f -delete -name nope" deletes the whole store).
+
+    From ANY start: an -exec/-execdir/-ok command is checked as a command of its own (rm store/claudeclaw.db from a find
+    in /tmp), and an -fprint/-fprint0/-fls/-fprintf target is an R3 write target (-fprint store/claudeclaw.db empties
+    the DB even with no match).
+
+    Near the live store (a start at, above or below it, or not known): -delete, and an -exec of a command that can
+    read or remove a file, passes only when one ANDed filter before it cannot select a protected file and no -o / ! /
+    -not / comma appears before it; the -exec command must be a name-only one, or a one-file reader/remover without a
+    recursive flag; anything else (shells, wrappers like busybox/nohup/stdbuf, rg, mv, cp, tar, interpreters) is
+    refused. piped: the command a "| xargs CMD" runs on find's output (it gets what -print would print)."""
+    starts, i = _find_starts(args)
+    near, printed, unknown = _find_reach(args, starts, cwd)
+    if feeds_interpreter:
+        # find's output is run as code (find ... -printf 'rm %p\\n' | sh): near the store it names the store's files to
+        # the interpreter; elsewhere every word of it is code text, with -printf's escapes decoded
+        if near:
+            _deny("a store mappan futo find kimenete egy ertelmezobe megy")
+        for a in args:
+            _code_text_checks(a.replace("\\n", "\n").replace("\\t", "\t"), "find -> ertelmezo", cwd, depth)
+    filters, alternative, acted = [], False, False
+
+    def narrowed() -> bool:
+        return not alternative and any(not _find_filter_may_match(f, v, printed, unknown) for f, v in filters)
+
+    def run_command(words, kind: str) -> None:
+        if not words:
+            return
+        cmd = os.path.basename(words[0])
+        if depth < 4:
+            check_bash(shlex.join(words), UNKNOWN_CWD if kind in ("-execdir", "-okdir") else cwd, depth + 1)
+        if not near or cmd in _FIND_NAME_ONLY_CMDS:
+            return
+        if cmd in _FIND_ONE_FILE_CMDS and not any(_RECURSIVE_FLAG_RX.match(b) or "recurse" in b for b in words[1:]):
+            if not narrowed():
+                _deny(f"find {kind} {cmd} a store mappan, olyan szurovel, ami a vedett fajlt is kivalaszthatja")
+            return
+        _deny(f"find {kind} {cmd} a store mappan (ott csak nevkiiro vagy egyfajlos olvaso/torlo parancs futhat)")
+
+    while i < len(args):
+        a = args[i]
+        if a in _FIND_ALTERNATIVES:
+            alternative = True
+        elif a in _FIND_FILTERS and i + 1 < len(args):
+            filters.append((a, args[i + 1]))
+            i += 1
+        elif a in _FIND_WRITE_TARGETS and i + 1 < len(args):
+            acted = True
+            if _is_live_db_path(args[i + 1], cwd):
+                _deny(f"find {a} a dashboard adatbazis-fajljaba ir")
+            i += 2 if a == "-fprintf" else 1
+        elif a == "-delete":
+            acted = True
+            if near and not narrowed():
+                _deny("find -delete a store mappan, olyan szurovel, ami a vedett fajlt is kivalaszthatja")
+        elif a in _FIND_EXECS and i + 1 < len(args):
+            acted = True
+            j, words = i + 1, []
+            while j < len(args):
+                b = args[j]
+                if b in (";", "\\;") or (b == "+" and words and words[-1] == "{}" and a in ("-exec", "-execdir")):
                     break
-                cargs.append(b)
-            if cmd in _FIND_NAME_ONLY_CMDS:
-                continue
-            if cmd in _FIND_FOLDER_CMDS or re.fullmatch(r"python\d[\d.]*", cmd) or any(_RECURSIVE_FLAG_RX.match(b) for b in cargs):
-                return True  # a folder-wide command near the store: no filter can prove it safe
-            reading = True
-    if not reading:
-        return False
-    if any(a in ("!", "-not", "-o", "-or", ",", "\\!") for a in args):
-        return True
-    filters = [(a, args[k + 1]) for k, a in enumerate(args[:-1])
-               if a in ("-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex")]
-    if not filters:
-        return True
-    return all(_find_filter_may_match(f, v) for f, v in filters)
+                words.append(b)
+                j += 1
+            run_command(words, a)
+            i = j
+        elif a in _FIND_STDOUT_ACTIONS:
+            acted = True
+            if piped:
+                run_command(piped, "| xargs")
+            if a == "-printf":
+                i += 1
+        i += 1
+    if piped and not acted:
+        run_command(piped, "| xargs")  # find's default action is -print, at the end of the expression
 
 
 def _unparsable_hits(cmd: str) -> bool:
@@ -593,8 +850,10 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
         # KISPROGI 6483 L2: shlex is quadratic on one long quoted token (365 KB: 4 s, 750 KB: 16.5 s, past the hook's
         # deadline, which fails the main agent's Bash closed). Above the threshold only the text rules run, the same set
         # as for unparsable Bash. Real commands peak far below it (measured max 41 KB, p99.9 15 KB).
-        if not best_effort and _unparsable_hits(cmd):
-            _deny("nagyon hosszu parancs a vedett nevekkel (csak szoveges ellenorzes)")
+        # KISPROGI 6490 L2: the name-free forms (rm -rf store, cat store/.d*, find store -delete) would slip through
+        # the text rules, so above the threshold a word "store" or a dot-name glob is refused as well (0 real hits).
+        if not best_effort and (_unparsable_hits(cmd) or _BIG_TEXT_STORE_RX.search(cmd)):
+            _deny("nagyon hosszu parancs a vedett nevekkel vagy a store mappaval (csak szoveges ellenorzes)")
         return
     text, bodies = _strip_heredocs(cmd)
     text, subs = _strip_substitutions(text)
@@ -665,6 +924,9 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
                 for piece in [a] + ([a.split("=", 1)[1]] if "=" in a else []):
                     if _is_live_totp_word(piece, cwd):
                         _deny(f"a masodik faktor tara a(z) {head} parancsban")
+            if head in FILE_OP_HEADS and any("{" in a for a in args):
+                # bash expands a brace list into separate words before the command sees them (mv {store,/tmp/s})
+                args = [v for a in args for v in (_brace_variants(a) if "{" in a else [a])]
             for d in _destinations(head, args):
                 if _is_live_db_path(d, cwd):
                     _deny(f"a dashboard adatbazis-fajlja a(z) {head} celjakent")
@@ -686,10 +948,126 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
                 if len(pos) >= 2 and any(_resolve(t, cwd) == os.path.realpath(STORE) for t in tdirs):
                     if any(_db_name_matches(os.path.basename(src.rstrip("/"))) for src in pos[:-1]):
                         _deny(f"a dashboard adatbazis-fajljanak felulirasa a store mappaba masolva ({head})")
-            if head == "find" and _find_on_store(args, cwd):
-                _deny("find -delete/-exec a store mappan (benne a masodik faktor taraval)")
-            if head in ("git", "sqlite3"):
-                pass
+            if head in SEARCH_HEADS and _recursive_search_on_store(head, args, data_pos, cwd):
+                _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
+            if head == "find":
+                piped = None
+                if idx + 1 < len(pipeline) and _starts_with_xargs(pipeline[idx + 1]):
+                    nh, nargs = parsed[idx + 1][0], parsed[idx + 1][1]
+                    piped = [nh] + nargs if nh else None
+                code_sink = any(_reads_code_from_stdin(h, a) for h, a, *_ in parsed[idx + 1:])
+                _check_find(args, cwd, depth, piped=piped, feeds_interpreter=code_sink)
+
+
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "busybox"}
+
+
+def _reads_code_from_stdin(head: str, args) -> bool:
+    """Whether a pipeline member runs its stdin as code: a shell without -c or a script file, an interpreter with no
+    script or with "-", sqlite3 with a database and no SQL argument. awk, or python3 with a script, reads it as data."""
+    pos = [a for a in args if not a.startswith("-")]
+    if head in _SHELLS:
+        return "-s" in args or not ("-c" in args or any(re.fullmatch(r"-[a-z]*c[a-z]*", a) for a in args) or pos)
+    if head == "sqlite3":
+        return len(pos) <= 1
+    if head in INTERPRETERS or re.fullmatch(r"python\d[\d.]*|pypy\d*|node\d*|perl\d[\d.]*|ruby\d[\d.]*|php\d[\d.]*", head or ""):
+        if head in ("awk", "gawk", "mawk", "nawk", "eval", "source", ".", "osascript"):
+            return False
+        return "-" in args or not (pos or any(a in ("-c", "-e", "-m", "--eval", "-r") for a in args))
+    return False
+
+
+def _starts_with_xargs(toks) -> bool:
+    """Whether a pipeline member runs xargs (after assignments and other wrappers)."""
+    for t in toks:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", t, re.S) or t.startswith("-"):
+            continue
+        b = os.path.basename(t)
+        if b == "xargs":
+            return True
+        if b not in WRAPPERS and not re.fullmatch(r"[0-9.]+[smhd]?", t):
+            return False
+    return False
+
+
+# grep and its kin: options whose value is the next word (a pattern, a number, a glob), so it is not a file operand
+_GREP_VALUE_OPTS = {"-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "-B", "-C", "-d", "-D", "--directories",
+                    "--devices", "--include", "--exclude", "--exclude-dir", "--label", "--binary-files", "--group-separator"}
+_RG_VALUE_OPTS = {"-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "-B", "-C", "-g", "--glob", "--iglob", "-t",
+                  "--type", "-T", "--type-not", "-j", "--threads", "-M", "--max-columns", "-d", "--max-depth", "-E",
+                  "--encoding", "--pre", "--pre-glob", "--sort", "--sortr", "--type-add", "--type-clear", "--ignore-file",
+                  "--max-filesize", "-r", "--replace", "--path-separator", "--colors", "--context-separator", "-G",
+                  "--field-match-separator", "--field-context-separator", "--engine", "--ignore", "--ignore-dir"}
+_GREP_HEADS = ("grep", "egrep", "fgrep", "zgrep")
+
+
+def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
+    """KISPROGI 6490 M1: a recursive search (grep -r/-R/-d recurse, rg, ag, ack) aimed at the live store folder, by a
+    file operand or, with no operand, by the cwd, that prints matching LINES. grep -r reads hidden files and rg reads them
+    with --hidden or -uu, and the second-factor store is a hidden file there. It passes when it prints names or counts
+    only (-l, -L, -c, -q, --files), or when its --include / --exclude / -g globs rule the file out. A search below the
+    store cannot reach it (it sits in the store itself); a search from the install root or above stays a known open route
+    (it is every everyday search)."""
+    if head in _GREP_HEADS:
+        rec = False
+        for k, a in enumerate(args):
+            if k in data_pos:
+                continue
+            if (re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", a) or a in ("--recursive", "--dereference-recursive")
+                    or re.fullmatch(r"(?:-d|--directories=?)\s*recurse", a)
+                    or (a in ("-d", "--directories") and k + 1 < len(args) and args[k + 1] == "recurse")):
+                rec = True
+        if not rec:
+            return False
+    grep = head in _GREP_HEADS
+    value_opts = _GREP_VALUE_OPTS if grep else _RG_VALUE_OPTS
+    value_letters = "efmABCdD" if grep else "efmABCgtTjMdEr"
+    names_only = ("--files-with-matches", "--files-without-match", "--count", "--count-matches", "--quiet", "--silent",
+                  "--files", "--files-without-match")
+    operands, includes, excludes, globs, quiet, k = [], [], [], [], False, 0
+    while k < len(args):
+        a = args[k]
+        nxt = args[k + 1] if k + 1 < len(args) else ""
+        if k in data_pos:
+            pass
+        elif a in names_only:
+            quiet = True
+        elif a.startswith("--") and "=" in a:
+            opt, val = a.split("=", 1)
+            (includes if opt == "--include" else excludes if opt == "--exclude" else globs if opt in ("--glob", "--iglob")
+             else []).append(val)
+        elif a in value_opts:
+            (includes if a == "--include" else excludes if a == "--exclude" else globs if a in ("-g", "--glob", "--iglob")
+             else []).append(nxt)
+            k += 1
+        elif re.fullmatch(r"-[A-Za-z0-9]+", a):
+            for ch in a[1:]:
+                if ch in "lLcq":
+                    quiet = True
+                if ch in value_letters:
+                    if ch == "g" and not grep:
+                        globs.append(a[a.index("g") + 1:] or nxt)
+                    if len(a) == a.index(ch) + 1:
+                        k += 1  # the value is the next word
+                    break
+        elif not a.startswith("-"):
+            operands.append(a)
+        k += 1
+    if operands:
+        aimed = any(_is_store_dir(o, cwd) for o in operands)
+    else:
+        aimed = cwd != UNKNOWN_CWD and _resolve(".", cwd) == os.path.realpath(STORE)
+    if not aimed or quiet:
+        # names only (-l, -L, -c, -q, --files): no line of the second-factor store is printed (BELA's and KISPROGI's
+        # real everyday store searches are all grep -rl; replay 2026-11-28)
+        return False
+    if includes and not any(fnmatch.fnmatchcase(TOTP_NAME, g) or "[" in g or "\\" in g or "{" in g for g in includes):
+        return False
+    if any(fnmatch.fnmatchcase(TOTP_NAME, g) for g in excludes if "[" not in g and "\\" not in g and "{" not in g):
+        return False
+    if globs and not _grep_glob_may_match_totp(" ".join(globs)):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -697,14 +1075,22 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
 # --------------------------------------------------------------------------------------------------------------
 
 def _grep_glob_may_match_totp(g: str) -> bool:
-    """Whether an rg glob (its last segment) can match the store's file name; braces and anything unparsable count."""
-    last = g.strip().split("/")[-1]
-    if not last or "{" in last or last.startswith("!"):
+    """Whether the Grep tool's glob can let rg search the store's file. Claude Code (2.1.326) splits the glob on white
+    space and then on commas (a piece holding both braces stays whole) and passes each piece as its own --glob, so a
+    file is searched when any include piece matches it; with only "!" (exclude) pieces everything else is searched.
+    A brace, a [ or a backslash count as "may match" (KISPROGI 6490 M1: Python's fnmatch reads [^x] and \\. differently
+    from rg, and both let rg print the secret line), and so does the file's name anywhere in the glob."""
+    if not g.strip() or "{" in g or "[" in g or "\\" in g or TOTP_RX.search(g):
         return True
-    try:
-        return fnmatch.fnmatchcase(TOTP_NAME, last)
-    except re.error:
+    pieces = [p for chunk in g.split() for p in chunk.split(",") if p]
+    include = [p for p in pieces if not p.startswith("!")]
+    if not include:
         return True
+    for p in include:
+        last = p.split("/")[-1]
+        if not last or fnmatch.fnmatchcase(TOTP_NAME, last):
+            return True
+    return False
 
 
 def check_path_tool(tool: str, ti: dict, cwd: str) -> None:

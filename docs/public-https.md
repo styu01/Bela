@@ -64,7 +64,8 @@ of the same OS user on this machine. The agents are fenced by a narrow PreToolUs
 every agent, BELA 6410): `store/.dashboard-totp.json` in any agent tool call (reading too), an SQL write on the
 `dashboard_users` table in text a program runs, and the `store/claudeclaw.db` file as a write target. It is a text
 brake, not an OS boundary: a file name or an SQL statement assembled at run time (variables, encoding, string
-concatenation), a script written first and run in a later call, or any process outside an agent tool call is not
-stopped by it. Known routes it does not close: a recursive grep from the install root (it reads the store's hidden
-file too), a copy of the whole store folder read afterwards, and `sqlite3 .restore` / `Connection.backup()` into the
-live database (indistinguishable in text from a legitimate backup).
+concatenation), a script written first and run afterwards, or any process outside an agent tool call is not
+stopped by it. Known routes it does not close: a recursive search from the install root (it reads the store's hidden
+file too), a copy of the whole store folder read afterwards, names listed by something other than `find` and fed to
+`xargs`, and `sqlite3 .restore` / `Connection.backup()` into the live database (indistinguishable in text from a
+legitimate backup).

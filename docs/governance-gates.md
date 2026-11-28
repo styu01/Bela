@@ -20,7 +20,8 @@ Claude Code egy hívást csak 2-es exit kódra (vagy stdout-on adott deny-ra) ti
 nem blokkoló hiba. Ezért a kapu-parancs vége egy közös farok (`failClosedGateRun`, upstream 0e681c83):
 0 és 2 marad, minden más (betöltési hiba, hiányzó fájl, jel, a saját határidő) 2 lesz. Ha egy kapu
 fájlja elromlik, az összes illeszkedő hívás TILTVA lesz. A stderr-üzenet megnevezi a kaput és a
-kiutat: Bash nélkül is javítható, mert a fő ágens Read/Edit/Write eszköze nincs kapuzva.
+kiutat: Bash nélkül is javítható, mert a fő ágens Read/Edit/Write eszközét kapu-hiba nem blokkolja
+(az auth-store-gate ezeken az eszközökön fail-open ágon fut, BELA 6410, KISPROGI 6483 L3).
 
 Szándékos kivétel: a fő ágens Telegram-válasz ága (outgoing-copy-gate a Telegram matcheren) fail-open
 marad, mert a Telegram a tulajdonos egyetlen felügyeleti csatornája. Ez a hiányzó fájlra is igaz: a parancs

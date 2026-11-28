@@ -59,7 +59,7 @@ const DENY_BASH: string[] = [
   // KISPROGI 6483 L1: a find near the store is refused when its filters can select a protected file
   "find store -name '*.json' -exec cat {} +", "find . -name 'claudeclaw*' -delete", 'find store ! -name x.log -exec cat {} +',
   "find store -name a -o -name b -exec cat {} +", "find store -regex '.*totp.*' -exec cat {} +", 'find / -exec grep secret {} +',
-  "find store -iname '.DASHBOARD*' -exec cat {} +", "find store -path '*/store/*' -exec cat {} +",
+  "find store -iname '.DASHBOARD*' -exec cat {} +", "find . -path '*/store/*' -exec cat {} +",
   "find . -name store -exec rm -rf {} +", "find . -name store -exec tar czf /tmp/s.tgz {} +", "find store -type d -exec grep -r secret {} +",
   "find store -name '*.log' -exec sh -c 'cat {}' \\;", "find store -type d -exec cat {} +",
   'echo "$(cat store/.dashboard-totp.json)"', 'cd store && grep -c x .dashboard-totp.json',
@@ -153,6 +153,16 @@ const SQL_BYPASSES: string[] = [
   "ATTACH 'other.db' AS m; DELETE FROM m.dashboard_users",
   'UPDATE `main`.`dashboard_users` SET totp_enabled=0',
   "INSERT INTO m . 'dashboard_users' (id) VALUES (9)",
+  // KISPROGI 6490 H: a quoted schema name with a non-word character, and a quoted name with no space before it
+  `ATTACH 'other.db' AS "m x"; DELETE FROM "m x".dashboard_users`,
+  "ATTACH 'other.db' AS [m x]; DELETE FROM [m x].dashboard_users",
+  "ATTACH 'other.db' AS `m x`; DELETE FROM `m x`.dashboard_users",
+  `ATTACH 'other.db' AS "m-1"; UPDATE "m-1"."dashboard_users" SET totp_enabled=0`,
+  `ATTACH 'other.db' AS """q"; DELETE FROM """q".dashboard_users`,
+  'UPDATE`dashboard_users`SET totp_enabled=0',
+  'DELETE FROM"dashboard_users"',
+  'DELETE FROM[dashboard_users]',
+  "UPDATE'dashboard_users'SET totp_enabled=0",
 ]
 const SQL_CONTROLS: string[] = [
   'SELECT * FROM dashboard_users', 'UPDATE dashboard_users_archive SET a=1', 'DELETE FROM dashboard_users2', 'UPDATE kanban_cards SET status=1',
@@ -171,6 +181,22 @@ describe('auth-store-gate: R2 bypasses (KISPROGI 6483 H)', () => {
   }
   it('an escaped double quote in raw code text counts', () => {
     expect(bash(`python3 - <<'EOF'\nimport sqlite3\nsqlite3.connect('x.db').execute("UPDATE \\"dashboard_users\\" SET totp_enabled=0")\nEOF`)).toBe('DENY')
+    // KISPROGI 6490 H: an escaped quoted schema name in raw code text (python and node)
+    expect(bash(`python3 - <<'EOF'\nimport sqlite3\nc=sqlite3.connect('x.db')\nc.execute("DELETE FROM \\"m x\\".dashboard_users")\nEOF`)).toBe('DENY')
+    expect(bash(`node -e "require('better-sqlite3')('x.db').exec(\\"DELETE FROM \\\\\\"m x\\\\\\".dashboard_users\\")"`)).toBe('DENY')
+  })
+  // KISPROGI 6490 follow-up: the sqlite3 shell's dot commands (the CLI is not installed here, so gate decisions only)
+  it('.import into dashboard_users is refused; .backup/.save onto the live DB file is refused, a backup copy elsewhere passes', () => {
+    expect(bash(`sqlite3 store/claudeclaw.db ".import /tmp/u.csv dashboard_users"`)).toBe('DENY')
+    expect(bash(`sqlite3 store/claudeclaw.db '.import --csv --skip 1 /tmp/u.csv "dashboard_users"'`)).toBe('DENY')
+    expect(bash(`echo '.import /tmp/u.csv main.dashboard_users' | sqlite3 store/claudeclaw.db`)).toBe('DENY')
+    expect(bash(`sqlite3 /tmp/e.db ".backup store/claudeclaw.db"`)).toBe('DENY')
+    expect(bash(`sqlite3 /tmp/e.db ".save ${ROOT}/store/claudeclaw.db"`)).toBe('DENY')
+    expect(bash(`sqlite3 /tmp/e.db ".backup main 'store/claudeclaw.db'"`)).toBe('DENY')
+    expect(bash(`sqlite3 store/claudeclaw.db ".import /tmp/k.csv kanban_cards"`)).toBe('pass')
+    expect(bash(`sqlite3 store/claudeclaw.db ".backup /tmp/b.db"`)).toBe('pass')
+    expect(bash(`mkdir -p store/backup-x; sqlite3 store/claudeclaw.db ".backup store/backup-x/claudeclaw.db"`)).toBe('pass')
+    expect(bash(`sqlite3 "$DB" ".backup '$DEST/claudeclaw.db'"`)).toBe('pass')
   })
   it('every bypass case is a real write in SQLite (so the cases test something real)', () => {
     const script = [
@@ -195,6 +221,128 @@ describe('auth-store-gate: R2 bypasses (KISPROGI 6483 H)', () => {
   })
 })
 
+// KISPROGI 6490 L1: find is evaluated in its own left-to-right order, with an allowlist near the store; every -exec
+// command is checked as a command of its own from any start; -fprint* targets are R3 write targets. Plus the forms
+// found while fixing it (a quoted ; or ( cut the expression, -path matched on its last segment, + not after {}).
+const r = String.raw
+const FIND_DENY: string[] = [
+  // order: only the filters before the action count
+  r`find store -maxdepth 1 -type f -exec cat {} + -name nope`, r`find store -maxdepth 1 -type f -exec cat {} \; -name nope`,
+  r`find store -maxdepth 1 -type f -exec cat {} ';' -name nope`, r`find store -type f -delete -name nope`,
+  r`find store -maxdepth 1 -exec cat {} + -name '*.log'`,
+  // a [ or a backslash in the pattern may match (fnmatch reads them differently from find)
+  r`find store -name '[^x]dashboard-totp.json' -exec cat {} \;`, r`find store -name 'claudeclaw.d[^x]' -delete`,
+  r`find store -name 'claudecla\w.db' -delete`,
+  // -path is matched on the whole printed path: * crosses the slash
+  r`find . -path '*/s*' -exec cat {} +`,
+  // a quoted / escaped ; or ( no longer cuts off the rest of the expression
+  r`find store -name '*.log' -exec ls {} \; -o -delete`, r`find store \( -name x -o -true \) -exec cat {} \;`,
+  r`find store -name x.log -exec ls {} \; , -delete`,
+  // the allowlist: wrappers, shells, rg, mv, cp, tar near the store
+  r`find store -name nope -exec busybox cat {} \;`, r`find . -maxdepth 1 -name store -exec busybox sh -c 'cat {}/.d*' ';'`,
+  r`find . -maxdepth 1 -name store -exec stdbuf -o0 tar cf /tmp/s.tar {} +`, r`find . -maxdepth 1 -name store -exec nohup bash -c 'cat {}/.d*' ';'`,
+  r`find . -maxdepth 1 -name store -exec rg --hidden -uu secret {} \;`, r`find . -maxdepth 1 -name store -exec mv {} /tmp/s \;`,
+  r`find . -name '*.py' -exec python3 -m py_compile {} \;`,
+  // + ends -exec only right after {}: here the recursive grep is still the -exec's own word
+  r`find . -name store -exec grep + -e x -r {} \;`,
+  // -H/-L/-P/-D/-O before the start, -files0-from, an unknown start
+  r`find -L ${ROOT}/store -maxdepth 1 -exec cat {} \;`, r`find -L store -maxdepth 1 -exec cat {} \;`, r`find -files0-from /tmp/l -delete`,
+  r`find $D -type f -exec cat {} +`, r`find store/.. -maxdepth 2 -exec cat {} +`,
+  // -fprint*: an R3 write target from any start (it empties the file even with no match)
+  r`find . -maxdepth 0 -fprint store/claudeclaw.db`, r`find /usr -maxdepth 0 -fprint store/claudeclaw.db`,
+  r`find /usr -maxdepth 0 -fprintf store/claudeclaw.db '%p'`, r`find /usr -maxdepth 0 -fls store/claudeclaw.db-wal`,
+  // the -exec command itself, from any start
+  r`find /usr -maxdepth 0 -exec rm ${ROOT}/store/claudeclaw.db \;`, r`find /usr -maxdepth 0 -exec cp /tmp/e.db store/claudeclaw.db \;`,
+  r`find /usr -maxdepth 0 -execdir rm claudeclaw.db \;`, r`find . -name store -execdir rm -rf store \;`,
+  // piped: xargs runs a command on what find prints; an interpreter runs it as code
+  r`find store -print0 | xargs -0 cat`, r`find store -type f | xargs rm`, r`find store -type f -print | xargs -I {} cat {}`,
+  r`find store -printf 'cat %p\n' | sh`, r`find /usr -maxdepth 0 -printf 'rm ${ROOT}/store/claudeclaw.db\n' | sh`,
+]
+const FIND_PASS: string[] = [
+  r`find store -maxdepth 1 -iname '*desired*' -exec cat {} \;`, r`find store \( -name nope \) -exec cat {} \;`,
+  r`find store -name '*.log' -print`, r`find store -name '*.log' | xargs tail -1`, r`find src -name '*.ts' | xargs grep -l foo`,
+  r`find /tmp/x -type f -exec cat {} +`, r`find src -type f -exec sed -i 's/a/b/' {} +`, r`find . -maxdepth 1 -name '*.md' -exec wc -l {} +`,
+  r`find store -maxdepth 1 -newer store/x.json -name '*.log'`, r`find "$D" -type f -printf '%s\n' | awk '{s+=$1}END{print s}'`,
+  r`find store -name '*.log' | python3 count.py`, r`find -- store -maxdepth 1 -name '*.log' -exec cat {} +`,
+  r`grep '|' f | wc -l`, r`find store -name '*.log' -exec grep -c x {} +`,
+  // -path sees the printed path: from the start "store" no path has a slash before "store" (real GNU find selects nothing)
+  r`find store -path '*/store/*' -exec cat {} +`,
+]
+const SEARCH_DENY: string[] = [
+  'grep -rn secret store', 'grep -R secret store/', 'rg secret store/', 'rg --hidden -uu x ./store', 'grep -d recurse x store',
+  'grep --directories=recurse x store', 'grep -rn x st*', 'ag x store', 'cd store && rg x', 'cd store && grep -r x',
+  'grep -rho x store --include=*.json', "rg -n x store -g '*.json'", 'grep -rn x store --exclude=*.log', `grep -rn x ${ROOT}/store`,
+]
+const SEARCH_PASS: string[] = [
+  // names or counts only: BELA's and the agents' real everyday store searches (replay 2026-11-28)
+  'grep -rl x store', 'grep -rlF x store/', 'grep -rIl x store logs', 'rg -l x store', 'rg -c x store', 'grep -rq x store',
+  // narrowed away from the file, below the store, or from the install root (the known open route)
+  'grep -rn x --include=*.py store', "rg -n x store -g '*.log'", 'grep -rn x store --exclude=.dashboard-totp.json',
+  'grep -r x store/logs', 'grep -rn foo .', 'grep -r secret', 'rg -n foo', 'grep x store/a.log',
+]
+const GLOB_DENY: string[] = [
+  'cat store/.dashboard-{totp,x}.json', 'cat st*/.dashboard-totp.json', 'rm st*/claudeclaw.db', 'rm -rf st*', 'rm -rf {store,x}',
+  'rm store/claudeclaw.d{a..c}', 'mv {store,/tmp/s}', 'cat store/{.,}*',
+]
+const GLOB_PASS: string[] = ['echo {store,x}', 'rm -rf /tmp/{a,b}', 'ls store/{a,b}.log', 'cat store/a{1..3}.log', 'rm -rf sc*/tmp']
+
+describe('auth-store-gate: find, recursive search, globs (KISPROGI 6490)', () => {
+  for (const c of [...FIND_DENY, ...SEARCH_DENY, ...GLOB_DENY]) it(`refuses: ${c.slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of [...FIND_PASS, ...SEARCH_PASS, ...GLOB_PASS]) it(`passes: ${c.slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+
+  // So the cases test something real: each relative-only refused form, run for real (GNU find, bash) in a fresh scratch
+  // copy of a store, prints the secret or removes / empties / moves the DB file. Never the live store: every command
+  // here is relative and runs with its cwd in its own new temp folder.
+  const REAL: [string, 'leaks' | 'db'][] = [
+    [r`find store -maxdepth 1 -type f -exec cat {} + -name nope`, 'leaks'], [r`find store -maxdepth 1 -type f -exec cat {} \; -name nope`, 'leaks'],
+    [r`find store -type f -delete -name nope`, 'db'], [r`find store -name '[^x]dashboard-totp.json' -exec cat {} \;`, 'leaks'],
+    [r`find store -name 'claudeclaw.d[^x]' -delete`, 'db'], [r`find store -name 'claudecla\w.db' -delete`, 'db'],
+    [r`find . -path '*/s*' -exec cat {} +`, 'leaks'], [r`find store -name '*.log' -exec ls {} \; -o -delete`, 'db'],
+    [r`find store \( -name x -o -true \) -exec cat {} \;`, 'leaks'], [r`find . -maxdepth 0 -fprint store/claudeclaw.db`, 'db'],
+    [r`find . -name store -exec grep + -e TOTPSECRET -r {} \;`, 'leaks'], [r`find store -print0 | xargs -0 cat`, 'leaks'],
+    [r`find store -type f | xargs rm`, 'db'], [r`find store -printf 'cat %p\n' | sh`, 'leaks'],
+    ['cat store/.dashboard-{totp,x}.json', 'leaks'], ['cat st*/.dashboard-totp.json', 'leaks'], ['rm st*/claudeclaw.db', 'db'],
+    ['rm -rf st*', 'db'], ['mv {store,s2}', 'db'], ['rm store/claudeclaw.d{a..c}', 'db'], ['cat store/{.,}*', 'leaks'],
+    ['grep -rn TOTPSECRET store', 'leaks'], ['cd store && grep -r TOTPSECRET', 'leaks'],
+  ]
+  it('every refused form above that is relative really leaks the secret or hits the DB file (run in a scratch copy)', () => {
+    for (const [cmd, effect] of REAL) {
+      expect(cmd, 'a real-run case must stay relative').not.toMatch(/(^|[\s=])\/|\.\.\/|\/\.\.|~|\$HOME/)
+      expect(bash(cmd), cmd).toBe('DENY')
+      const box = mkdtempSync(join(tmp, 'real-'))
+      mkdirSync(join(box, 'store'))
+      writeFileSync(join(box, 'store', '.dashboard-totp.json'), '{"secret":"TOTPSECRET"}\n')
+      writeFileSync(join(box, 'store', 'claudeclaw.db'), 'DBDATA')
+      writeFileSync(join(box, 'store', 'a.log'), 'log\n')
+      const run = spawnSync('bash', ['--noprofile', '--norc', '-c', cmd], { cwd: box, encoding: 'utf-8', timeout: 10_000 })
+      if (effect === 'leaks') expect(run.stdout, cmd).toContain('TOTPSECRET')
+      else {
+        let db = ''
+        try { db = readFileSync(join(box, 'store', 'claudeclaw.db'), 'utf-8') } catch { db = '<gone>' }
+        expect(db, cmd).not.toBe('DBDATA')
+      }
+      rmSync(box, { recursive: true, force: true })
+    }
+  })
+
+  // From a cwd that is not near the store (the test install itself sits under the OS temp folder, so /tmp would be):
+  // the options before the start are skipped, -files0-from counts as an unknown start, and a far find stays free.
+  it('from a far cwd: -L/-O/-D before the start, -files0-from; a far find passes', () => {
+    expect(bash(r`find -L ${ROOT}/store -maxdepth 1 -exec cat {} \;`, '/usr')).toBe('DENY')
+    expect(bash(r`find -O3 -D tree ${ROOT}/store -exec cat {} +`, '/usr')).toBe('DENY')
+    expect(bash(r`find -P -- ${ROOT}/store -type f -delete`, '/usr')).toBe('DENY')
+    expect(bash(r`find -files0-from /usr/l -delete`, '/usr')).toBe('DENY')
+    expect(bash(r`find -L share -maxdepth 1 -exec cat {} \;`, '/usr')).toBe('pass')
+    expect(bash(r`find share -maxdepth 1 -type f -delete`, '/usr')).toBe('pass')
+  })
+
+  it('a very long command: the name-free forms are refused above 200 KB too; a plain one passes', () => {
+    const pad = `; : '${'A'.repeat(210 * 1024)}'`
+    for (const c of ['rm -rf store', 'cat store/.d*', 'find store -delete']) expect(bash(c + pad), c).toBe('DENY')
+    expect(bash('echo hi' + pad)).toBe('pass')
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')
@@ -216,6 +364,16 @@ describe('auth-store-gate: path tools (BELA 6410)', () => {
     expect(decide('Grep', { pattern: 'secret', path: store, glob: '{a,b}.log' })).toBe('DENY')
     expect(decide('Grep', { pattern: 'secret', path: store, glob: '!*.log' })).toBe('DENY')
     expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.log' })).toBe('pass')
+    // KISPROGI 6490 M1: [ and a backslash may match (rg printed the secret line for both), the name anywhere in the glob,
+    // and Claude Code splits one glob on white space and commas into several --glob (any include piece decides)
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '[^x]dashboard-totp.json' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '\\.dashboard-totp.json' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: 'logs/../.dashboard-totp.json' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.log *.json' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.log,*.json' })).toBe('DENY')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.log !*.txt' })).toBe('pass')
+    expect(decide('Grep', { pattern: 'secret', path: store, glob: '*.log,*.txt' })).toBe('pass')
+    expect(decide('Grep', { pattern: 'x', path: ROOT, glob: '[^x]dashboard-totp.json' })).toBe('DENY')
     expect(decide('Grep', { pattern: 'secret', path: join(store, 'logs'), glob: 'logs/*.txt' })).toBe('pass')
     expect(decide('Grep', { pattern: 'x', path: ROOT, glob: '*.md' })).toBe('pass')
     expect(decide('Grep', { pattern: 'x', path: ROOT, glob: '.dashboard-*' })).toBe('DENY')
