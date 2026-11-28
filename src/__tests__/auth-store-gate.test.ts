@@ -1177,6 +1177,88 @@ describe('auth-store-gate: KISPROGI 6651 R1 (an exact real long option that is a
   })
 })
 
+// KISPROGI 6651 W1-W10 (review 6646): the 6632 rules' remainders, all open in production too (measured in the sandbox).
+const R6651_W_DENY: string[] = [
+  // W1: a git config value set on its own (the COUNT / KEY by another command)
+  `export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0=alias.x; export GIT_CONFIG_VALUE_0='!rm -rf store'; git x`,
+  `export GIT_CONFIG_VALUE_3='!rm -rf store'`, `GIT_CONFIG_VALUE_0='!rm -rf store' git x`,
+  `export GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0='!rm -rf store' GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0=alias.x; git x`,
+  `export GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='rm -rf store' git log`,
+  // W2: printf -v / read into a command-valued variable
+  `printf -v GIT_EDITOR 'rm -rf store'; export GIT_EDITOR; git commit`, `printf -v GIT_EDITOR '%s' 'rm -rf store'`,
+  `read -r GIT_EDITOR <<< 'rm -rf store'; export GIT_EDITOR; git commit`, `IFS= read -r GIT_PAGER <<'E'\nrm -rf store\nE\nexport GIT_PAGER; git log`,
+  'read GIT_EDITOR; export GIT_EDITOR; git commit', `printf -v PS4 '$(rm -rf store)'; export PS4; bash -x -c true`,
+  // W3: shell text carried by other variables
+  `PS4='$(rm -rf store)' bash -x -c true`, `env 'BASH_FUNC_ls%%=() { rm -rf store; }' bash -c ls`,
+  'TAR_OPTIONS=--remove-files tar -cf /tmp/x.tar store', 'export TAR_OPTIONS=--remove-files', 'export TAR_OPTIONS=--remove-f',
+  `TAR_OPTIONS="--to-command='rm -rf store'" tar -xf /tmp/a.tar`, `RSYNC_RSH='sh -c "rm -rf store"' rsync h:x /tmp/y`,
+  `env BASH_ENV=<(echo 'rm -rf store') bash -c true`, `env ENV=<(printf 'rm -rf store') sh -i -c true`,
+  `export PROMPT_COMMAND='rm -rf store'`, `SUDO_EDITOR='rm -rf store' sudoedit /tmp/x`,
+  // W4: gawk's in-place rewrite by other spellings; every -e counts
+  `gawk -W include=inplace '{}' store/claudeclaw.db`, `gawk -Winclude=inplace '{}' store/claudeclaw.db`,
+  `gawk -Wi inplace '{}' store/claudeclaw.db`, `gawk '@include "inplace"; {}' store/claudeclaw.db`,
+  `gawk -i /usr/share/awk/inplace.awk '{}' store/claudeclaw.db`, `gawk --include=/usr/share/awk/inplace.awk '{}' store/claudeclaw.db`,
+  `gawk -e '{print > FILENAME}' -e 'BEGIN{}' store/claudeclaw.db`, `gawk -e'{print > FILENAME}' store/claudeclaw.db`,
+  // W5: system() with the DB as an input
+  `awk '{system("rm -f " FILENAME); exit}' store/claudeclaw.db`, `awk -v c='rm -f ' '{system(c FILENAME)}' store/claudeclaw.db`,
+  // W6: decompressors with a custom suffix, and by other names
+  'gunzip -f -S .x store/claudeclaw.db.x', 'gzip -d -f --suffix=.x store/claudeclaw.db.x', 'gunzip -f -S.x store/claudeclaw.db.x',
+  'uncompress -f store/claudeclaw.db.Z', 'zstdmt --rm store/claudeclaw.db', 'zstdmt -d /tmp/x.zst -o store/claudeclaw.db',
+  'unlz4 /tmp/x.lz4 store/claudeclaw.db', 'lbzip2 store/claudeclaw.db', 'plzip store/claudeclaw.db', 'unpigz -f store/claudeclaw.db.gz',
+  // W8: a dirstack entry (~N / ~+N / ~-N) after pushd
+  `pushd ${ROOT} && pushd /tmp && rm -rf ~1/store`, `pushd ${ROOT} && pushd /tmp && rm -rf ~+1/store`,
+  `cd ${ROOT} && pushd /tmp && rm -rf ~-0/store`, `pushd ${ROOT} && pushd /tmp && cd ~1 && rm -rf store`,
+  // W9: npm global options not listed here, and the "exe" abbreviation (measured on npm 10)
+  `npm exe -- sh -c 'rm -rf store'`, `npm exe -c 'rm -rf store'`, `npm --scope x exec -c 'rm -rf store'`,
+  `npm --node-options x exec -c 'rm -rf store'`, `npm --node-options foo exec -c 'rm -rf store'`,
+  `npm --scope @me exec -- sh -c 'rm -rf store'`,
+]
+const R6651_W_PASS: string[] = [
+  'export GIT_CONFIG_VALUE_0=cat', `export GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0='Istvan Kiss' GIT_CONFIG_COUNT=1`,
+  'printf -v EDITOR vim', `printf -v x '%s' 'rm -rf store'`, `read -r x <<< 'rm -rf store'`, `read -p 'Name: ' NAME`,
+  'while read -r line; do echo "$line"; done < /tmp/f', `IFS=: read -r a b <<< "$PATH"`, 'read -r -t 5 -n 1 ans',
+  `PS4='+ ' bash -x /tmp/s.sh`, `export PS1='\\u@\\h:\\w\\$ '`, `PS1='$(git branch 2>/dev/null) $ '`,
+  `env 'BASH_FUNC_hi%%=() { echo hi; }' bash -c hi`, 'TAR_OPTIONS=--wildcards tar -xf /tmp/a.tar', `export TAR_OPTIONS='--no-same-owner'`,
+  `RSYNC_RSH='ssh -p 2222' rsync -a /tmp/x h:y`, `env BASH_ENV=<(echo 'echo hi') bash -c true`, `export PROMPT_COMMAND='history -a'`,
+  'gawk -W version', `gawk -Wposix '{print}' /etc/passwd`, `gawk '@include "inplace"; {print}' /tmp/x.txt`, `awk '{system("ls")}' /tmp/x`,
+  `awk '{print length($0)}' store/claudeclaw.db`, `awk 'BEGIN{system("date")}'`, `gawk -e 'BEGIN{print 1}'`,
+  'gzip -S .z /tmp/x.log', 'gunzip -S .x /tmp/a.x', 'uncompress -c store/claudeclaw.db.Z', 'zstdmt store/claudeclaw.db',
+  'zstd --r store/claudeclaw.db', 'echo ~1', 'ls ~1', 'rm -rf ~1/tmpdir',
+  'npm --silent run build', 'npm run x', 'npm --scope x install', 'npm exe vitest run', 'npm x vitest', 'pnpm --filter web exec tsc',
+]
+const R6651_W_REAL: Array<[string, 'leaks' | 'db', boolean]> = [
+  [`git init -q; export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0=alias.x; export GIT_CONFIG_VALUE_0='!rm -rf store'; git x`, 'db', false],
+  [`git init -q; printf -v GIT_EDITOR 'rm -rf store'; export GIT_EDITOR; git -c user.name=a -c user.email=b commit --allow-empty`, 'db', false],
+  [`git init -q; read -r GIT_EDITOR <<< 'rm -rf store'; export GIT_EDITOR; git -c user.name=a -c user.email=b commit --allow-empty`, 'db', false],
+  [`PS4='$(rm -rf store)' bash -x -c true`, 'db', false], [`env 'BASH_FUNC_ls%%=() { rm -rf store; }' bash -c ls`, 'db', false],
+  ['TAR_OPTIONS=--remove-files tar -cf x.tar store', 'db', false], [`env BASH_ENV=<(echo 'rm -rf store') bash -c true`, 'db', false],
+  [`awk '{system("rm -f " FILENAME); exit}' store/claudeclaw.db`, 'db', false],
+  ['echo EVIL | gzip > n.gz && mv n.gz store/x.gz && cd store && mv x.gz claudeclaw.db.x && gunzip -f -S .x claudeclaw.db.x', 'db', false],
+  ...(HAS('rsync') ? [[`RSYNC_RSH='sh -c "rm -rf store"' rsync h:x y`, 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('gawk') ? [[`gawk -W include=inplace '{}' store/claudeclaw.db`, 'db', false] as [string, 'db', boolean],
+    [`gawk '@include "inplace"; {}' store/claudeclaw.db`, 'db', false] as [string, 'db', boolean]] : []),
+  ...(HAS('zstdmt') ? [['zstdmt -q --rm store/claudeclaw.db', 'db', false] as [string, 'db', boolean]] : []),
+]
+
+describe('auth-store-gate: KISPROGI 6651 W1-W10 (config values alone, printf -v / read, variables that carry shell text, gawk in-place, awk system(), decompressor suffixes, nested repositories, dirstack tildes, npm options)', () => {
+  for (const c of R6651_W_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6651_W_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('W7: in a repository nested in the install, git runs an alias at the nested top (measured), so ../ from there counts', () => {
+    const nested = join(ROOT, 'docs', 'nested'); const sub = join(nested, 'sub')
+    mkdirSync(join(nested, '.git'), { recursive: true }); mkdirSync(sub, { recursive: true })
+    try {
+      for (const c of [`git -c alias.x='!rm -rf ../../store' x`, `GIT_EDITOR='rm -rf ../../store' git commit`,
+        `git config alias.x '!rm -rf ../../store'`, `git -c alias.x='!rm -rf store' x`])
+        expect(bash(c, sub), c).toBe('DENY')
+      for (const c of [`git -c alias.x='!ls' x`, 'git status', `git -c alias.x='!rm -rf ../../tmpdir' x`])
+        expect(bash(c, sub), c).toBe('pass')
+    } finally { rmSync(nested, { recursive: true, force: true }) }
+  })
+  it.skipIf(!BWRAP)('the refused forms really hit the DB (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6651_W_REAL) realRun(cmd, effect, cc)
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')

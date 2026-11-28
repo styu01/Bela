@@ -221,6 +221,7 @@ TMUX_SHELL_SUBCOMMANDS = {
 }
 WRAPPERS = set(WRAPPER_SPECS)
 _ASSIGN_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
+_FUNC_ASSIGN_RX = re.compile(r"BASH_FUNC_[^=/\s]+(?:%%|\(\))=.*", re.S)
 
 
 def _long_option(name: str, known) -> str:
@@ -263,7 +264,8 @@ def _unwrap(words):
     i = 0
     while i < len(words):
         w = _unmark(words[i])
-        if _ASSIGN_RX.fullmatch(w):
+        if _ASSIGN_RX.fullmatch(w) or ("env" in out["wrappers"] and _FUNC_ASSIGN_RX.fullmatch(w)):
+            # KISPROGI 6651 W3: env also passes BASH_FUNC_f%%=() { ... } (bash imports it as function f)
             out["assigns"].append(tuple(w.split("=", 1)))
             i += 1
             continue
@@ -276,11 +278,31 @@ def _unwrap(words):
         if os.path.basename(w) in ("npm", "pnpm", "yarn"):
             # KISPROGI 6624 N2, 6632 V13: npm exec / npm x / pnpm exec / pnpm dlx / yarn dlx run a package binary like
             # npx, also after global options (npm --prefix x exec, pnpm -C x exec, npm --yes exec)
-            j0 = i + 1
-            while j0 < len(words) and _unmark(words[j0]).startswith("-"):
+            # KISPROGI 6651 W9: an option not known here may take a value too (npm --scope x exec, --node-options x):
+            # a word right after an option is either its value or the subcommand; npm also takes "exe" (measured)
+            j0, after_opt = i + 1, False
+            subs_ = ("exec", "x", "dlx") + (("exe",) if os.path.basename(w) == "npm" else ())
+            while j0 < len(words):
                 o0 = _unmark(words[j0])
-                j0 += 2 if (o0 in _NPM_VALUE_OPTS and "=" not in o0) else 1
-            if j0 < len(words) and _unmark(words[j0]) in ("exec", "x", "dlx"):
+                if o0 == "--":
+                    break
+                if o0.startswith("-"):
+                    if o0 in _NPM_VALUE_OPTS and "=" not in o0:
+                        j0 += 2
+                        after_opt = False
+                    else:
+                        j0 += 1
+                        after_opt = "=" not in o0
+                    continue
+                if o0 in subs_ and after_opt:
+                    # "x" right after an option may be its value (npm --scope x exec ...): the R1 second reading
+                    # drops it, so the later subcommand is found there
+                    _ABBREVIATED.append(o0)
+                if o0 in subs_ or not after_opt:
+                    break
+                j0 += 1
+                after_opt = False
+            if j0 < len(words) and _unmark(words[j0]) in subs_:
                 spec = WRAPPER_SPECS["npx"]
                 i = j0  # the subcommand; the name itself is passed below (i += 1 there)
         if spec is None:
@@ -644,8 +666,9 @@ _BIG_TEXT_STORE_RX = re.compile(r"\bstore\b|(?<![\w.])\.[\w.-]{0,40}[*?\[{]")
 def _resolve(path: str, cwd: str) -> str:
     """The real path; a relative path under an unknown cwd (a cd to a variable) resolves to a place that is never the
     store, so only a spelled-out name can still match there (the callers check the name for unknown places)."""
-    if re.match(r"~-(?:/|$)", path):
-        return UNKNOWN_CWD  # bash's ~- is the previous cwd (KISPROGI 6524 P5): not known here
+    if re.match(r"~(?:-|[+-]?\d+)(?:/|$)", path):
+        # bash's ~- is the previous cwd (KISPROGI 6524 P5), ~N / ~+N / ~-N a dirstack entry (KISPROGI 6651 W8)
+        return UNKNOWN_CWD
     if re.match(r"~\+(?:/|$)", path):
         path = "." + path[2:]  # ~+ is the cwd itself
     p = os.path.expanduser(path)
@@ -680,7 +703,7 @@ def _db_name_matches(base: str) -> bool:
 
 def _unknown_place(path: str) -> bool:
     """A variable, a substitution, or find's {} (the matched path, e.g. "{}/claudeclaw.db" under -exec or xargs -I{})."""
-    return bool(re.search(r"[$`]|__SUBST\d+__|\{\}|^~-(?:/|$)", path))
+    return bool(re.search(r"[$`]|__SUBST\d+__|\{\}|^~(?:-|[+-]?\d+)(?:/|$)", path))
 
 
 _BRACE_LIST_RX = re.compile(r"\{([^{}]*,[^{}]*)\}")
@@ -815,8 +838,10 @@ def _unknown_place_may_be_store(path: str) -> bool:
 def _is_store_or_ancestor1(path: str, cwd: str) -> bool:
     if re.search(r"[$`{]|__SUBST\d+__", path):
         return False
-    if re.match(r"~-(?:/|$)", path):
-        return _unknown_place_may_be_store(path[3:] or ".")  # KISPROGI 6632 V9: bash's ~- is $OLDPWD
+    m_ = re.match(r"~(?:-|[+-]?\d+)(?:/|$)", path)
+    if m_:
+        # KISPROGI 6632 V9: bash's ~- is $OLDPWD; 6651 W8: ~N / ~+N / ~-N a dirstack entry (pushd)
+        return _unknown_place_may_be_store(path[m_.end():] or ".")
     if cwd == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(path)) and not path.startswith("~"):
         return _unknown_place_may_be_store(path)
     if re.search(r"[*?\[]", path):
@@ -2526,7 +2551,7 @@ def _cd_targets(cur, head: str, args, cmd: str):
         k += 1
     target = words[k] if k < len(words) else ("" if head == "pushd" else "~")
     if not target or target == "-" or re.fullmatch(r"[+-]\d+", target) or _unknown_place(target) \
-            or (target.startswith("~") and re.match(r"~[-+]\d*(?:/|$)", target)):
+            or (target.startswith("~") and re.match(r"~(?:[-+]\d*|\d+)(?:/|$)", target)):
         return [UNKNOWN_CWD]
     out = {}
     if re.search(r"[*?\[]", target):
@@ -2565,18 +2590,114 @@ def _cd_targets(cur, head: str, args, cmd: str):
     return list(out)
 
 
-def _env_command_checks(toks, head: str, args, cwd: str, depth: int) -> None:
+def _runs_as_shell(name: str) -> bool:
+    """KISPROGI 6651 W1-W3: a variable whose value some program runs (or expands) as shell text."""
+    return (name in _ENV_COMMAND_VARS or bool(re.fullmatch(r"GIT_CONFIG_VALUE_\d+|PS[0-4]|BASH_FUNC_.+(?:%%|\(\))", name))
+            or name in ("GIT_CONFIG_PARAMETERS", "BASH_ENV", "ENV", "TAR_OPTIONS"))
+
+
+def _read_targets(head: str, args):
+    """KISPROGI 6651 W2: the variable names printf -v / read write (bash builtins), with the printf value (or None)."""
+    words = [_unmark(a) for a in args]
+    if head == "printf":
+        k = 0
+        while k < len(words) and words[k].startswith("-") and words[k] != "--":
+            if words[k] == "-v" and k + 1 < len(words):
+                rest = words[k + 2:]
+                if rest[:1] == ["--"]:
+                    rest = rest[1:]
+                try:
+                    val = _printf_output(rest[0], rest[1:]) if rest else ""
+                except Exception:
+                    val = None
+                return [(words[k + 1], val)]
+            if words[k].startswith("-v") and len(words[k]) > 2:
+                return [(words[k][2:], None)]
+            k += 1
+        return []
+    if head == "read":
+        names, k = [], 0
+        while k < len(words):
+            w = words[k]
+            if w == "--":
+                names += words[k + 1:]
+                break
+            if w.startswith("-") and len(w) > 1:
+                # options with a value: -a ARRAY -d DELIM -i TEXT -n N -N N -p PROMPT -t T -u FD (attached or not)
+                m = re.fullmatch(r"-[ers]*([adinNptu])(.*)", w)
+                if m:
+                    if m.group(1) == "a":
+                        names.append(m.group(2) or (words[k + 1] if k + 1 < len(words) else ""))
+                    k += 1 if m.group(2) else 2
+                    continue
+                k += 1
+                continue
+            names.append(w)
+            k += 1
+        return [(n, None) for n in names if n]
+    return []
+
+
+def _env_command_checks(toks, head: str, args, cwd: str, depth: int, herestr=(), here_bodies=(), sub_text=None) -> None:
     """KISPROGI 6624 N2, 6632 V1-V3: environment that makes a program run a command line. An assignment of a
     command-valued variable (GIT_EDITOR, GIT_PAGER, PAGER, EDITOR, ...) before a command, through env, alone in the
     chain (NAME=VALUE; ... git log), or by export / declare -x / typeset -x / local / readonly; GIT_CONFIG_COUNT with
     GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n and GIT_CONFIG_PARAMETERS give git config keys. The text runs where git runs
-    it (the repository's top level) and, when it only sets the environment for later commands, anywhere later."""
+    it (the repository's top level) and, when it only sets the environment for later commands, anywhere later.
+    KISPROGI 6651: W1 every GIT_CONFIG_VALUE_n value on its own (the COUNT and the KEY may be set by another command);
+    W2 printf -v NAME / read NAME (the value from the format, the here-string or the heredoc; from input not seen here
+    it is refused for such a name); W3 the prompt strings (PS4 under bash -x: its $(...) runs), an exported function
+    (env 'BASH_FUNC_f%%=() { ... }' bash), BASH_ENV / ENV fed by <(...) (the substitution's output is the script),
+    TAR_OPTIONS (tar's options from the environment), RSYNC_RSH / SUDO_EDITOR / FCEDIT / PROMPT_COMMAND (in the list)."""
     pairs = list(_unwrap([t for t in toks if t not in REDIRS])["assigns"])
     if head in ("export", "declare", "typeset", "local", "readonly"):
         pairs += [tuple(_unmark(a).split("=", 1)) for a in args if _ASSIGN_RX.fullmatch(_unmark(a))]
-    later = not head or head in ("export", "declare", "typeset", "local", "readonly")
+    if head in ("printf", "read"):
+        here = list(herestr) + list(here_bodies)
+        for n, v in _read_targets(head, args):
+            if not _runs_as_shell(n):
+                continue
+            if v is None and head == "read" and here:
+                v = here[0]
+            if v is None:
+                _deny(f"{head} egy parancskent futo valtozoba ({n}) itt nem lathato bemenetbol")
+            pairs.append((n, v))
+    later = not head or head in ("export", "declare", "typeset", "local", "readonly", "printf", "read")
     places = list(dict.fromkeys([cwd] + _git_root_places(cwd) + ([UNKNOWN_CWD] if later else [])))
     texts = [v for n, v in pairs if n in _ENV_COMMAND_VARS and v]
+    # W1: a config value alone (an alias needs "!", a command key runs it as is). Only a prefix assignment for this one
+    # command that also names its key here is judged with that key (below); a value for later commands may be re-keyed.
+    keyed = dict(pairs) if not later else {}
+    texts += [v[1:] if v.startswith("!") else v for n, v in pairs
+              if re.fullmatch(r"GIT_CONFIG_VALUE_\d+", n) and v and n.replace("VALUE", "KEY") not in keyed]
+    # the keyed ones by their key, whether or not GIT_CONFIG_COUNT is set here (an earlier export may have set it)
+    texts += [t for t in (_git_key_shell(keyed[n.replace("VALUE", "KEY")], v) for n, v in pairs
+                          if re.fullmatch(r"GIT_CONFIG_VALUE_\d+", n) and n.replace("VALUE", "KEY") in keyed) if t]
+    # W3: an exported function's body
+    texts += [re.sub(r"^\s*\(\s*\)", "", v) for n, v in pairs if re.fullmatch(r"BASH_FUNC_.+(?:%%|\(\))", n) and v]
+    for n, v in pairs:
+        if re.fullmatch(r"PS[0-4]", n) and v:
+            # W3: a prompt string is expanded (its $(...) and `...` run) when bash prints it (PS4 under -x)
+            for c in places:
+                check_bash(v, c, depth + 1, best_effort=True)
+        if n in ("BASH_ENV", "ENV") and v and sub_text:
+            # W3: a non-interactive bash (BASH_ENV) / sh -i (ENV) runs that file first; <(...) makes it the output
+            for mk in re.findall(r"__SUBST\d+__", v):
+                if mk in sub_text:
+                    for c in places:
+                        check_bash(sub_text[mk] + " | sh", c, depth + 1)
+        if n == "TAR_OPTIONS" and v:
+            # W3: tar reads options from it before its own (--to-command, --checkpoint-action, -C, --remove-files)
+            try:
+                topts = shlex.split(v)
+            except ValueError:
+                topts = v.split()
+            for c in places:
+                _tar_checks(topts, c, depth)
+            if later and any(o.startswith("--") and _long_option(o.partition("=")[0], PROGRAM_SPECS["tar"]["lv"]
+                                                                 | PROGRAM_SPECS["tar"]["flags_l"]) == "--remove-files"
+                             for o in topts):
+                _deny("TAR_OPTIONS=--remove-files a kesobbi tar-hivasoknak (a becsomagolt fajlokat torli)")
     env = dict(pairs)
     try:
         count = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
@@ -2609,7 +2730,11 @@ def _names_protected(word: str, d: str) -> bool:
 
 _TAR_CREATE = {"-c", "--create"}
 _COMPRESSORS_DELETING = {"gzip", "pigz", "bzip2", "pbzip2", "xz", "lzma", "lzip", "zstd", "lz4", "compress", "gunzip",
-                         "bunzip2", "unxz", "unlzma", "unzstd"}
+                         "bunzip2", "unxz", "unlzma", "unzstd",
+                         # KISPROGI 6651 W6 (measured: uncompress = gzip -d, zstdmt = zstd -T0): the same tools by
+                         # other names; zstdmt / pzstd / unlz4 keep their input unless --rm
+                         "uncompress", "zstdmt", "pzstd", "unpigz", "lbzip2", "lbunzip2", "plzip", "unlz4", "pbunzip2"}
+_KEEPING_UNLESS_RM = ("zstd", "unzstd", "zstdmt", "pzstd", "lz4", "unlz4")
 _TAR_SHELL_OPTS = {"--to-command", "--use-compress-program", "-I", "--rsh-command", "--info-script", "-F",
                    "--new-volume-script"}
 
@@ -2710,7 +2835,11 @@ _NPM_VALUE_OPTS = {"--prefix", "-C", "--dir", "-w", "--workspace", "--filter", "
 # KISPROGI 6624 N2: environment variables whose value a program runs as a command line
 _ENV_COMMAND_VARS = {"GIT_EDITOR", "GIT_PAGER", "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_SSH", "GIT_ASKPASS",
                      "GIT_SEQUENCE_EDITOR", "GIT_PROXY_COMMAND", "PAGER", "EDITOR", "VISUAL", "MANPAGER", "LESSOPEN",
-                     "LESSCLOSE", "BROWSER", "SSH_ASKPASS", "SYSTEMD_PAGER"}
+                     "LESSCLOSE", "BROWSER", "SSH_ASKPASS", "SYSTEMD_PAGER",
+                     # KISPROGI 6651 W3, W10 (measured: RSYNC_RSH runs as "sh -c VALUE host ..."): rsync's remote shell,
+                     # its connect program, sudoedit's editor, fc's editor, bash -i's prompt command, svn / hg editors
+                     "RSYNC_RSH", "RSYNC_CONNECT_PROG", "SUDO_EDITOR", "FCEDIT", "PROMPT_COMMAND", "SVN_EDITOR",
+                     "HGEDITOR", "CVS_RSH"}
 _GIT_DRIVER_KEY_RX = re.compile(r"(?:filter\.[^.]+\.(?:clean|smudge|process)|diff\.[^.]+\.(?:textconv|command)|"
                                 r"merge\.[^.]+\.driver)")
 
@@ -2735,16 +2864,17 @@ def _git_root_places(cwd: str):
     if cwd == UNKNOWN_CWD:
         return [UNKNOWN_CWD]
     real_root = os.path.realpath(ROOT)
-    if cwd == real_root or cwd.startswith(real_root + os.sep):
-        return [real_root]
+    inside = cwd == real_root or cwd.startswith(real_root + os.sep)
     d = cwd
     for _ in range(64):
         if os.path.exists(os.path.join(d, ".git")):
-            return [d]
+            # KISPROGI 6651 W7: a repository nested in the install (docs/projects/<x>/.git) has its own top level; the
+            # install root stays a candidate too (a cwd under a removed nested .git, the main repository's own aliases)
+            return list(dict.fromkeys([d] + ([real_root] if inside else [])))
         if os.path.dirname(d) == d:
             break
         d = os.path.dirname(d)
-    return []
+    return [real_root] if inside else []
 
 
 # KISPROGI 6609 N2: git config keys whose value git runs as a shell command line
@@ -2812,7 +2942,8 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
                 _code_text_checks(text, "env -S", cwd, depth)
                 check_bash(text, cwd, depth + 1)
         if depth < 4:
-            _env_command_checks(pipeline[idx], head, args, cwd, depth)
+            _env_command_checks(pipeline[idx], head, args, cwd, depth, herestr,
+                                [bodies.get(m, "") for m in heredocs], sub_text)
         for w in _wrapper_writes(pipeline[idx]):
             if _is_live_db_path(w, cwd) or _is_live_totp_word(w, cwd):
                 _deny("egy burkolo (script) a dashboard adatbazis-fajljaba vagy a masodik faktor taraba irna")
@@ -2893,11 +3024,23 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             # ('{print > FILENAME}' store/claudeclaw.db truncates the file it reads)
             # KISPROGI 6632 V10: -v / -F / -f / -i / -l take a value (the program is the first other word); -e / --source
             # give the program; V8: -i inplace rewrites every input file
+            # KISPROGI 6651 W4: -W NAME[=VALUE] is --NAME[=VALUE] (gawk's "W;" getopt), every -e / --source adds to the
+            # program, @include "inplace" in the program and an inplace(.awk) path load the in-place rewrite too
             words_ = [_unmark(x) for x in args]
-            prog, files, k, inplace, from_file = None, [], 0, False, False
+            progs, files, k, inplace, from_file = [], [], 0, False, False
             awk_long = AWK_LONG_VALUE
+
+            def _inplace_name(v: str) -> bool:
+                return os.path.basename(v) in ("inplace", "inplace.awk")
             while k < len(words_):
                 a = words_[k]
+                if a == "-W" and k + 1 < len(words_):
+                    words_[k + 1] = "--" + words_[k + 1]
+                    k += 1
+                    continue
+                if a.startswith("-W") and len(a) > 2:
+                    words_[k] = "--" + a[2:]
+                    continue
                 if a.startswith("--") and len(a) > 2:
                     lname, leq, lval = a.partition("=")
                     lname = _long_option(lname, awk_long | AWK_LONG_FLAGS)
@@ -2905,10 +3048,10 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
                         if not leq:
                             lval = words_[k + 1] if k + 1 < len(words_) else ""
                         if lname == "--source":
-                            prog = lval
+                            progs.append(lval)
                         if lname in ("--file", "--exec"):
                             from_file = True
-                        if lname == "--include" and lval in ("inplace", "inplace.awk"):
+                        if lname == "--include" and _inplace_name(lval):
                             inplace = True
                         k += 1 if leq else 2
                         continue
@@ -2916,28 +3059,34 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
                     continue
                 if a in ("-v", "-F", "-f", "-i", "-l", "-e", "-E") and k + 1 < len(words_):
                     if a == "-e":
-                        prog = words_[k + 1]
+                        progs.append(words_[k + 1])
                     if a in ("-f", "-E"):
                         from_file = True
-                    if a == "-i" and words_[k + 1] in ("inplace", "inplace.awk"):
+                    if a == "-i" and _inplace_name(words_[k + 1]):
                         inplace = True
                     k += 2
                     continue
-                if re.fullmatch(r"-[vFfilE].+", a):
-                    inplace = inplace or a in ("-iinplace", "-iinplace.awk")
+                if re.fullmatch(r"-[vFfileE].+", a):
+                    inplace = inplace or (a[:2] == "-i" and _inplace_name(a[2:]))
                     from_file = from_file or a[:2] in ("-f", "-E")
+                    if a[:2] == "-e":
+                        progs.append(a[2:])
                     k += 1
                     continue
                 if a.startswith("-") and a != "-":
                     k += 1
                     continue
-                if prog is None and not from_file:
-                    prog = a
+                if not progs and not from_file:
+                    progs.append(a)
                 else:
                     files.append(a)
                 k += 1
             prot_files = [f for f in files if _is_live_db_path(f, cwd) or _is_live_totp_word(f, cwd)]
-            if prot_files and (inplace or (prog is not None and re.search(r"[>|]", _mask_literals(prog))) or from_file):
+            prog = "\n".join(progs)
+            # KISPROGI 6651 W4/W5: @include "inplace" in the text; system() runs a command line (system("rm " FILENAME))
+            if re.search(r'@include\s+"(?:[^"]*/)?inplace(?:\.awk)?"', prog):
+                inplace = True
+            if prot_files and (inplace or (progs and re.search(r"[>|]|\bsystem\s*\(", _mask_literals(prog))) or from_file):
                 _deny("awk iras (print >, -i inplace) mikozben a dashboard adatbazisa vagy a masodik faktor tara a bemenete")
         if head and re.fullmatch(r"perl\d*[\d.]*", head) and any(
                 re.fullmatch(r"-[aclnpsTtuUwWX0-9]*i\S*", _unmark(a)) for a in args):
@@ -3005,7 +3154,7 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             flags = [_unmark(a) for a in args if _unmark(a).startswith("-")]
             keep = any(f in ("-k", "--keep", "-c", "--stdout", "--to-stdout", "-t", "--test", "-l", "--list") or
                        (re.fullmatch(r"-[A-Za-z0-9]+", f) and set(f[1:]) & set("kctl")) for f in flags)
-            if head in ("zstd", "unzstd", "lz4") and "--rm" not in flags:
+            if head in _KEEPING_UNLESS_RM and "--rm" not in flags:
                 keep = True
             if not keep:
                 for d in pos_args:
@@ -3015,13 +3164,20 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
             # gunzip -f replaces an existing file, -k keeps the input but still writes), zstd / lz4 -o FILE, lz4 IN OUT
             to_stdout = any(f in ("-c", "--stdout", "--to-stdout", "-t", "--test", "-l", "--list") or
                             (re.fullmatch(r"-[A-Za-z0-9]+", f) and set(f[1:]) & set("ctl")) for f in flags)
+            cw_ = [_unmark(a) for a in args]
+            # KISPROGI 6651 W6: -S / --suffix SUF (gzip, xz family): decompressing strips that suffix too (measured:
+            # gunzip -f -S .x store/<db>.x replaces the DB)
+            sufs = [cw_[k + 1] for k in range(len(cw_) - 1) if cw_[k] in ("-S", "--suffix")]
+            sufs += [a[2:] for a in cw_ if a.startswith("-S") and len(a) > 2]
+            sufs += [a.split("=", 1)[1] for a in cw_ if a.startswith("--suf") and "=" in a]
             outs = [] if to_stdout else [o_ for o_ in (re.sub(r"\.(?:gz|z|Z|bz2|xz|lzma|zst|lz|lz4)$", "", d)
                                                          for d in pos_args) if o_ not in pos_args]
-            cw_ = [_unmark(a) for a in args]
-            if head in ("zstd", "unzstd", "lz4"):
+            if not to_stdout:
+                outs += [d[:-len(x)] for d in pos_args for x in sufs if x and d.endswith(x) and len(d) > len(x)]
+            if head in _KEEPING_UNLESS_RM:
                 outs += [cw_[k + 1] for k in range(len(cw_) - 1) if cw_[k] == "-o"]
                 outs += [a[2:] for a in cw_ if a.startswith("-o") and len(a) > 2]
-            if head == "lz4" and len(pos_args) == 2 and not any(f in ("-m", "--multiple") for f in flags):
+            if head in ("lz4", "unlz4") and len(pos_args) == 2 and not any(f in ("-m", "--multiple") for f in flags):
                 outs.append(pos_args[1])
             for o_ in outs:
                 if _is_live_db_path(o_, cwd) or _is_live_totp_word(o_, cwd):
@@ -3088,7 +3244,13 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
         if head == "git" and _git_grep_on_store(args, cwd):
             _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
         if head in ("tar", "gtar", "bsdtar"):
-            _tar_checks(args, cwd, depth)
+            # KISPROGI 6651 W3: TAR_OPTIONS set for this tar (TAR_OPTIONS=--remove-files tar -cf x store) comes first
+            topt = [v for n, v in _unwrap([t for t in pipeline[idx] if t not in REDIRS])["assigns"] if n == "TAR_OPTIONS"]
+            try:
+                topt_w = [w for v in topt for w in shlex.split(v)]
+            except ValueError:
+                topt_w = [w for v in topt for w in v.split()]
+            _tar_checks(topt_w + list(args), cwd, depth)
         if head == "zip" and _zip_to_stdout_reads_store(args, cwd):
             _deny("zip archivum a kimenetre a store tartalmabol (egy lepesben olvasna); fajlba csomagolva mehet")
         if head == "pax" and _pax_to_stdout_reads_store(args, cwd):
