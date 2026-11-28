@@ -51,14 +51,18 @@ export function clearPackageReviewNotice(name: string): boolean {
  * KISPROGI 6464 K1, measured by PROGI on Claude Code 2.1.326 (2026-11-28, haiku, a scratch git tree shaped like this
  * install): when a session opens ANY file in agents/<name>/, with the Read tool and with Bash cat/head alike, the CLI
  * attaches that folder's CLAUDE.md, and through its import line the package's PACKAGE.md, to the context as memory,
- * i.e. as instructions. A claudeMdExcludes entry covering agents/<name>/CLAUDE.md in the reviewing session's settings
- * stops it (both tools). So the review request says exactly that: open nothing there unless the exclusion is set.
- * Kept ASCII like the rest of BELA's text.
+ * i.e. as instructions. A claudeMdExcludes entry covering agents/<name>/CLAUDE.md stops it (both tools), but ONLY in
+ * the install root's project .claude/settings.json (it reaches the sessions whose cwd is the root: the main agent).
+ * NEVER in ~/.claude/settings.json (KISPROGI 6476, measured): provisionIsolatedConfigDir copies that file into every
+ * sub-agent's .claude-config, and a user-level exclusion stops each sub-agent's OWN CLAUDE.md from loading, so the
+ * fleet would lose its rules, the safety rules included. The review request says both. Kept ASCII like the rest.
  */
 export function packageReviewWarning(name: string): string {
   return `FIGYELEM az atnezeshez: az agents/${name}/ mappaban BARMELY fajl megnyitasa (Read eszkozzel ES Bash cat/head-del is) ` +
     `a mappa CLAUDE.md-jet es azon at a PACKAGE.md-t (a meg jova nem hagyott persona-szoveget) UTASITASKENT tolti a kontextusodba. ` +
-    `Csak akkor nyiss meg ott fajlt, ha a sajat beallitasodban a claudeMdExcludes kizarja a **/agents/*/CLAUDE.md-t; kulonben ne nyisd meg, szolj Istvannak.`
+    `Csak akkor nyiss meg ott fajlt, ha a telepites gyokerenek .claude/settings.json-jaban a claudeMdExcludes kizarja a **/agents/*/CLAUDE.md-t; ` +
+    `kulonben ne nyisd meg, szolj Istvannak. A kizarast SOHA ne a ~/.claude/settings.json-ba tedd: azt minden al-ugynok megkapja, ` +
+    `es akkor a sajat CLAUDE.md-juk (a szabalyaik) sem toltodik be.`
 }
 
 /** Test seam: the key of `name`'s open review request, or null. */

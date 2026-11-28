@@ -84,7 +84,10 @@ describe('the review warning (KISPROGI 6464 K1)', () => {
     expect(w).toContain('agents/nora/')
     expect(w).toContain('Read eszkozzel ES Bash cat/head-del is')
     expect(w).toContain('UTASITASKENT')
-    expect(w).toContain('claudeMdExcludes kizarja a **/agents/*/CLAUDE.md-t')
+    expect(w).toContain('a telepites gyokerenek .claude/settings.json-jaban a claudeMdExcludes kizarja a **/agents/*/CLAUDE.md-t')
+    // KISPROGI 6476: the user-level file reaches every sub-agent (provisionIsolatedConfigDir) and would mute them.
+    expect(w).toContain('SOHA ne a ~/.claude/settings.json-ba')
+    expect(w).toContain('a sajat CLAUDE.md-juk (a szabalyaik) sem toltodik be')
     expect(w).toContain('ne nyisd meg, szolj Istvannak')
   })
   it('ASCII only like the rest of the text BELA gets; no em or en dash, no spaced double hyphen', () => {
