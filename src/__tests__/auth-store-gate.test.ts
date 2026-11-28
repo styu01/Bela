@@ -495,6 +495,85 @@ describe('auth-store-gate: KISPROGI 6505 (exclude with a slash, eval --, GNU abb
   })
 })
 
+// KISPROGI 6511: R1 (ugrep --and/--not/--andnot take a pattern, --group-separator and rg --ignore take no value; the
+// protected-name exemption only for a word that is a pattern in both readings), HS1 ($'...' / $"..."), AR (<< inside
+// $((...)) / ((...)) is a shift), M2b (-sd rec), HS3 (a substitution's output as code), echo/printf, xargs <<<; plus
+// the operator runs shlex glued (";" + newline, ");", "&&" + newline, "|" + newline) and a cd inside ( ... ).
+const R6511_DENY: string[] = [
+  // R1
+  'grep --and TOTPSECRET store', 'grep -r --group-separator TOTPSECRET store', 'grep --group-separator TOTPSECRET store',
+  'rg --hidden --ignore TOTPSECRET store', 'grep --and TOTPSECRET store/.d*', 'grep --and TOTPSECRET store/.dashboard-totp.json',
+  'grep --group-separator TOTPSECRET store/.dashboard-totp.json', 'grep --not NOMATCH store/.dashboard-totp.json',
+  'grep --andnot NOMATCH store/.dashboard-totp.json', 'grep -n --and . store/.dashboard-totp.json', 'grep --not -e NOMATCH store/.dashboard-totp.json',
+  'rg --ignore TOTPSECRET store/.dashboard-totp.json', 'rg --ignore-dir TOTPSECRET store/.dashboard-totp.json',
+  'grep -C TOTPSECRET store/.dashboard-totp.json', 'grep -m TOTPSECRET store/.dashboard-totp.json', 'grep -d TOTPSECRET store/.dashboard-totp.json',
+  'grep --lab X store/.dashboard-totp.json', 'rg --sort TOTPSECRET store/.dashboard-totp.json', 'rg -r TOTPSECRET store/.dashboard-totp.json',
+  // HS1
+  `rm $'store/claudeclaw.db'`, `rm store/$'claudeclaw.db'`, `bash -c $'rm store/claudeclaw.db'`, `eval $'rm store/claudeclaw.db'`,
+  `cat $'store/.dashboard-totp.json'`, `cat store/$'.dashboard-totp.json'`, `python3 -c $'import os\\nos.remove("store/claudeclaw.db")'`,
+  `mv $'store' /tmp/s`, `echo $'rm store/claudeclaw.db' | sh`, 'rm $"store/claudeclaw.db"', 'cat $"store/.dashboard-totp.json"',
+  `rm -rf $'store'`, 'rm -rf $"store"', `sh <<< $'rm store/claudeclaw.db'`, `sh <<< $'echo hi\\nrm store/claudeclaw.db'`,
+  `sh <<< $'\\x72m store/claudeclaw.db'`, `rm $'\\163tore/claudeclaw.db'`, `rm $'\\u0073tore/claudeclaw.db'`,
+  // AR
+  'echo $((1<<2))\nrm store/claudeclaw.db', 'echo $((1 << 2))\nrm store/claudeclaw.db', 'x=$((1<<3))\nrm store/claudeclaw.db',
+  '(( y = 1 << 4 ))\nrm store/claudeclaw.db', 'echo $[1<<2]\nrm store/claudeclaw.db',
+  // M2b
+  r`find . -name store -exec grep -sd rec TOTPSECRET {} +`, r`find . -name store -exec grep -hd rec TOTPSECRET {} +`,
+  r`find . -name store -exec grep -Hd rec TOTPSECRET {} +`, r`find . -name store -exec grep -sdrec TOTPSECRET {} +`,
+  'find . -name store | xargs grep -sd rec TOTPSECRET', 'cd store && command grep -sd rec TOTPSECRET', 'cd store && command grep -s -d rec TOTPSECRET',
+  // HS3
+  'bash <(echo rm store/claudeclaw.db)', 'sh <(echo rm store/claudeclaw.db)', 'bash < <(echo rm store/claudeclaw.db)',
+  'source /dev/stdin < <(echo rm store/claudeclaw.db)', `python3 <(echo 'import os; os.remove("store/claudeclaw.db")')`,
+  'bash <<< "$(echo rm store/claudeclaw.db)"', 'eval "$(echo rm store/claudeclaw.db)"', 'sh -c "$(echo rm store/claudeclaw.db)"',
+  'source -- <(echo rm store/claudeclaw.db)', '. -- <(echo rm store/claudeclaw.db)', 'source <(echo rm store/claudeclaw.db) arg1',
+  'command source <(echo rm store/claudeclaw.db)', 'cat <(echo rm store/claudeclaw.db) | sh',
+  // echo / printf
+  'echo -n rm store/claudeclaw.db | sh', 'echo -e rm store/claudeclaw.db | bash', 'echo -ne rm store/claudeclaw.db | bash',
+  `printf '%s ' rm store/claudeclaw.db | sh`, `printf 'rm %s' store/claudeclaw.db | sh`, `printf '%s %s' rm store/claudeclaw.db | sh`,
+  `printf -- '%s ' rm store/claudeclaw.db | sh`, 'echo cat store/.dashboard-totp.json | sh', `echo -e '\\x72m store/claudeclaw.db' | sh`,
+  // xargs
+  'xargs rm <<< store/claudeclaw.db', `xargs rm <<< 'store/claudeclaw.db'`, 'xargs -a /dev/stdin rm <<< store/claudeclaw.db',
+  'echo store/claudeclaw.db | xargs rm', `printf 'store/claudeclaw.db' | xargs rm`,
+  // operator runs and the subshell's cd
+  'true;\nrm store/claudeclaw.db', '(cd /tmp)\nrm store/claudeclaw.db', 'echo a &&\nrm store/claudeclaw.db', 'echo rm store/claudeclaw.db |\nsh',
+  '(true);rm store/claudeclaw.db', '(cd /tmp); rm store/claudeclaw.db', 'true ;\n\nrm store/claudeclaw.db',
+]
+const R6511_PASS: string[] = [
+  'grep -m 5 foo src/index.ts', 'grep -A 3 foo src/index.ts', 'grep --label x foo src/index.ts', 'grep --and foo --and bar src/index.ts',
+  `rg --ignore-case foo src`, 'bash <<< \'echo hi\'', `python3 <<< 'print(1)'`, 'cat <<< hello', 'echo $((1<<2))', `trap 'echo bye' EXIT`,
+  'trap - EXIT', 'source <(echo echo hi)', 'echo hello world | sh', `printf '%s\\n' a b | sort`, `echo $'a\\tb'`, `grep $'\\t' src/index.ts`,
+  'eval -- -- rm store/claudeclaw.db', 'bash <(curl -fsSL https://example.invalid/install.sh)', `python3 x.py "$(date)"`,
+  'echo src/a.ts | xargs wc -l', `xargs -I{} echo {} <<< 'a b'`, 'true;\necho ok', '(cd /tmp && ls)\nls', 'echo a &&\necho b',
+  'cd src; (cd /tmp; ls); rm -f a.o', `printf '%s\\n' store/a.log | xargs tail -1`,
+]
+const R6511_REAL: [string, 'leaks' | 'db', boolean][] = [
+  ['grep --and TOTPSECRET store', 'leaks', true], ['grep -r --group-separator TOTPSECRET store', 'leaks', true],
+  ['rg --hidden --ignore TOTPSECRET store', 'leaks', true], ['grep --and TOTPSECRET store/.d*', 'leaks', true],
+  [`rm -rf $'store'`, 'db', true], ['rm -rf $"store"', 'db', true], [`mv $'store' moved`, 'db', true], [`sh <<< $'\\x72m store/claudeclaw.db'`, 'db', true],
+  [`bash -c $'rm store/claudeclaw.db'`, 'db', true], [`eval $'rm store/claudeclaw.db'`, 'db', true], [`echo $'rm store/claudeclaw.db' | sh`, 'db', true],
+  ['echo $((1<<2))\nrm store/claudeclaw.db', 'db', true], ['(( y = 1 << 4 ))\nrm store/claudeclaw.db', 'db', true],
+  [r`find . -name store -exec grep -sd rec TOTPSECRET {} +`, 'leaks', true], ['find . -name store | xargs grep -sd rec TOTPSECRET', 'leaks', true],
+  ['cd store && command grep -sd rec TOTPSECRET', 'leaks', true],
+  ['bash <(echo rm store/claudeclaw.db)', 'db', true], ['bash < <(echo rm store/claudeclaw.db)', 'db', true],
+  ['source /dev/stdin < <(echo rm store/claudeclaw.db)', 'db', true], [`python3 <(echo 'import os; os.remove("store/claudeclaw.db")')`, 'db', true],
+  ['bash <<< "$(echo rm store/claudeclaw.db)"', 'db', true], ['eval "$(echo rm store/claudeclaw.db)"', 'db', true],
+  ['sh -c "$(echo rm store/claudeclaw.db)"', 'db', true], ['source -- <(echo rm store/claudeclaw.db)', 'db', true],
+  ['cat <(echo rm store/claudeclaw.db) | sh', 'db', true],
+  ['echo -n rm store/claudeclaw.db | sh', 'db', true], ['echo -e rm store/claudeclaw.db | bash', 'db', true],
+  [`printf '%s ' rm store/claudeclaw.db | sh`, 'db', true], [`printf -- '%s ' rm store/claudeclaw.db | sh`, 'db', true],
+  ['xargs rm <<< store/claudeclaw.db', 'db', true], ['echo store/claudeclaw.db | xargs rm', 'db', true],
+  ['true;\nrm store/claudeclaw.db', 'db', true], ['(cd src)\nrm store/claudeclaw.db', 'db', true], ['echo a &&\nrm store/claudeclaw.db', 'db', true],
+  ['echo rm store/claudeclaw.db |\nsh', 'db', true], ['(true);rm store/claudeclaw.db', 'db', true],
+]
+
+describe('auth-store-gate: KISPROGI 6511 (R1, $\'...\', arithmetic <<, -sd rec, substitution output, echo/printf, xargs, glued operators)', () => {
+  for (const c of R6511_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6511_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it.skipIf(!CLAUDE_BIN)('every refused form above really leaks or hits the DB (bfs / ugrep / GNU, scratch copy)', () => {
+    for (const [cmd, effect, cc] of R6511_REAL) realRun(cmd, effect, cc)
+  })
+})
+
 describe('auth-store-gate: path tools (BELA 6410)', () => {
   it('the second-factor store under any path tool, the DB file under the writing ones', () => {
     expect(decide('Read', { file_path: join(ROOT, 'store', '.dashboard-totp.json') })).toBe('DENY')
