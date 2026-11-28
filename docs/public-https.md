@@ -67,5 +67,6 @@ brake, not an OS boundary: a file name or an SQL statement assembled at run time
 concatenation), a script written first and run afterwards, or any process outside an agent tool call is not
 stopped by it. Known routes it does not close: a recursive search from the install root (it reads the store's hidden
 file too), a copy of the whole store folder read afterwards, names listed by something other than `find` and fed to
-`xargs`, and `sqlite3 .restore` / `Connection.backup()` into the live database (indistinguishable in text from a
-legitimate backup).
+`xargs` or read in a `while read` loop, a names-only search (`grep -rl`) repeated as an oracle on the secret, and
+`sqlite3 .restore` / `Connection.backup()` into the live database (indistinguishable in text from a legitimate backup).
+The gate reads `find` and `grep` both as GNU and as the agents' own `bfs` and `ugrep` (Claude Code shell functions).

@@ -23,7 +23,11 @@ db-write-gate (BELA 6410): three rules, for every agent, the main one included.
 
 A find is read in its own left-to-right order (KISPROGI 6490 L1): only the filters before an action count, near the
 store only name-printing commands and one-file readers/removers may run, and every -exec command is checked as a
-command of its own; a find piped into xargs counts as -exec of the xargs command.
+command of its own; a find piped into xargs (anywhere later in the pipeline) counts as -exec of the xargs command. The
+agents' Bash runs Claude Code's shell functions, find = bfs 4.1.1 and grep = ugrep 7.8.4 (KISPROGI 6497), so find is
+read the bfs way (a path anywhere, -f PATH, -rm; an unknown dash word near the store is refused) and a grep with the
+store folder as an operand counts as recursive (ugrep searches it without -r); the GNU tools by full path are covered
+by the same reading.
 
 Data positions pass, so a message or a note that QUOTES such a command is not a write: curl's -d/--data*/--json/
 -F/--form values (but not an @file value, which reads the file), echo/printf arguments and a heredoc fed to cat or
@@ -35,7 +39,9 @@ writes these files as before. Known routes it does not close (KISPROGI 6483, 649
 install root or above (grep -rn x . reads the store's hidden file; it cannot be told from everyday searches), a copy of
 the whole store folder read afterwards (cp -r store /tmp/s, then /tmp/s/.d*), a script or an SQL file written in one
 step and run in a later one (in the same call or a later one: echo ... > /tmp/x.sql; sqlite3 db ".read /tmp/x.sql"),
-names listed by something other than find and fed to xargs (ls -a store | xargs ...), and sqlite3 .restore /
+names listed by something other than find and fed to xargs (ls -a store | xargs ...) or read in a loop
+(find store | while read f; do cat "$f"; done), a names-only search used as an oracle (grep -rl with a regex of
+the secret's first characters, repeated: KISPROGI 6497 L3, the same class as a name built at run time), and sqlite3 .restore /
 Connection.backup() INTO the live DB (it replaces the whole DB; the direction cannot be told from a legitimate backup in
 text). Matched against a fixed vocabulary only: anything else passes. Unparsable Bash that mentions one of the
 protected names is refused (fail closed); unparsable Bash without them passes. Above 200 KB only the text rules run,
@@ -131,7 +137,7 @@ STDIN_TO_FILE_HEADS = {"cat", "tee"}
 CURL_DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-ascii", "--data-urlencode", "--json",
                    "-F", "--form", "--form-string"}
 METADATA_HEADS = {"ls", "stat", "test", "[", "[[", "realpath", "readlink", "dirname", "basename"}
-SEARCH_HEADS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "zgrep"}
+SEARCH_HEADS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "zgrep", "rgrep", "ugrep"}
 FILE_OP_HEADS = {"rm", "unlink", "shred", "truncate", "srm", "trash", "trash-put", "mv", "cp", "install", "rsync", "scp", "ln",
                  "link", "ditto", "dd", "tee", "sed", "gsed", "perl"}
 SEPARATORS = {";", "&", "&&", "||", "\n", ";;", "(", ")"}
@@ -478,6 +484,12 @@ def _strip_substitutions(cmd: str):
 
 
 _OP_CHARS = ";&|<>()"
+QOP = "\0"  # marks a quoted / escaped operator word: QOP + ";" is find's terminator, QOP + "(" a group
+
+
+def _unmark(word: str) -> str:
+    """The text of a word as the program receives it (a marked operator word back to its operator character)."""
+    return word[1:] if word.startswith(QOP) else word
 _QUOTED_OP_RX = re.compile(r"\\([;&|<>()])|'([;&|<>()]{1,3})'|\"([;&|<>()]{1,3})\"")
 
 
@@ -486,7 +498,9 @@ def _protect_quoted_ops(text: str):
     the shell, not an operator, but shlex returns it as the same bare ';' or '(' an operator gives, so the find
     expression after it was cut off as a separate command (KISPROGI 6490 L1: "-exec cat {} ';' -name nope", and
     "-exec ls {} \\; -o -delete", whose -delete then went unseen). Each one becomes a placeholder word first:
-    (text, {placeholder: backslash + operator}), so the token reads e.g. \\; and never equals an operator."""
+    (text, {placeholder: QOP + operator}). QOP is a NUL, which no shell word can hold, so a LITERAL backslash word
+    ('\\;' or "\\;", which find takes as a plain argument, not as its terminator) stays the different word \\;
+    (KISPROGI 6497 M1: "-exec rm '\\;' store/claudeclaw.db \\;" ended the -exec early)."""
     out, ph, i, n, sq, dq = [], {}, 0, len(text), False, False
     while i < n:
         c = text[i]
@@ -494,7 +508,7 @@ def _protect_quoted_ops(text: str):
             m = _QUOTED_OP_RX.match(text, i)
             if m and (m.end() == n or text[m.end()] in " \t\r\n" + _OP_CHARS):
                 key = f"__QOP{len(ph)}__"
-                ph[key] = "\\" + (m.group(1) or m.group(2) or m.group(3))
+                ph[key] = QOP + (m.group(1) or m.group(2) or m.group(3))
                 out.append(key)
                 i = m.end()
                 continue
@@ -673,16 +687,35 @@ def _destinations(head: str, args):
 
 
 _FIND_FILTERS = ("-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex")
-_FIND_ALTERNATIVES = ("!", "\\!", "-not", "-o", "-or", ",", "\\,")
+_FIND_NEGATIONS = ("!", "-not", "-exclude")  # bfs -exclude EXPR leaves out what EXPR matches: a negation of it
+_FIND_ALTERNATIVES = ("-o", "-or", ",")
 _FIND_EXECS = ("-exec", "-execdir", "-ok", "-okdir")
 _FIND_WRITE_TARGETS = ("-fprint", "-fprint0", "-fls", "-fprintf")
-_FIND_STDOUT_ACTIONS = ("-print", "-print0", "-printf", "-ls")
+_FIND_STDOUT_ACTIONS = ("-print", "-print0", "-printf", "-ls", "-printx")
+_FIND_DELETES = ("-delete", "-rm")  # bfs: -rm is -delete
+# Every primary / option of GNU find 4.10 and bfs 4.1.1 by the number of words it takes (KISPROGI 6497 H1: the agents'
+# Bash runs bfs, a shell function from Claude Code; /usr/bin/find is GNU). A dash word outside these is not known.
+_FIND_FLAGS = {"-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"}  # bfs/GNU flags before or among the paths
+_FIND_FLAGS_WITH_ARG = {"-D", "-S"}
+_FIND_NOARG = {"-print", "-print0", "-printx", "-ls", "-prune", "-quit", "-delete", "-rm", "-true", "-false", "-empty",
+               "-executable", "-readable", "-writable", "-hidden", "-nohidden", "-nogroup", "-nouser", "-sparse", "-xattr",
+               "-daystart", "-follow", "-ignore_readdir_race", "-noignore_readdir_race", "-mount", "-noerror", "-noleaf",
+               "-status", "-unique", "-warn", "-nowarn", "-xdev", "-color", "-nocolor", "-a", "-and", "-version", "-help",
+               "--help", "--version", "-depth", "-exit"}
+_FIND_ONEARG = {"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-lname", "-ilname",
+                "-maxdepth", "-mindepth", "-type", "-xtype", "-size", "-perm", "-user", "-group", "-uid", "-gid", "-inum",
+                "-links", "-samefile", "-newer", "-amin", "-Bmin", "-cmin", "-mmin", "-atime", "-Btime", "-ctime", "-mtime",
+                "-anewer", "-Bnewer", "-cnewer", "-mnewer", "-asince", "-Bsince", "-csince", "-msince", "-since", "-used",
+                "-fstype", "-context", "-regextype", "-files0-from", "-printf", "-fprint", "-fprint0", "-fls", "-limit",
+                "-xattrname"}
 _PROTECTED_NAMES = (TOTP_NAME,) + DB_NAMES
 # -exec commands that only show names or metadata: they read no file's content.
 _FIND_NAME_ONLY_CMDS = {"echo", "printf", "ls", "stat", "basename", "dirname", "realpath", "readlink", "test", "[", "true", "du"}
 # -exec commands that read or remove ONE file and fail on a directory without a recursive flag: for these a filter that
 # cannot select a protected file proves the call safe, since a matched folder gives them nothing. (diff and cmp are not
-# here: diff on two folders prints the content of the files they share.)
+# here: diff on two folders prints the content of the files they share.) grep is here because the grep that -exec and
+# xargs start is the GNU one found on PATH ("Is a directory"); the ugrep that searches a folder without -r is a Claude
+# Code shell function, which only the agent's own shell line reaches (KISPROGI 6497 H2, handled at the search rule).
 _FIND_ONE_FILE_CMDS = {"cat", "tac", "nl", "head", "tail", "less", "more", "wc", "md5sum", "sha1sum", "sha224sum", "sha256sum",
                        "sha384sum", "sha512sum", "b2sum", "cksum", "sum", "file", "strings", "xxd", "od", "hexdump", "base64",
                        "base32", "grep", "egrep", "fgrep", "zgrep", "jq", "rm", "unlink", "shred", "truncate"}
@@ -694,26 +727,43 @@ def _vague_word(word: str) -> bool:
     return bool(re.search(r"[$`*?\[{]|__SUBST\d+__", word))
 
 
-def _find_starts(args):
-    """(starting points, index of the first expression word); -H/-L/-P, -D x, -Ox and -- before them are skipped (KISPROGI
-    6490: "find -L /abs/store" was read as a start-less find from the cwd)."""
-    i = 0
-    while i < len(args):
+def _find_parse(args):
+    """One pass over a find's words, the bfs way (paths, flags and the expression may be mixed in any order; GNU's
+    order is a special case of it): (starting points, unknown dash words, expression items). An expression item is
+    (index, word) of an operator or a primary; a primary's own words are skipped. KISPROGI 6497 H1: "find src -type f
+    store -delete" (a path in the middle), "find -f PATH" and bfs -rm all slipped through the GNU-only reading."""
+    starts, unknown, i, n = [], [], 0, len(args)
+    while i < n:
         a = args[i]
-        if a in ("-H", "-L", "-P") or re.fullmatch(r"-O\d*", a):
+        if a in _FIND_FLAGS or re.fullmatch(r"-O\d*|-j\d+", a) or a == "--":
             i += 1
-        elif a == "-D":
+        elif a in _FIND_FLAGS_WITH_ARG:
             i += 2
-        elif a == "--":
+        elif a == "-f":
+            if i + 1 < n:
+                starts.append(args[i + 1])
+            i += 2
+        elif a in _FIND_EXECS:
+            j = i + 1
+            while j < n and not (args[j] == QOP + ";" or (args[j] == "+" and j > i + 1 and args[j - 1] == "{}"
+                                                           and a in ("-exec", "-execdir"))):
+                j += 1
+            i = j + 1
+        elif a in ("-depth", "-exit") and i + 1 < n and re.fullmatch(r"[-+]?\d+", args[i + 1]):
+            i += 2
+        elif a == "-fprintf":
+            i += 3
+        elif a in _FIND_ONEARG or re.fullmatch(r"-newer[aBcm][aBcmt]", a):
+            i += 2
+        elif a in _FIND_NOARG or a in _FIND_NEGATIONS or a in _FIND_ALTERNATIVES or a in (QOP + "(", QOP + ")"):
             i += 1
-            break
+        elif a.startswith("-"):
+            unknown.append(a)
+            i += 1
         else:
-            break
-    starts = []
-    while i < len(args) and not args[i].startswith("-") and args[i] not in ("(", "\\(", "!", "\\!", ",", "\\,"):
-        starts.append(args[i])
-        i += 1
-    return starts, i
+            starts.append(_unmark(a))  # bfs takes any other word as a path, anywhere; GNU fails on it
+            i += 1
+    return starts, unknown
 
 
 def _find_reach(args, starts, cwd: str):
@@ -730,9 +780,9 @@ def _find_reach(args, starts, cwd: str):
             continue
         if r == store or store.startswith(r.rstrip(os.sep) + os.sep):
             near = True
+            base = st if st.endswith("/") else st + "/"
             for n in _PROTECTED_NAMES:
-                rel = os.path.relpath(os.path.join(store, n), r)
-                printed.append((st if st.endswith("/") else st + "/") + rel)
+                printed.append(base + os.path.relpath(os.path.join(store, n), r))
         elif r.startswith(store + os.sep):
             near = unknown = True  # below the store: the protected files only through a link, at a path not known
     return near, printed, unknown
@@ -756,36 +806,44 @@ def _find_filter_may_match(flag: str, value: str, printed, unknown: bool) -> boo
     return any(fnmatch.fnmatchcase(n.lower() if ci else n, v) for n in names)
 
 
-def _check_find(args, cwd: str, depth: int, piped=None, feeds_interpreter: bool = False) -> None:
-    """KISPROGI 6483 L1, redone after KISPROGI 6490. find runs its expression left to right, so only the filters BEFORE
-    an action decide what the action gets ("find store -type f -delete -name nope" deletes the whole store).
+def _check_find(args, cwd: str, depth: int, piped=(), feeds_interpreter: bool = False) -> None:
+    """KISPROGI 6483 L1, redone after KISPROGI 6490 and 6497. find runs its expression left to right, so only the filters
+    BEFORE an action decide what the action gets ("find store -type f -delete -name nope" deletes the whole store).
+    Read the bfs way (the agents' find): a path may stand anywhere, -f PATH is a path, -rm is -delete; a dash word that
+    neither GNU find nor bfs knows is refused near the store (fail closed).
 
     From ANY start: an -exec/-execdir/-ok command is checked as a command of its own (rm store/claudeclaw.db from a find
     in /tmp), and an -fprint/-fprint0/-fls/-fprintf target is an R3 write target (-fprint store/claudeclaw.db empties
     the DB even with no match).
 
-    Near the live store (a start at, above or below it, or not known): -delete, and an -exec of a command that can
-    read or remove a file, passes only when one ANDed filter before it cannot select a protected file and no -o / ! /
-    -not / comma appears before it; the -exec command must be a name-only one, or a one-file reader/remover without a
-    recursive flag; anything else (shells, wrappers like busybox/nohup/stdbuf, rg, mv, cp, tar, interpreters) is
-    refused. piped: the command a "| xargs CMD" runs on find's output (it gets what -print would print)."""
-    starts, i = _find_starts(args)
+    Near the live store (a start at, above or below it, or not known): -delete/-rm, and an -exec of a command that can
+    read or remove a file, passes only when one filter ANDed before it cannot select a protected file; a ! / -not /
+    -exclude takes only the next filter (or parenthesised group) out of the narrowing, a -o / -or / comma ends it for
+    the rest. The -exec command must be a name-only one, or a one-file reader/remover without a recursive flag; anything
+    else (shells, wrappers like busybox/nohup/stdbuf, rg, mv, cp, tar, interpreters) is refused. piped: the commands a
+    later "| xargs CMD" in the same pipeline runs on find's output (they get what -print would print)."""
+    starts, unknown_words = _find_parse(args)
     near, printed, unknown = _find_reach(args, starts, cwd)
+    if near and unknown_words:
+        _deny(f"find a store kozeleben ismeretlen kifejezessel ({unknown_words[0]}); csak ismert GNU find / bfs elem futhat ott")
     if feeds_interpreter:
         # find's output is run as code (find ... -printf 'rm %p\\n' | sh): near the store it names the store's files to
         # the interpreter; elsewhere every word of it is code text, with -printf's escapes decoded
         if near:
             _deny("a store mappan futo find kimenete egy ertelmezobe megy")
         for a in args:
-            _code_text_checks(a.replace("\\n", "\n").replace("\\t", "\t"), "find -> ertelmezo", cwd, depth)
+            _code_text_checks(_unmark(a).replace("\\n", "\n").replace("\\t", "\t"), "find -> ertelmezo", cwd, depth)
     filters, alternative, acted = [], False, False
+    negate_next, groups = False, []  # groups: per open parenthesis, whether it is negated (or inside a negated one)
 
     def narrowed() -> bool:
-        return not alternative and any(not _find_filter_may_match(f, v, printed, unknown) for f, v in filters)
+        return not alternative and any(ok and f != "-type" and not _find_filter_may_match(f, v, printed, unknown)
+                                       for f, v, ok in filters)
 
     def run_command(words, kind: str) -> None:
         if not words:
             return
+        words = [_unmark(w) for w in words]
         cmd = os.path.basename(words[0])
         if depth < 4:
             check_bash(shlex.join(words), UNKNOWN_CWD if kind in ("-execdir", "-okdir") else cwd, depth + 1)
@@ -797,28 +855,46 @@ def _check_find(args, cwd: str, depth: int, piped=None, feeds_interpreter: bool 
             return
         _deny(f"find {kind} {cmd} a store mappan (ott csak nevkiiro vagy egyfajlos olvaso/torlo parancs futhat)")
 
+    def run_piped() -> None:
+        for p in piped:
+            run_command(p, "| xargs")
+
+    i = 0
     while i < len(args):
         a = args[i]
-        if a in _FIND_ALTERNATIVES:
+        if a in _FIND_FLAGS or re.fullmatch(r"-O\d*|-j\d+", a) or a == "--":
+            pass
+        elif a in _FIND_FLAGS_WITH_ARG or a == "-f":
+            i += 1
+        elif a in _FIND_ALTERNATIVES:
             alternative = True
-        elif a in _FIND_FILTERS and i + 1 < len(args):
-            filters.append((a, args[i + 1]))
+        elif a in _FIND_NEGATIONS:
+            negate_next = True
+        elif a == QOP + "(":
+            groups.append(negate_next or bool(groups and groups[-1]))
+            negate_next = False
+        elif a == QOP + ")":
+            if groups:
+                groups.pop()
+        elif (a in _FIND_FILTERS or a == "-type") and i + 1 < len(args):
+            filters.append((a, _unmark(args[i + 1]), not negate_next and not (groups and groups[-1])))
+            negate_next = False
             i += 1
         elif a in _FIND_WRITE_TARGETS and i + 1 < len(args):
             acted = True
-            if _is_live_db_path(args[i + 1], cwd):
+            if _is_live_db_path(_unmark(args[i + 1]), cwd):
                 _deny(f"find {a} a dashboard adatbazis-fajljaba ir")
             i += 2 if a == "-fprintf" else 1
-        elif a == "-delete":
+        elif a in _FIND_DELETES:
             acted = True
             if near and not narrowed():
-                _deny("find -delete a store mappan, olyan szurovel, ami a vedett fajlt is kivalaszthatja")
+                _deny(f"find {a} a store mappan, olyan szurovel, ami a vedett fajlt is kivalaszthatja")
         elif a in _FIND_EXECS and i + 1 < len(args):
             acted = True
             j, words = i + 1, []
             while j < len(args):
                 b = args[j]
-                if b in (";", "\\;") or (b == "+" and words and words[-1] == "{}" and a in ("-exec", "-execdir")):
+                if b == QOP + ";" or (b == "+" and words and words[-1] == "{}" and a in ("-exec", "-execdir")):
                     break
                 words.append(b)
                 j += 1
@@ -826,13 +902,20 @@ def _check_find(args, cwd: str, depth: int, piped=None, feeds_interpreter: bool 
             i = j
         elif a in _FIND_STDOUT_ACTIONS:
             acted = True
-            if piped:
-                run_command(piped, "| xargs")
+            run_piped()
             if a == "-printf":
                 i += 1
+        elif a in ("-depth", "-exit") and i + 1 < len(args) and re.fullmatch(r"[-+]?\d+", args[i + 1]):
+            negate_next = False
+            i += 1
+        elif a in _FIND_ONEARG or re.fullmatch(r"-newer[aBcm][aBcmt]", a):
+            negate_next = False  # a test the negation applied to (it narrows nothing either way)
+            i += 1
+        elif a in _FIND_NOARG:
+            negate_next = False
         i += 1
-    if piped and not acted:
-        run_command(piped, "| xargs")  # find's default action is -print, at the end of the expression
+    if not acted:
+        run_piped()  # find's default action is -print, at the end of the expression
 
 
 def _unparsable_hits(cmd: str) -> bool:
@@ -846,6 +929,7 @@ def _unparsable_hits(cmd: str) -> bool:
 def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) -> None:
     """best_effort: a nested try on text that may not be shell at all (an interpreter's code); a parse failure there
     is not a refusal, the text rules already ran on it."""
+    cmd = cmd.replace(QOP, "")  # bash drops NUL bytes; the gate uses NUL to mark quoted operator words
     if len(cmd) > BIG_TEXT:
         # KISPROGI 6483 L2: shlex is quadratic on one long quoted token (365 KB: 4 s, 750 KB: 16.5 s, past the hook's
         # deadline, which fails the main agent's Bash closed). Above the threshold only the text rules run, the same set
@@ -904,8 +988,16 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
                 cwd = UNKNOWN_CWD if (_unknown_place(target) or target == "-" or cwd == UNKNOWN_CWD and not os.path.isabs(target)) \
                     else _resolve(target, cwd)
                 continue
+            if head == "eval":
+                # KISPROGI 6497 M2: eval joins its words with spaces and runs the result as shell again, so a quoted ';'
+                # among them is a separator there ("eval echo x ';' rm store/claudeclaw.db")
+                joined = " ".join(_unmark(a) for a in args)
+                _code_text_checks(joined, "eval", cwd, depth)
+                if depth < 4:
+                    check_bash(joined, cwd, depth + 1)
+                continue
             if is_interp:
-                for a in args:
+                for a in (_unmark(a) for a in args):
                     if _totp_word(a):
                         _deny("a masodik faktor tara egy ertelmezo argumentumaban")
                     _code_text_checks(a, f"{head} argumentum", cwd, depth)
@@ -950,11 +1042,12 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
                         _deny(f"a dashboard adatbazis-fajljanak felulirasa a store mappaba masolva ({head})")
             if head in SEARCH_HEADS and _recursive_search_on_store(head, args, data_pos, cwd):
                 _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
+            if head == "git" and _git_grep_on_store(args, cwd):
+                _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
             if head == "find":
-                piped = None
-                if idx + 1 < len(pipeline) and _starts_with_xargs(pipeline[idx + 1]):
-                    nh, nargs = parsed[idx + 1][0], parsed[idx + 1][1]
-                    piped = [nh] + nargs if nh else None
+                # KISPROGI 6497 L1: any later xargs in the pipeline gets find's output (find store | sort | xargs rm)
+                piped = [[parsed[j][0]] + parsed[j][1] for j in range(idx + 1, len(pipeline))
+                         if parsed[j][0] and _starts_with_xargs(pipeline[j])]
                 code_sink = any(_reads_code_from_stdin(h, a) for h, a, *_ in parsed[idx + 1:])
                 _check_find(args, cwd, depth, piped=piped, feeds_interpreter=code_sink)
 
@@ -990,84 +1083,172 @@ def _starts_with_xargs(toks) -> bool:
     return False
 
 
-# grep and its kin: options whose value is the next word (a pattern, a number, a glob), so it is not a file operand
+# grep and its kin: options whose value is the next word (a pattern, a number, a glob), so it is not a file operand.
+# The grep set covers GNU grep and ugrep 7.8 (the agents' grep is ugrep, a Claude Code shell function; KISPROGI 6497).
 _GREP_VALUE_OPTS = {"-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "-B", "-C", "-d", "-D", "--directories",
-                    "--devices", "--include", "--exclude", "--exclude-dir", "--label", "--binary-files", "--group-separator"}
+                    "--devices", "--include", "--exclude", "--exclude-dir", "--include-dir", "--label", "--binary-files",
+                    "--group-separator", "-t", "--file-type", "-O", "--file-extension", "-g", "--glob", "--iglob", "-M",
+                    "--file-magic", "-N", "--neg-regexp", "-K", "--range", "-J", "--jobs", "--include-from",
+                    "--exclude-from", "--and", "--andnot", "--not"}
+_GREP_VALUE_LETTERS = "efmABCdDtOgMNKJ"
 _RG_VALUE_OPTS = {"-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "-B", "-C", "-g", "--glob", "--iglob", "-t",
                   "--type", "-T", "--type-not", "-j", "--threads", "-M", "--max-columns", "-d", "--max-depth", "-E",
                   "--encoding", "--pre", "--pre-glob", "--sort", "--sortr", "--type-add", "--type-clear", "--ignore-file",
                   "--max-filesize", "-r", "--replace", "--path-separator", "--colors", "--context-separator", "-G",
                   "--field-match-separator", "--field-context-separator", "--engine", "--ignore", "--ignore-dir"}
-_GREP_HEADS = ("grep", "egrep", "fgrep", "zgrep")
+_RG_VALUE_LETTERS = "efmABCgtTjMdEr"
+_GREP_HEADS = ("grep", "egrep", "fgrep", "zgrep", "rgrep", "ugrep")
+# The names-only exception holds only when every option is one of these (KISPROGI 6497 M3: ugrep's --format, --json,
+# --csv, --xml, --replace and the like print lines even beside -l). Short letters without a value, then long options.
+_NAMES_ONLY_SHORT = set("rRlLcqsiwxFEGPHhIavnj0123456789")
+_NAMES_ONLY_LONG = {"--recursive", "--dereference-recursive", "--files-with-matches", "--files-without-match", "--count",
+                    "--quiet", "--silent", "--no-messages", "--ignore-case", "--no-ignore-case", "--smart-case",
+                    "--word-regexp", "--line-regexp", "--fixed-strings", "--extended-regexp", "--basic-regexp",
+                    "--perl-regexp", "--with-filename", "--no-filename", "--null", "--text", "--invert-match",
+                    "--line-number", "--ignore-binary", "--hidden", "--ignore-files", "--no-ignore-files", "--binary-files",
+                    "--include", "--exclude", "--exclude-dir", "--directories", "--devices", "--regexp", "--file",
+                    "--max-count", "--color", "--colour", "--encoding", "--depth"}
+# options that pick files besides --include / --exclude / --exclude-dir: with one of them the include/exclude reading
+# below proves nothing
+_GREP_SELECT_OPTS = {"-g", "--glob", "--iglob", "-O", "--file-extension", "-t", "--file-type", "-M", "--file-magic",
+                     "--include-from", "--exclude-from", "--include-dir", "--include-fs", "--filter", "--glob-ignore-case"}
+
+
+def _glob_may_match_totp(g: str, ci: bool = False) -> bool:
+    if not g or "[" in g or "\\" in g or "{" in g or g.startswith("!") or TOTP_RX.search(g):
+        return True
+    last = g.rstrip("/").split("/")[-1]
+    return not last or fnmatch.fnmatchcase(TOTP_NAME.lower() if ci else TOTP_NAME, last.lower() if ci else last)
+
+
+def _grep_include_rules_out(order) -> bool:
+    """GNU grep: the LAST --include / --exclude that matches a file decides; if none matches, the file is searched
+    unless the FIRST of them is an --include (KISPROGI 6497 M3: "--exclude=zz --include='*.log'" searched the secret).
+    Ruled out here only when every matching one is an --exclude, or none matches and the first is an --include. A glob
+    that cannot be read here counts as matching for --include and as not matching for --exclude."""
+    if not order:
+        return False
+
+    def matches(kind: str, g: str) -> bool:
+        readable = bool(g) and not g.startswith("!") and not any(c in g for c in "[\\{")
+        if not readable:
+            return kind == "include"
+        return fnmatch.fnmatchcase(TOTP_NAME, g.rstrip("/").split("/")[-1])
+
+    hits = [kind for kind, g in order if matches(kind, g)]
+    if hits:
+        return all(k == "exclude" for k in hits)  # GNU: the last match decides; ugrep: taken the strict way
+    return order[0][0] == "include"
 
 
 def _recursive_search_on_store(head: str, args, data_pos, cwd: str) -> bool:
-    """KISPROGI 6490 M1: a recursive search (grep -r/-R/-d recurse, rg, ag, ack) aimed at the live store folder, by a
-    file operand or, with no operand, by the cwd, that prints matching LINES. grep -r reads hidden files and rg reads them
-    with --hidden or -uu, and the second-factor store is a hidden file there. It passes when it prints names or counts
-    only (-l, -L, -c, -q, --files), or when its --include / --exclude / -g globs rule the file out. A search below the
-    store cannot reach it (it sits in the store itself); a search from the install root or above stays a known open route
-    (it is every everyday search)."""
-    if head in _GREP_HEADS:
-        rec = False
-        for k, a in enumerate(args):
-            if k in data_pos:
-                continue
-            if (re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", a) or a in ("--recursive", "--dereference-recursive")
-                    or re.fullmatch(r"(?:-d|--directories=?)\s*recurse", a)
-                    or (a in ("-d", "--directories") and k + 1 < len(args) and args[k + 1] == "recurse")):
-                rec = True
-        if not rec:
-            return False
+    """KISPROGI 6490 M1 and 6497 H2/M3/L2: a search that can read the second-factor store in the live store folder and
+    print its lines. Aimed at the store: a folder operand that is (or a glob / brace that expands to) the store, or the
+    store as cwd with grep -r and no operand. The grep family counts as recursive on a folder operand even without -r
+    (the agents' grep is ugrep, which searches folders recursively and hidden files too); rgrep is grep -r; rg, ag
+    and ack always recurse. It passes, for the grep family only, when it prints names or counts (-l, -L, -c, -q with no
+    option outside a small known set), or when its --include / --exclude rule the file out in GNU's order; for rg, when
+    its include globs (-g / --glob / --iglob, the last case-insensitively) cannot match the file. A search below the
+    store cannot reach the file (it sits in the store itself); a search from the install root or above stays a known
+    open route (it is every everyday search), and so does a names-only search used as an oracle (L3)."""
     grep = head in _GREP_HEADS
     value_opts = _GREP_VALUE_OPTS if grep else _RG_VALUE_OPTS
-    value_letters = "efmABCdD" if grep else "efmABCgtTjMdEr"
-    names_only = ("--files-with-matches", "--files-without-match", "--count", "--count-matches", "--quiet", "--silent",
-                  "--files", "--files-without-match")
-    operands, includes, excludes, globs, quiet, k = [], [], [], [], False, 0
+    value_letters = _GREP_VALUE_LETTERS if grep else _RG_VALUE_LETTERS
+    rec = head == "rgrep" or not grep
+    operands, order, globs, quiet, plain, select, k = [], [], [], False, True, False, 0
     while k < len(args):
         a = args[k]
         nxt = args[k + 1] if k + 1 < len(args) else ""
         if k in data_pos:
-            pass
-        elif a in names_only:
-            quiet = True
-        elif a.startswith("--") and "=" in a:
-            opt, val = a.split("=", 1)
-            (includes if opt == "--include" else excludes if opt == "--exclude" else globs if opt in ("--glob", "--iglob")
-             else []).append(val)
-        elif a in value_opts:
-            (includes if a == "--include" else excludes if a == "--exclude" else globs if a in ("-g", "--glob", "--iglob")
-             else []).append(nxt)
             k += 1
-        elif re.fullmatch(r"-[A-Za-z0-9]+", a):
-            for ch in a[1:]:
-                if ch in "lLcq":
+            continue
+        if a.startswith("--"):
+            opt, has_val, val = a.partition("=")
+            if not has_val and opt in value_opts:
+                val = nxt
+                k += 1
+            if opt in ("--recursive", "--dereference-recursive") or (opt == "--directories" and val == "recurse"):
+                rec = True
+            if opt in ("--files-with-matches", "--files-without-match", "--count", "--count-matches", "--quiet",
+                       "--silent", "--files"):
+                quiet = True
+            if opt not in _NAMES_ONLY_LONG:
+                plain = False
+            if opt in ("--include", "--exclude"):
+                order.append((opt[2:], val))
+            elif opt in ("--glob", "--iglob"):
+                globs.append((val, opt == "--iglob"))
+            if (grep and opt in _GREP_SELECT_OPTS) or (not grep and opt in ("--type", "--type-not", "--type-add")):
+                select = True
+        elif re.fullmatch(r"-[A-Za-z0-9.%+^?]+", a):
+            for pos, ch in enumerate(a[1:], 1):
+                if ch in "rR":
+                    rec = rec or grep
+                if ch in "lLcq" and (grep or ch in "lc"):
                     quiet = True
                 if ch in value_letters:
-                    if ch == "g" and not grep:
-                        globs.append(a[a.index("g") + 1:] or nxt)
-                    if len(a) == a.index(ch) + 1:
-                        k += 1  # the value is the next word
+                    val = a[pos + 1:] or nxt
+                    if not a[pos + 1:]:
+                        k += 1
+                    if ch == "d" and grep and val == "recurse":
+                        rec = True
+                    if ch == "g":
+                        globs.append((val, False))
+                    if ch not in "efmdD":
+                        plain = False
+                    if (grep and ch in "gOtM") or (not grep and ch in "tT"):
+                        select = True
                     break
+                if ch not in _NAMES_ONLY_SHORT:
+                    plain = False
         elif not a.startswith("-"):
             operands.append(a)
         k += 1
     if operands:
         aimed = any(_is_store_dir(o, cwd) for o in operands)
     else:
-        aimed = cwd != UNKNOWN_CWD and _resolve(".", cwd) == os.path.realpath(STORE)
-    if not aimed or quiet:
-        # names only (-l, -L, -c, -q, --files): no line of the second-factor store is printed (BELA's and KISPROGI's
-        # real everyday store searches are all grep -rl; replay 2026-11-28)
+        aimed = rec and cwd != UNKNOWN_CWD and _resolve(".", cwd) == os.path.realpath(STORE)
+    if not aimed:
         return False
-    if includes and not any(fnmatch.fnmatchcase(TOTP_NAME, g) or "[" in g or "\\" in g or "{" in g for g in includes):
-        return False
-    if any(fnmatch.fnmatchcase(TOTP_NAME, g) for g in excludes if "[" not in g and "\\" not in g and "{" not in g):
-        return False
-    if globs and not _grep_glob_may_match_totp(" ".join(globs)):
-        return False
+    if grep:
+        if quiet and plain:
+            return False  # names or counts only: the real everyday store searches are all grep -rl (replay 2026-11-28)
+        if not select and _grep_include_rules_out(order):
+            return False
+        return True
+    if head == "rg" and not select and globs:
+        include = [(g, ci) for g, ci in globs if not g.startswith("!")]
+        if include and not any(_glob_may_match_totp(g, ci) for g, ci in include):
+            return False
     return True
+
+
+def _git_grep_on_store(args, cwd: str) -> bool:
+    """KISPROGI 6497 L2: git grep --no-index (or --untracked) searches files git does not track, so aimed at the store
+    (a pathspec, or the store as cwd) it reads the second-factor store like grep -r."""
+    if not args or args[0] != "grep" or not any(a in ("--no-index", "--untracked") for a in args[1:]):
+        return False
+    rest, specs, explicit, after_dd, k = args[1:], [], False, False, 0
+    pattern_seen = False
+    while k < len(rest):
+        a = rest[k]
+        if after_dd:
+            specs.append(a)
+        elif a == "--":
+            after_dd = True
+        elif a in ("-e", "-f", "-A", "-B", "-C", "-m", "--max-count", "--max-depth", "--threads"):
+            explicit = explicit or a in ("-e", "-f")
+            k += 1
+        elif a.startswith("-"):
+            explicit = explicit or bool(re.fullmatch(r"-e.+|--regexp=.+", a))
+        elif not explicit and not pattern_seen:
+            pattern_seen = True
+        else:
+            specs.append(a)
+        k += 1
+    if specs:
+        return any(_is_store_dir(re.sub(r"^:\([^)]*\)|^:[!^/]?", "", sp) or ".", cwd) for sp in specs)
+    return cwd != UNKNOWN_CWD and _resolve(".", cwd) == os.path.realpath(STORE)
 
 
 # --------------------------------------------------------------------------------------------------------------
