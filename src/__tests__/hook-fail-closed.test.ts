@@ -32,9 +32,11 @@ beforeAll(() => { tmp = mkdtempSync(join(tmpdir(), 'hook-fail-closed-')) })
 afterAll(() => { rmSync(tmp, { recursive: true, force: true }) })
 
 function run(shell: string, command: string, input = '{}', env: NodeJS.ProcessEnv = process.env, cwd = tmp) {
-  const t0 = Date.now()
+  // a monotonic clock: on WSL the wall clock can jump during a run (KISPROGI 6524: vitest timed the SIGTERM case at
+  // 2024 ms while Date.now() measured 4060 ms, past the 3500 ms bound)
+  const t0 = performance.now()
   const r = spawnSync(shell, ['-c', command], { input, env, cwd, encoding: 'utf-8', timeout: 30_000 })
-  return { rc: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr, ms: Date.now() - t0 }
+  return { rc: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr, ms: performance.now() - t0 }
 }
 
 function fakeGate(name: string, body: string): string {
