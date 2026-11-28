@@ -21,7 +21,8 @@ import { STORE_DIR, MAIN_AGENT_ID, OWNER_DRIVE_FOLDER } from '../../config.js'
 import { createAgentMessage } from '../../db.js'
 import { logger } from '../../logger.js'
 import {
-  clearPackageReviewNotice, escalatePackageNotice, installReviewOwnerText, updateReviewOwnerText, type PackageNoticeOptions,
+  clearPackageReviewNotice, escalatePackageNotice, installReviewOwnerText, packageReviewWarning, updateReviewOwnerText,
+  type PackageNoticeOptions,
 } from '../agent-package/notices.js'
 import { approvePackage, packageApprovalState, pendingPackageAgents } from '../agent-package/approval.js'
 import { scanSkillDir } from '../skill-quarantine.js'
@@ -278,7 +279,8 @@ async function installPackage(ctx: RouteContext, deps: PackageDeps): Promise<voi
     await (deps.notify ?? escalatePackageNotice)(
       `Ugynok-csomag telepitve, JOVAHAGYASRA VAR (nem indul el addig): ${slug} ${pkg.version}. ` +
       `Fajlok: ${files}. Skill-vizsgalat talalatai: ${findings}. payloadSha256: ${pkg.payloadSha256}. ` +
-      `Atnezes: agents/${slug}/ (PACKAGE.md, LOCAL.md, .claude/skills). Jovahagyas: POST /api/agents/${slug}/approve-package (owner-munkamenet).`,
+      `Atnezes: agents/${slug}/ (PACKAGE.md, LOCAL.md, .claude/skills). ${packageReviewWarning(slug)} ` +
+      `Jovahagyas: POST /api/agents/${slug}/approve-package (owner-munkamenet).`,
       { reviewOf: slug, ownerText: installReviewOwnerText(slug, pkg.version) },
     )
   } catch (err) {
@@ -350,7 +352,9 @@ function pendingRoute(ctx: RouteContext): void {
         for (const f of scanSkillDir(join(skillsRoot, sk)).findings) findings[f.pattern] = (findings[f.pattern] ?? 0) + 1
       } catch { /* best effort */ }
     }
-    return { name, state: st.state, installed, skills, findings }
+    // KISPROGI 6464 K1: the same warning as the review request, per agent: opening a file in its folder (Read or cat)
+    // loads the folder's CLAUDE.md and PACKAGE.md as instructions unless the session excludes them.
+    return { name, state: st.state, installed, skills, findings, reviewWarning: packageReviewWarning(name) }
   })
   json(res, { pending })
 }
@@ -539,7 +543,8 @@ async function applyUpdate(ctx: RouteContext, deps: PackageDeps, rawName: string
       await (deps.notify ?? escalatePackageNotice)(
         `Ugynok-csomag frissitve, UJRA JOVAHAGYASRA VAR (nem indul el addig): ${first.name} ${first.manifest.payload.version} -> ${got.pkg.version}. ` +
         `payloadSha256: ${got.pkg.payloadSha256}. ` +
-        `Atnezes: agents/${first.name}/. Jovahagyas: POST /api/agents/${first.name}/approve-package (owner-munkamenet).`,
+        `Atnezes: agents/${first.name}/. ${packageReviewWarning(first.name)} ` +
+        `Jovahagyas: POST /api/agents/${first.name}/approve-package (owner-munkamenet).`,
         { reviewOf: first.name, ownerText: updateReviewOwnerText(first.name, got.pkg.version) },
       )
     } catch (err) {

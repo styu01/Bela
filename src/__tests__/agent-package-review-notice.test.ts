@@ -75,3 +75,24 @@ describe('package review notices', () => {
     expect(N.updateReviewOwnerText('nora', '1.1.0')).toContain('1.1.0')
   })
 })
+
+// KISPROGI 6464 K1 (measured 2026-11-28 on Claude Code 2.1.326): opening a file in a package folder, with Read and with
+// Bash cat/head alike, loads its CLAUDE.md (and PACKAGE.md) as instructions unless claudeMdExcludes covers it.
+describe('the review warning (KISPROGI 6464 K1)', () => {
+  it('names both ways in, the folder, the exact exclusion, and what to do without it', () => {
+    const w = N.packageReviewWarning('nora')
+    expect(w).toContain('agents/nora/')
+    expect(w).toContain('Read eszkozzel ES Bash cat/head-del is')
+    expect(w).toContain('UTASITASKENT')
+    expect(w).toContain('claudeMdExcludes kizarja a **/agents/*/CLAUDE.md-t')
+    expect(w).toContain('ne nyisd meg, szolj Istvannak')
+  })
+  it('ASCII only like the rest of the text BELA gets; no em or en dash, no spaced double hyphen', () => {
+    const w = N.packageReviewWarning('nora')
+    expect(/^[\x20-\x7e]+$/.test(w)).toBe(true)
+    expect(w).not.toMatch(/[\u2013\u2014]| -- /)
+  })
+  it('never tells the reviewer to use cat instead of Read (cat attaches the folder memory too)', () => {
+    expect(N.packageReviewWarning('nora')).not.toMatch(/cat-tel nezd|cat helyett|instead of Read/i)
+  })
+})

@@ -108,6 +108,9 @@ describe('the success path (plan 6.1)', () => {
     expect(out.body.payloadSha256).toBe(rec.payloadSha256)
     expect(out.body.payloadSha256).toMatch(/^[0-9a-f]{64}$/)
     expect(notified.find((t) => t.includes('JOVAHAGYASRA VAR'))).toContain(`payloadSha256: ${rec.payloadSha256}`)
+    // KISPROGI 6464 K1: the review request warns that opening the folder's files loads the persona as instructions.
+    const { packageReviewWarning } = await import('../web/agent-package/notices.js')
+    expect(notified.find((t) => t.includes('JOVAHAGYASRA VAR'))).toContain(packageReviewWarning('invoice-helper'))
     expect(out.body.skillReport).toMatchObject({ quarantineApplies: true, findings: {}, globalNameCollisions: [] })
     expect(typeof out.body.skillReport.quarantineOn).toBe('boolean')
     expect(fake.requests).toHaveLength(1)
@@ -380,6 +383,9 @@ describe('the owner approval of an installed package (this fork)', () => {
     expect(p.status).toBe(200)
     expect(p.body.pending.map((x: { name: string }) => x.name)).toEqual(['invoice-helper'])
     expect(p.body.pending[0].installed).toMatchObject({ slug: 'invoice-helper', version: '1.2.0' })
+    // KISPROGI 6464 K1: the pending list carries the review warning per agent.
+    const { packageReviewWarning } = await import('../web/agent-package/notices.js')
+    expect(p.body.pending[0].reviewWarning).toBe(packageReviewWarning('invoice-helper'))
   })
 
   it('the shared token alone cannot approve (403), and nothing is written', async () => {

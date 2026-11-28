@@ -260,6 +260,7 @@ describe('the update and the owner approval (this fork)', () => {
     expect(review).toHaveLength(1)
     expect(review[0]).toContain(`${NAME} 1.2.0 -> 1.3.0`)
     expect(review[0]).toContain(`payloadSha256: ${out.body.payloadSha256}`)
+    expect(review[0]).toContain((await import('../web/agent-package/notices.js')).packageReviewWarning(NAME))
     // KISPROGI 6464 M1: under the agent's review key, with the plain owner sentence.
     expect(notifiedOpts.at(-1)).toEqual({ reviewOf: NAME, ownerText: (await import('../web/agent-package/notices.js')).updateReviewOwnerText(NAME, '1.3.0') })
     // The same version with another digest is not approved unseen; the answered digest is.
