@@ -62,6 +62,68 @@ if [ "${1:-}" = "--resolve-provider" ]; then
   exit 0
 fi
 
+# DESIREDLIST1128 (KISPROGI 6543 F2; BELA 6575): which sub-agents this loop may
+# restart. Before this, every folder under agents/ counted, so every 5 minutes
+# the on-demand agents (autobot, deepseek, iris) and the webchat-relay identity
+# were logged "missing, restarting..."; only their missing bot token kept them
+# from being started. The loop now follows the same desired run-state the
+# dashboard's reconciler follows (store/agents-desired.json, written by the
+# explicit start/stop API, see src/web/agent-desired-state.ts):
+#   - only a name on that list is restarted; anything else is skipped silently;
+#   - a missing, unreadable or non-list file is treated like the dashboard does
+#     (empty: nothing is restarted), and said once per tick;
+#   - a never-start identity is never started, even if it lands on the list:
+#     webchat-relay is the webchat's owner-request identity, not an agent (its
+#     folder has the .p597-owner-webchat-bridge marker and no agent-config.json),
+#     and a folder without agent-config.json is not an agent either.
+AGENTS_DESIRED_FILE="${WATCHDOG_DESIRED_FILE:-$INSTALL_DIR/store/agents-desired.json}"
+NEVER_START_AGENTS="webchat-relay"
+NON_AGENT_MARKER=".p597-owner-webchat-bridge"
+
+# Prints ok, missing or unreadable for the desired list $1.
+desired_list_status() {
+  python3 - "$1" <<'PY' 2>/dev/null || echo unreadable
+import json, os, sys
+path = sys.argv[1]
+if not os.path.lexists(path):
+    print("missing"); sys.exit(0)
+try:
+    with open(path, encoding="utf-8") as f:
+        names = json.load(f)
+except Exception:
+    print("unreadable"); sys.exit(0)
+print("ok" if isinstance(names, list) else "unreadable")
+PY
+}
+
+# Prints "restart" or "skip:<reason>" for the agent folder $1 named $2 against
+# the desired list $3. Never-start checks come first, so they hold even when the
+# list names the identity.
+watchdog_restart_decision() {
+  local d="${1%/}" name="$2" desired="$3" n status
+  for n in $NEVER_START_AGENTS; do
+    [ "$name" = "$n" ] && { echo "skip:never-start"; return; }
+  done
+  if [ -e "$d/$NON_AGENT_MARKER" ] || [ -L "$d/$NON_AGENT_MARKER" ]; then echo "skip:never-start"; return; fi
+  if [ -L "$d/agent-config.json" ] || [ ! -f "$d/agent-config.json" ]; then echo "skip:no-agent-config"; return; fi
+  status="$(desired_list_status "$desired")"
+  [ "$status" = ok ] || { echo "skip:desired-list-$status"; return; }
+  python3 - "$desired" "$name" <<'PY' 2>/dev/null || echo "skip:desired-list-unreadable"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    names = json.load(f)
+print("restart" if sys.argv[2] in [n for n in names if isinstance(n, str)] else "skip:not-desired")
+PY
+}
+
+# Self-test hook: watchdog.sh --decide <agent-dir> [desired-list-file]. Prints the
+# restart decision and exits before the lock, tmux, the dashboard API or the log.
+if [ "${1:-}" = "--decide" ]; then
+  [ -n "${2:-}" ] || { echo "usage: watchdog.sh --decide <agent-dir> [desired-list-file]" >&2; exit 2; }
+  watchdog_restart_decision "$2" "$(basename "${2%/}")" "${3:-$AGENTS_DESIRED_FILE}"
+  exit 0
+fi
+
 # MIOAGENTINSTALL1114 (upstream 9301a1dd, plan 7.4, 7.5; ported, BELA 6404): the package start guard. This loop starts
 # agents WITHOUT startAgentProcess, so it carries the server guard's three
 # conditions itself, with the same texts:
@@ -395,6 +457,12 @@ if [ ! -f "$PACKAGE_HIDDEN_LIST" ]; then
   echo "$(timestamp) [watchdog] agent package hidden list missing ($PACKAGE_HIDDEN_LIST); treated as empty" >> "$LOG"
 fi
 
+# DESIREDLIST1128: one status line per tick when the desired list cannot be used.
+DESIRED_STATUS="$(desired_list_status "$AGENTS_DESIRED_FILE")"
+if [ "$DESIRED_STATUS" != ok ]; then
+  echo "$(timestamp) [watchdog] desired agent list $DESIRED_STATUS ($AGENTS_DESIRED_FILE); no sub-agent restarted this tick" >> "$LOG"
+fi
+
 for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   AGENT_ID=$(basename "$AGENT_DIR")
   SESSION_NAME="agent-${AGENT_ID}"
@@ -402,6 +470,12 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then
     continue
   fi
+
+  [ "$DESIRED_STATUS" = ok ] || continue
+  DECISION="$(watchdog_restart_decision "$AGENT_DIR" "$AGENT_ID" "$AGENTS_DESIRED_FILE")"
+  # Not desired (on-demand, or stopped on purpose) or never-start: silent, so
+  # the log no longer fills with routine "missing" lines every 5 minutes.
+  [ "$DECISION" = restart ] || continue
 
   # Cross-process respawn coordination (2026-08-06 audit): if the dashboard just
   # (re)started this agent -- restartAgentProcess stamps
