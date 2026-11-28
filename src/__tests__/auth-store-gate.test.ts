@@ -5,7 +5,7 @@
 // tools fail-open). The gate's whole loop never runs here: the cases are one tool call each.
 import { describe, it, expect, afterAll } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { accessSync, constants, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, appendFileSync, symlinkSync } from 'node:fs'
+import { accessSync, constants, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, appendFileSync, symlinkSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
@@ -231,8 +231,9 @@ const CLAUDE_BIN = [
 ].find((p) => { try { accessSync(p, constants.X_OK); return true } catch { return false } })
 const CC_FUNCS = (bin: string) => `find(){ ( exec -a bfs ${JSON.stringify(bin)} -S dfs -regextype findutils-default "$@" ); }\n` +
   `grep(){ ( exec -a ugrep ${JSON.stringify(bin)} -G --ignore-files --hidden -I --encoding=UTF-8 "$@" ); }\n`
+const BWRAP = ['/usr/bin/bwrap', '/bin/bwrap'].find((p) => { try { accessSync(p, constants.X_OK); return true } catch { return false } })
 function realRun(cmd: string, effect: 'leaks' | 'db', cc: boolean): void {
-  expect(cmd, 'a real-run case must stay relative').not.toMatch(/(^|[\s=])(\/(?!dev\/std)|~)|\.\.\/|\/\.\.|\$HOME/)
+  expect(cmd, 'a real-run case must stay relative').not.toMatch(/(^|[\s=])(\/(?!dev\/std)|~)|\.\.\/|\/\.\.|\$\{?HOME|OLDPWD|CDPATH|\$\{?PWD|marvee/)
   expect(bash(cmd), cmd).toBe('DENY')
   const box = mkdtempSync(join(tmp, 'real-'))
   mkdirSync(join(box, 'store')); mkdirSync(join(box, 'src'))
@@ -241,7 +242,14 @@ function realRun(cmd: string, effect: 'leaks' | 'db', cc: boolean): void {
   writeFileSync(join(box, 'store', 'a.log'), 'log\n')
   writeFileSync(join(box, 'src', 'a.ts'), 'x\n')
   const script = (cc && CLAUDE_BIN ? CC_FUNCS(CLAUDE_BIN) : '') + cmd
-  const run = spawnSync('bash', ['--noprofile', '--norc', '-c', script], { cwd: box, encoding: 'utf-8', timeout: 10_000, env: { ...process.env, GIT_CEILING_DIRECTORIES: tmp } })
+  // Since the 2026-11-28 incident (a hand-run case with an absolute path deleted a live DB): with bubblewrap present,
+  // every real run sees the whole filesystem READ-ONLY and only its own scratch box writable, so even a case that
+  // escapes its box cannot write anywhere (BELA 6550). Without bubblewrap the relative-only check above is the guard.
+  const argv = BWRAP
+    ? [BWRAP, '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--bind', box, box, '--chdir', box,
+       '--unshare-pid', '--die-with-parent', '--new-session', 'bash', '--noprofile', '--norc', '-c', script]
+    : ['bash', '--noprofile', '--norc', '-c', script]
+  const run = spawnSync(argv[0], argv.slice(1), { cwd: box, encoding: 'utf-8', timeout: 10_000, env: { ...process.env, GIT_CEILING_DIRECTORIES: tmp } })
   try {
     if (effect === 'leaks') expect(run.stdout, cmd).toContain('TOTPSECRET')
     else {
@@ -676,6 +684,86 @@ describe('auth-store-gate: KISPROGI 6524 (pattern sources, NUL in $\'...\', the 
   })
   it.skipIf(!CLAUDE_BIN)('every refused form above that is relative really leaks or hits the DB (bfs / ugrep / GNU, scratch copy)', () => {
     for (const [cmd, effect, cc] of R6524_REAL) realRun(cmd, effect, cc)
+  })
+})
+
+// KISPROGI 6539 Q1-Q10 (BELA 6542): the && chain after a cd counts only when every connector before the cd is &&
+// (Q1), a backslash-newline is removed as bash's reader does (Q2), an unquoted heredoc's $(...) / `...` run (Q3),
+// env -C / tar -C / git -C / make -C and env -S (Q4), eval's and source's cd (Q5), a glob cd target (Q6), a quoted or
+// concatenated heredoc delimiter and a compound array assignment (Q7), and a heredoc inside a substitution (Q8, and
+// the deeper form found while fixing it: an inner scan swallowed the substitution's remaining lines as a body).
+const R6539_DENY: string[] = [
+  // Q1
+  'true || cd /tmp && rm store/claudeclaw.db', 'true || cd /tmp && rm -rf store', '[ -d /tmp ] || cd /tmp && rm store/claudeclaw.db',
+  'ls || cd /tmp && grep -r TOTPSECRET store', 'test 1 || cd /tmp && cat store/.dashboard-totp.json', 'cd /tmp && false || cd /tmp && rm store/claudeclaw.db',
+  // Q2
+  'r\\\nm store/claudeclaw.db', 'rm store/claude\\\nclaw.db', 'rm -rf st\\\nore', 'c\\\nat store/.dashboard-totp.json',
+  // Q3
+  'cat <<EOF\n$(rm store/claudeclaw.db)\nEOF', 'cat <<EOF\n`rm store/claudeclaw.db`\nEOF', "cat <<EOF\nit's $(rm store/claudeclaw.db)\nEOF",
+  'cat <<EOF\nx ${y:-$(rm -rf store)}\nEOF',
+  // Q4 (from the install root too)
+  'git clean -fdX', 'git clean -fx store', 'git clean -fdX store/', "env -S 'rm store/claudeclaw.db'", 'env --split-string="rm -rf store"',
+  // Q7
+  "cat <<'E'O\"F\"\nx\nEOF\nrm store/claudeclaw.db", 'cat <<E\\OF\nx\nEOF\nrm store/claudeclaw.db', 'cat <<EO\\\nF\nx\nEOF\nrm store/claudeclaw.db',
+  'a=(1<<2)\nrm store/claudeclaw.db', 'a=([1<<2]=x)\nrm store/claudeclaw.db', 'a+=(x <<2)\nrm store/claudeclaw.db',
+  // Q8 and the substitution body route
+  '$(cat <<EOF\nrm\nEOF\n) store/claudeclaw.db', 'x=$(cat <<E\nhello\nE\nrm store/claudeclaw.db)', 'echo $(cat <<E\nx\nE\nrm -rf store)',
+  'x=$(python3 <<E\nimport os; os.remove("store/claudeclaw.db")\nE\n)', 'x=$(cat <<E\nx\nE\ncat store/.dashboard-totp.json)',
+  // a literal marker-named delimiter takes no body: what follows is checked as commands
+  'cat <<__HEREDOC0__\nrm store/claudeclaw.db\n__HEREDOC0__',
+  // Q10: more distinct cwds than MAX_CWDS
+  Array.from({ length: 33 }, (_, i) => `cd /tmp/d${i}`).join('; ') + '; ls',
+]
+const R6539_PASS: string[] = [
+  'true || cd /tmp; ls', 'cd /tmp && rm -rf store || echo fail', 'cd /tmp && rm -rf store; cd -', 'cd src && ls',
+  "cat <<'EOF'\n$(rm store/claudeclaw.db)\nEOF", 'cat <<EOF\n\\$(rm store/claudeclaw.db)\nEOF', 'cat <<EOF\nhello $(date)\nEOF',
+  "cat <<$'EOF'\nx\n$'EOF'\nrm store/claudeclaw.db", 'echo a \\\n  b', 'x=(1 2 3); echo ${x[@]}', 'a=(x # c\ny)\necho ok',
+  'git clean -fdn', 'git clean -fdxn', 'git clean -fd src', 'git -C /usr clean -fdX', 'tar -C /tmp -xf a.tar', 'env -C /tmp ls',
+  'eval echo hi', 'make -C /tmp', 'cd /tmp && cd /var && ls', Array.from({ length: 12 }, (_, i) => `cd /tmp/d${i}`).join('; ') + '; ls',
+  'cat <<EOF\nx\\\nEOF\nrm store/claudeclaw.db\nEOF', 'git clean -n -fdX', 'git clean --dry-run -fdX store', 'x=$(cat <<E\nhello\nE\n)\necho $x',
+]
+const R6539_REAL: [string, 'leaks' | 'db', boolean][] = [
+  ['true || cd src && rm store/claudeclaw.db', 'db', false], ['ls || cd src && cat store/.dashboard-totp.json', 'leaks', false],
+  ['r\\\nm store/claudeclaw.db', 'db', false], ['rm -rf st\\\nore', 'db', false], ['c\\\nat store/.dashboard-totp.json', 'leaks', false],
+  ['cat <<EOF\n$(rm store/claudeclaw.db)\nEOF', 'db', false], ['cat <<EOF\n`rm store/claudeclaw.db`\nEOF', 'db', false],
+  ["cat <<EOF\nit's $(rm store/claudeclaw.db)\nEOF", 'db', false],
+  ['env -C store rm claudeclaw.db', 'db', false], ['tar -C store -cf - .dashboard-totp.json | tar -xOf -', 'leaks', false],
+  ["env -S 'rm store/claudeclaw.db'", 'db', false],
+  ['eval cd store; rm claudeclaw.db', 'db', false], ['source <(echo cd store); rm claudeclaw.db', 'db', false],
+  ['cd st?re && rm claudeclaw.db', 'db', false], ['cd sto* && cat .dashboard-totp.json', 'leaks', false],
+  ["cat <<'E'O\"F\"\nx\nEOF\nrm store/claudeclaw.db", 'db', false], ['a=(1<<2)\nrm store/claudeclaw.db', 'db', false],
+  ['a=([1<<2]=x)\nrm store/claudeclaw.db', 'db', false],
+  ['$(cat <<EOF\nrm\nEOF\n) store/claudeclaw.db', 'db', false], ['x=$(cat <<E\nhello\nE\nrm store/claudeclaw.db)', 'db', false],
+  ['echo $(cat <<E\nx\nE\nrm -rf store)', 'db', false],
+  ['x=$(python3 <<E\nimport os; os.remove("store/claudeclaw.db")\nE\n)', 'db', false],
+]
+
+describe('auth-store-gate: KISPROGI 6539 (|| before a cd, line continuation, heredoc bodies and delimiters, chdir options, eval/source/glob cd)', () => {
+  for (const c of R6539_DENY) it(`refuses: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('DENY') })
+  for (const c of R6539_PASS) it(`passes: ${c.replace(/\n/g, '\\n').slice(0, 100)}`, () => { expect(bash(c)).toBe('pass') })
+  it('cwd-changing words reach the install from elsewhere: env -C, tar -C, git -C, eval / source cd, a glob cd, a continued cd', () => {
+    const sub = join(ROOT, 'scripts')
+    for (const c of [
+      `env -C ${ROOT} rm store/claudeclaw.db`, `env --chdir=${ROOT} cat store/.dashboard-totp.json`,
+      `tar -C ${ROOT} -cf - store/.dashboard-totp.json | tar -xOf -`, `git -C ${ROOT} clean -fdX store`,
+      `eval cd ${ROOT}; rm store/claudeclaw.db`, `eval "cd ${ROOT}"; cat store/.dashboard-totp.json`,
+      `source <(echo cd ${ROOT}); rm store/claudeclaw.db`, `. /dev/stdin <<< 'cd ${ROOT}'; rm store/claudeclaw.db`,
+      `cd ${ROOT.slice(0, -1)}? && rm store/claudeclaw.db`, `cd ${ROOT.slice(0, -2)}* && rm -rf store`,
+      `cd /tmp && \\\ncd ${ROOT} && rm store/claudeclaw.db`, 'source ./x.sh; rm store/claudeclaw.db', '. ./x.sh; cat store/.dashboard-totp.json', `${ROOT.slice(0, 0)}cd ${ROOT} || cd /tmp && rm store/claudeclaw.db`,
+    ]) expect(bash(c, sub), c).toBe('DENY')
+    for (const c of [`env -C ${sub} ls`, `make -C ${ROOT} -n`, `git -C ${ROOT} status`, `eval cd ${sub}; ls`, `cd ${ROOT} && npm test`])
+      expect(bash(c, sub), c).toBe('pass')
+  })
+  it.skipIf(!CLAUDE_BIN)('every refused form above that is relative really leaks or hits the DB (in the sandbox)', () => {
+    for (const [cmd, effect, cc] of R6539_REAL) realRun(cmd, effect, cc)
+  })
+  it.skipIf(!BWRAP)('a real run is sandboxed: it cannot write outside its own box', () => {
+    const box = mkdtempSync(join(tmp, 'sbx-'))
+    const outside = join(tmp, `outside-${Date.now()}`)
+    spawnSync(BWRAP!, ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--bind', box, box, '--chdir', box,
+      '--unshare-pid', '--die-with-parent', '--new-session', 'bash', '-c', `touch ${JSON.stringify(outside)}; touch inside`], { encoding: 'utf-8' })
+    expect(existsSync(outside)).toBe(false)
+    expect(existsSync(join(box, 'inside'))).toBe(true)
   })
 })
 

@@ -50,13 +50,19 @@ names listed by something other than find and fed to xargs (ls -a store | xargs 
 (find store | while read f; do cat "$f"; done), a names-only search used as an oracle (grep -rl with a regex of
 the secret's first characters, repeated: KISPROGI 6497 L3, the same class as a name built at run time), and sqlite3 .restore /
 Connection.backup() INTO the live DB (it replaces the whole DB; the direction cannot be told from a legitimate backup in
-text). Matched against a fixed vocabulary only: anything else passes. Unparsable Bash that mentions one of the
+text). KISPROGI 6539 Q9, the same "built at run time" class: a redefined cd (cd() { :; }, function cd, an alias with
+expand_aliases), a symlink made in the same call (ln -s ROOT /tmp/m && cd /tmp/m), a command or name kept in a
+variable (printf -v c ..., x=$(echo rm); $x ...), a file written earlier and read back (echo NAME > /tmp/l; xargs -a
+/tmp/l rm), and an archive extracted into the store folder (tar -C store -x: its member names are not in the text).
+Matched against a fixed vocabulary only: anything else passes. More than 32 possible working folders in one command
+are refused (fail closed; KISPROGI 6539 Q10: the per-place check is quadratic). Unparsable Bash that mentions one of the
 protected names is refused (fail closed); unparsable Bash without them passes. Above 200 KB only the text rules run,
 and then the word "store" or a dot-name glob is refused too.
 
 Protocol: JSON on stdin ({tool_name, tool_input, cwd}); a refusal is a PreToolUse deny decision on stdout, exit 0.
 """
 import fnmatch
+import glob as _glob
 import json
 import os
 import re
@@ -398,8 +404,9 @@ def _code_text_checks(text: str, where: str, cwd: str, depth: int) -> None:
 
 # The heredoc operator and its delimiter word, matched at a "<<" the scanner has already found in shell code (so a
 # here-string's "<<<" never gets here).
-_HEREDOC_RX = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z0-9_.\-]+))")
 _ASSIGN_INDEX_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
+_COMPOUND_ASSIGN_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=\(")
+_MARKER_RX = re.compile(r"__HEREDOC\d+__")
 _CODE_CTX = ("top", "cs", "bq")  # shell code: a heredoc starts here (and a comment, except inside backticks)
 
 
@@ -421,17 +428,83 @@ def _assignment_index_end(cmd: str, i: int) -> int:
     return m.end() - 1 if depth == 0 and (cmd.startswith("=", j) or cmd.startswith("+=", j)) else -1
 
 
+def _heredoc_word(cmd: str, j: int):
+    r"""The heredoc delimiter word starting at j, as bash reads it (KISPROGI 6539 Q7): one shell word, its quotes
+    removed ('E'O"F" and E\OF are EOF), a backslash-newline joining it. (delimiter, quoted, end) or None when no word
+    follows (bash: a syntax error). quoted: any quote or escape in it, so the body is plain data (no expansion)."""
+    n = len(cmd)
+    while j < n and cmd[j] in " \t":
+        j += 1
+    word, quoted, k = [], False, j
+    while k < n:
+        ch = cmd[k]
+        if ch in " \t\n;&|()<>":
+            break
+        if ch == "\\":
+            if k + 1 < n and cmd[k + 1] == "\n":
+                k += 2
+                continue
+            if k + 1 < n:
+                word.append(cmd[k + 1])
+                quoted = True
+            k += 2
+            continue
+        if ch == "'":
+            end = cmd.find("'", k + 1)
+            if end < 0:
+                return None
+            word.append(cmd[k + 1:end])
+            quoted, k = True, end + 1
+            continue
+        if ch == "$" and k + 1 < n and cmd[k + 1] == "'":
+            e = k + 2
+            while e < n and cmd[e] != "'":
+                e += 2 if cmd[e] == "\\" else 1
+            if e >= n:
+                return None
+            word.append(_ansi_c_decode(cmd[k + 2:e]))
+            quoted, k = True, e + 1
+            continue
+        if ch == '"':
+            e, part = k + 1, []
+            while e < n and cmd[e] != '"':
+                if cmd[e] == "\\" and e + 1 < n and cmd[e + 1] in '"\\$`\n':
+                    if cmd[e + 1] != "\n":
+                        part.append(cmd[e + 1])
+                    e += 2
+                    continue
+                part.append(cmd[e])
+                e += 1
+            if e >= n:
+                return None
+            word.append("".join(part))
+            quoted, k = True, e + 1
+            continue
+        word.append(ch)
+        k += 1
+    if not word and not quoted:
+        return None
+    return "".join(word), quoted, k
+
+
 def _strip_heredocs(cmd: str):
-    """Heredoc bodies and comments out of the text: (text with a marker word per heredoc, {marker: body}).
+    r"""Heredoc bodies and comments out of the text: (text with a marker word per heredoc, {marker: body},
+    {marker: {"delim", "quoted", "ref"}}).
 
     One left-to-right scan of the WHOLE text with bash's lexical contexts (KISPROGI 6524 P2): quotes ('...', "...",
     $'...') carry across lines, a backslash escapes, and a << is a heredoc only in shell code: not after an escape
-    (echo \\<<2), not in a comment (true # <<2), not in arithmetic ($((...)), ((...)), $[...], also over several lines),
-    not in ${...} (${PATH:1<<2}) and not in an array assignment's index (a[1<<2]=x). Read as heredocs, each of these hid
-    every following line from the gate. A comment (a # starting a word in shell code, not inside backticks) is cut out
-    as bash does, so a quote inside it (# it's) can no longer swallow the following lines into one quoted word. The
-    bodies start after the next newline in shell code, one per pending heredoc, each up to its delimiter line."""
-    out, bodies, pending = [], {}, []
+    (echo \<<2), not in a comment (true # <<2), not in arithmetic ($((...)), ((...)), $[...], also over several lines),
+    not in ${...} (${PATH:1<<2}), not in an array assignment's index (a[1<<2]=x) and not in a compound array assignment
+    (a=(1<<2), a=([1<<2]=x); KISPROGI 6539 Q7). Read as heredocs, each of these hid every following line from the gate.
+    A comment (a # starting a word in shell code, not inside backticks) is cut out as bash does, so a quote inside it
+    (# it's) can no longer swallow the following lines into one quoted word. KISPROGI 6539 Q2: a backslash-newline is
+    removed as bash's reader does (outside quotes and inside "..."; not in '...', $'...' or a comment), so r\<nl>m is
+    rm. The delimiter is a whole shell word with its quotes removed (Q7); an unquoted heredoc's body has its
+    backslash-newlines joined too, and is marked unquoted (its $(...) and `...` run: Q3). The bodies start after the
+    next newline in shell code, one per pending heredoc, each up to its delimiter line. A delimiter that is a marker
+    (__HEREDOCn__, as an outer scan left it in a substitution's text) takes no body lines: its body is the outer one
+    ("ref"), so an inner scan can no longer swallow the substitution's remaining lines as a body (found 2026-11-28)."""
+    out, bodies, meta, pending = [], {}, {}, []
     stack = [["top", 0]]
     i, n, count, word_start = 0, len(cmd), 0, True
 
@@ -445,13 +518,19 @@ def _strip_heredocs(cmd: str):
             out.append(c)
             i += 1
             word_start = True
-            for marker, delim, strip_tabs in pending:
+            for marker, delim, strip_tabs, quoted in pending:
                 body = []
                 while i < n:
                     j = cmd.find("\n", i)
                     j = n if j < 0 else j
                     line = cmd[i:j]
                     i = j + 1
+                    # an unquoted body joins a line ending in an odd number of backslashes with the next one
+                    while not quoted and (len(line) - len(line.rstrip("\\"))) % 2 == 1 and i < n:
+                        j = cmd.find("\n", i)
+                        j = n if j < 0 else j
+                        line = line[:-1] + cmd[i:j]
+                        i = j + 1
                     if (line.lstrip("\t") if strip_tabs else line) == delim:
                         break
                     body.append(line)
@@ -465,9 +544,11 @@ def _strip_heredocs(cmd: str):
                 stack.pop()
             continue
         if c == "\\" and i + 1 < n:
+            if cmd[i + 1] == "\n" and kind != "ansi":
+                i += 2  # a line continuation: bash removes it before reading words
+                continue
             out.append(cmd[i:i + 2])
-            if cmd[i + 1] != "\n":
-                word_start = False
+            word_start = False
             i += 2
             continue
         if kind == "ansi":
@@ -499,6 +580,25 @@ def _strip_heredocs(cmd: str):
                 out.append(c)
                 i += 1
                 continue
+        elif kind == "ca":  # a compound array assignment a=( ... ): words, quotes, comments, no heredoc
+            if c == "#" and word_start:
+                j = cmd.find("\n", i)
+                i = n if j < 0 else j
+                continue
+            if c == "'":
+                push("sq")
+            elif c == '"':
+                push("dq")
+            elif c == "(":
+                stack[-1][1] += 1
+            elif c == ")":
+                stack[-1][1] -= 1
+                if stack[-1][1] == 0:
+                    stack.pop()
+                    out.append(c)
+                    i += 1
+                    word_start = False
+                    continue
         else:  # shell code: top, cs (inside $( )), bq (inside backticks)
             if c == "#" and word_start and kind != "bq":
                 j = cmd.find("\n", i)
@@ -520,14 +620,20 @@ def _strip_heredocs(cmd: str):
                     i += 3
                     word_start = True
                     continue
-                m = _HEREDOC_RX.match(cmd, i)
-                if m:
-                    delim = m.group(2) if m.group(2) is not None else (m.group(3) if m.group(3) is not None else m.group(4))
+                dash = cmd.startswith("<<-", i)
+                w = _heredoc_word(cmd, i + (3 if dash else 2))
+                if w:
+                    delim, quoted, end = w
                     marker = f"__HEREDOC{count}__"
                     count += 1
-                    pending.append((marker, delim, m.group(1) == "-"))
+                    ref = delim if (not quoted and _MARKER_RX.fullmatch(delim)) else None
+                    meta[marker] = {"delim": delim, "quoted": quoted, "ref": ref}
+                    if ref:
+                        bodies[marker] = ""
+                    else:
+                        pending.append((marker, delim, dash, quoted))
                     out.append("<< " + marker)
-                    i = m.end()
+                    i = end
                     word_start = False
                     continue
             elif cmd.startswith("((", i) and word_start:
@@ -541,6 +647,13 @@ def _strip_heredocs(cmd: str):
                 push("ix", 1)
                 i = j + 1
                 word_start = False
+                continue
+            elif word_start and _COMPOUND_ASSIGN_RX.match(cmd, i):
+                m = _COMPOUND_ASSIGN_RX.match(cmd, i)
+                out.append(m.group(0))
+                push("ca", 1)
+                i = m.end()
+                word_start = True
                 continue
             elif kind == "cs" and c == "(":
                 stack[-1][1] += 1
@@ -575,7 +688,7 @@ def _strip_heredocs(cmd: str):
                 out.append("$[")
                 i += 2
                 continue
-            if kind in _CODE_CTX and cmd.startswith("$'", i):
+            if kind in _CODE_CTX + ("ca",) and cmd.startswith("$'", i):
                 push("ansi")
                 out.append("$'")
                 i += 2
@@ -589,11 +702,58 @@ def _strip_heredocs(cmd: str):
             continue
         out.append(c)
         i += 1
-        if kind in _CODE_CTX:
-            word_start = c in " \t\r;&|()<>"
-    for marker, _delim, _strip in pending:
+        if kind in _CODE_CTX or kind == "ca":
+            word_start = c in " \t\r\n;&|()<>"
+    for marker, _delim, _strip, _quoted in pending:
         bodies[marker] = ""
-    return "".join(out), bodies
+    return "".join(out), bodies, meta
+
+
+def _heredoc_substitutions(body: str):
+    """The $(...) and `...` parts of an UNQUOTED heredoc body: bash runs them when the heredoc is read (KISPROGI 6539
+    Q3: cat <<EOF + $(rm store/claudeclaw.db)). Quotes in the body are plain text (it's $(cmd) still runs); a backslash
+    escapes $ and ` there."""
+    subs, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+            continue
+        if body.startswith("$(", i) and not body.startswith("$((", i):
+            end, closed = _substitution_end(body, i + 2)
+            subs.append(body[i + 2:end - 1] if closed else body[i + 2:])
+            i = end
+            continue
+        if c == "`":
+            j = i + 1
+            while j < n and body[j] != "`":
+                j += 2 if body[j] == "\\" else 1
+            subs.append(body[i + 1:j])
+            i = j + 1
+            continue
+        i += 1
+    return subs
+
+
+def _substitution_end(cmd: str, j: int):
+    """For a $( whose text starts at j: (index just after its closing paren, closed), quotes inside respected."""
+    depth, q1, q2 = 1, False, False
+    while j < len(cmd) and depth:
+        d = cmd[j]
+        if d == "\\" and not q1:
+            j += 2
+            continue
+        if d == "'" and not q2:
+            q1 = not q1
+        elif d == '"' and not q1:
+            q2 = not q2
+        elif not q1 and not q2:
+            if d == "(":
+                depth += 1
+            elif d == ")":
+                depth -= 1
+        j += 1
+    return j, depth == 0
 
 
 def _strip_substitutions(cmd: str):
@@ -924,7 +1084,9 @@ def _split_command(toks):
             # skip the wrapper's own options and operands (env assignments, durations, nice levels)
             while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", words[i])
                                       or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
-                takes_arg = r"-[IiLPdEansx]|-[nkus]" if base == "xargs" else r"-[nkus]|--signal|--kill-after|-o|-e|-i"
+                takes_arg = (r"-[IiLPdEansx]|-[nkus]" if base == "xargs"
+                             else r"-[uCS]|--unset|--chdir|--split-string" if base == "env"  # KISPROGI 6539 Q4
+                             else r"-[nkus]|--signal|--kill-after|-o|-e|-i")
                 if re.fullmatch(takes_arg, words[i]) and i + 1 < len(words):
                     i += 1
                 i += 1
@@ -1288,6 +1450,20 @@ def _unparsable_hits(cmd: str) -> bool:
                 or re.search(r">\s*['\"]?[^\s;|&]*" + _DBN, cmd, re.I))
 
 
+_HD_STACK = []  # per check_bash level being processed: (bodies, meta); a substitution's text refers to its parent's
+MAX_CWDS = 32   # KISPROGI 6539 Q10: more distinct possible cwds than this in one command is refused (fail closed)
+
+
+def _resolve_heredoc_refs(bodies, meta) -> None:
+    """A marker delimiter (a heredoc an outer scan cut out of a substitution's text) takes the outer body."""
+    parent = _HD_STACK[-1] if _HD_STACK else None
+    for m, md in meta.items():
+        ref = md.get("ref")
+        if ref and parent and ref in parent[0]:
+            bodies[m] = parent[0][ref]
+            md["quoted"] = parent[1].get(ref, {}).get("quoted", True)
+
+
 def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) -> None:
     """best_effort: a nested try on text that may not be shell at all (an interpreter's code); a parse failure there
     is not a refusal, the text rules already ran on it."""
@@ -1301,7 +1477,8 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
         if not best_effort and (_unparsable_hits(cmd) or _BIG_TEXT_STORE_RX.search(cmd)):
             _deny("nagyon hosszu parancs a vedett nevekkel vagy a store mappaval (csak szoveges ellenorzes)")
         return
-    text, bodies = _strip_heredocs(cmd)
+    text, bodies, hmeta = _strip_heredocs(cmd)
+    _resolve_heredoc_refs(bodies, hmeta)
     text = _decode_dollar_quotes(text)
     text, subs = _strip_substitutions(text)
     sub_text = {f"__SUBST{k}__": sub for k, sub in enumerate(subs)}
@@ -1309,61 +1486,188 @@ def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) ->
         pipes, ends = _pipelines(_tokens(text))
     except ValueError:
         pipes = ends = None
-    # KISPROGI 6524 V2/P5: the cwd is a SET of places a command may run in. A cd adds its target and does not drop the
-    # old place (it may fail: a missing folder; it may sit in a branch, a function body, a background job or a case
-    # arm); only the commands joined to it by && run in the target alone (they run only if it succeeded). cd - / ~- /
-    # popd add an unknown place, and every path is checked under every candidate. A subshell's own cds end with it.
-    sets, every = [], {cwd: None}
-    if pipes is not None:
-        cur, base, stack = [cwd], [cwd], []
-        for pl, end in zip(pipes, ends):
-            if pl == [[SUBSHELL_OPEN]]:
-                stack.append((cur, base))
-                base = cur
-                sets.append(None)
+    _HD_STACK.append((bodies, hmeta))
+    try:
+        if pipes is not None:
+            sets, every = _cwd_sets(pipes, ends, [cwd], cmd, sub_text, bodies, depth)
+        else:
+            sets, every = [], {cwd: None}
+        for s_ in subs:
+            # a substitution is shell that runs, in any place the command may be by then (its data positions stay data)
+            for c in every:
+                if depth < 4:
+                    check_bash(s_, c, depth + 1, best_effort)
+                elif _unparsable_hits(s_):
+                    _deny("tul mely parancs-behelyettesites a vedett nevekkel (fail-closed)")
+        # KISPROGI 6539 Q3: an UNQUOTED heredoc's body is expanded when it is read: its $(...) and `...` run
+        for m, body in bodies.items():
+            if body and not hmeta.get(m, {}).get("quoted", True):
+                for s_ in _heredoc_substitutions(body):
+                    for c in every:
+                        if depth < 4:
+                            check_bash(s_, c, depth + 1, best_effort)
+                        elif _unparsable_hits(s_):
+                            _deny("tul mely heredoc-behelyettesites a vedett nevekkel (fail-closed)")
+        if pipes is None:
+            if not best_effort and _unparsable_hits(cmd):
+                _deny("nem elemezheto parancs a vedett nevekkel (fail-closed)")
+            return
+        for pipeline, cands in zip(pipes, sets):
+            if cands is None:
                 continue
-            if pl == [[SUBSHELL_CLOSE]]:
-                cur, base = stack.pop() if stack else (cur, base)
-                if end != "&&":
-                    cur = base
-                sets.append(None)
-                continue
-            sets.append(cur)
-            targets = None
-            if len(pl) == 1:
-                head, args = _split_command(pl[0])[:2]
-                if head in ("cd", "pushd", "popd"):
-                    targets = _cd_targets(cur, head, args, cmd)
-                    every.update(dict.fromkeys(targets))
-            if targets is not None and end == "&&" and pl[0][:1] != ["!"]:
+            for c in cands:
+                # KISPROGI 6539 Q4: env -C, tar -C, git -C, make -C run the command (or read its paths) elsewhere
+                for place in [c] + [d for d in _pipeline_chdirs(pipeline, c) if d != c]:
+                    try:
+                        _check_pipeline(pipeline, place, depth, bodies, sub_text)
+                    except Deny as d:
+                        if len(cands) > 1 and c != cands[-1] and c != UNKNOWN_CWD and "cd MAPPA &&" not in str(d):
+                            raise Deny(f"{d}; ha egy korabbi cd nem sikerul, ez a(z) {c} mappaban futna (cd MAPPA && "
+                                       "PARANCS alakban csak a cd celjaban fut)") from None
+                        raise
+    finally:
+        _HD_STACK.pop()
+
+
+def _cwd_sets(pipes, ends, start, cmd: str, sub_text, bodies, depth: int):
+    """KISPROGI 6524 V2/P5: the cwd is a SET of places a command may run in. A cd adds its target and does not drop the
+    old place (it may fail: a missing folder; it may sit in a branch, a function body, a background job or a case
+    arm); only the commands joined to it by && run in the target alone (they run only if it succeeded), and only when
+    every connector before the cd in its and-or list is && (KISPROGI 6539 Q1: "A || cd X && B" is "(A || cd X) && B",
+    so B runs where A ran when A succeeds). cd - / ~- / popd add an unknown place, and every path is checked under
+    every candidate. A subshell's own cds end with it. KISPROGI 6539 Q5: eval's words are shell (their cd counts), and
+    source / . of a substitution, of stdin or of a file adds an unknown place (plus what a known text does).
+    Returns (per pipeline: its candidate list or None for a subshell marker, every place ever reached)."""
+    sets, every = [], dict.fromkeys(start)
+    cur, base, stack, andor_ok = list(start), list(start), [], True
+    for pl, end in zip(pipes, ends):
+        if pl == [[SUBSHELL_OPEN]]:
+            stack.append((cur, base, andor_ok))
+            base, andor_ok = cur, True
+            sets.append(None)
+            continue
+        if pl == [[SUBSHELL_CLOSE]]:
+            cur, base, andor_ok = stack.pop() if stack else (cur, base, andor_ok)
+            if end != "&&":
+                cur = base
+            andor_ok = False if end == "||" else (andor_ok if end == "&&" else True)
+            sets.append(None)
+            continue
+        sets.append(cur)
+        targets = effect = None
+        if len(pl) == 1:
+            head, args, _redirs, herestr, heredocs, _assigns = _split_command(pl[0])
+            if head in ("cd", "pushd", "popd"):
+                targets = _cd_targets(cur, head, args, cmd)
+            elif head == "eval" and depth < 4:
+                words = [_unmark(a) for a in args]
+                if words[:1] == ["--"]:
+                    words = words[1:]
+                effect = _cwd_effect(" ".join(words), cur, depth)
+            elif head in ("source", ".") and depth < 4:
+                effect = list(dict.fromkeys(cur + [UNKNOWN_CWD]))
+                texts = [h for h in herestr] + [bodies.get(m, "") for m in heredocs]
+                for w in args[:1]:
+                    for mk in re.findall(r"__SUBST\d+__", w):
+                        out = _printer_output(sub_text.get(mk, ""))
+                        if out is not None:
+                            texts.append(out)
+                for t in texts:
+                    effect = list(dict.fromkeys(effect + _cwd_effect(t, cur, depth)))
+        if targets is not None:
+            every.update(dict.fromkeys(targets))
+            if end == "&&" and andor_ok and pl[0][:1] != ["!"]:
                 cur, base = targets, list(dict.fromkeys(base + targets))
-            elif targets is not None:
+            else:
                 base = list(dict.fromkeys(base + targets))
                 cur = base
-            elif end != "&&":
-                cur = base
-    for s_ in subs:
-        # a substitution is shell that runs, in any place the command may be by then (its data positions stay data)
-        for c in every:
-            if depth < 4:
-                check_bash(s_, c, depth + 1, best_effort)
-            elif _unparsable_hits(s_):
-                _deny("tul mely parancs-behelyettesites a vedett nevekkel (fail-closed)")
-    if pipes is None:
-        if not best_effort and _unparsable_hits(cmd):
-            _deny("nem elemezheto parancs a vedett nevekkel (fail-closed)")
-        return
-    for pipeline, cands in zip(pipes, sets):
-        if cands is None:
+        elif effect is not None:
+            every.update(dict.fromkeys(effect))
+            base = list(dict.fromkeys(base + effect))
+            cur = base
+        elif end != "&&":
+            cur = base
+        andor_ok = False if end == "||" else (andor_ok if end == "&&" else True)
+        if len(every) > MAX_CWDS:
+            _deny(f"tul sok lehetseges munkamappa egy parancsban (tobb mint {MAX_CWDS} cd-cel); bontsd tobb hivasra")
+    return sets, every
+
+
+def _cwd_effect(text: str, start, depth: int):
+    """Every place a piece of shell text (eval's words, a sourced text) may leave the cwd in, from the start places."""
+    try:
+        t, b, m = _strip_heredocs(text)
+        t, subs = _strip_substitutions(_decode_dollar_quotes(t))
+        pipes, ends = _pipelines(_tokens(t))
+    except ValueError:
+        return list(dict.fromkeys(list(start) + [UNKNOWN_CWD]))
+    _sets, every = _cwd_sets(pipes, ends, list(start), text, {f"__SUBST{k}__": s_ for k, s_ in enumerate(subs)}, b, depth + 1)
+    return list(every)
+
+
+def _pipeline_chdirs(pipeline, cwd: str):
+    """KISPROGI 6539 Q4: the folders a pipeline member works in besides the cwd: env -C / --chdir (before the command),
+    tar -C / --directory, git -C (cumulative), make -C / --directory. A variable folder is an unknown place."""
+    out = []
+
+    def place(v: str, base: str) -> str:
+        v = _unmark(v)
+        if _unknown_place(v) or re.search(r"[*?\[]", v):
+            return UNKNOWN_CWD
+        if base == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(v)):
+            return UNKNOWN_CWD
+        return _resolve(v, base)
+
+    for toks in pipeline:
+        words = [t for t in toks if t not in REDIRS]
+        i = 0
+        while i < len(words):  # wrappers before the command word; env's own options
+            w = words[i]
+            b = os.path.basename(w)
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w, re.S):
+                i += 1
+                continue
+            if b == "env":
+                i += 1
+                while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
+                    o = words[i]
+                    if o in ("-C", "--chdir") and i + 1 < len(words):
+                        out.append(place(words[i + 1], cwd))
+                        i += 1
+                    elif o.startswith("--chdir="):
+                        out.append(place(o.split("=", 1)[1], cwd))
+                    elif re.fullmatch(r"-[iv0]*C.+", o):
+                        out.append(place(o[o.index("C") + 1:], cwd))
+                    elif o in ("-u", "--unset", "-S", "--split-string") and i + 1 < len(words):
+                        i += 1
+                    i += 1
+                continue
+            if b in WRAPPERS and b != "xargs":
+                i += 1
+                continue
+            break
+        if i >= len(words):
             continue
-        for c in cands:
-            try:
-                _check_pipeline(pipeline, c, depth, bodies, sub_text)
-            except Deny as d:
-                if len(cands) > 1 and c != cands[-1] and c != UNKNOWN_CWD and "cd MAPPA &&" not in str(d):
-                    raise Deny(f"{d}; ha egy korabbi cd nem sikerul, ez a(z) {c} mappaban futna (cd MAPPA && PARANCS "
-                               "alakban csak a cd celjaban fut)") from None
-                raise
+        head, rest = os.path.basename(_unmark(words[i])), words[i + 1:]
+        if head == "git":
+            d, k = cwd, 0
+            while k < len(rest) and rest[k].startswith("-"):
+                if rest[k] == "-C" and k + 1 < len(rest):
+                    d = place(rest[k + 1], d) if d != UNKNOWN_CWD else UNKNOWN_CWD
+                    out.append(d)
+                    k += 2
+                    continue
+                k += 2 if rest[k] in ("-c", "--git-dir", "--work-tree", "--namespace") else 1
+        elif head in ("tar", "gtar", "bsdtar", "make", "gmake"):
+            for k, a in enumerate(rest):
+                a = _unmark(a)
+                if a in ("-C", "--directory") and k + 1 < len(rest):
+                    out.append(place(rest[k + 1], cwd))
+                elif a.startswith("--directory="):
+                    out.append(place(a.split("=", 1)[1], cwd))
+                elif head in ("make", "gmake") and re.fullmatch(r"-C.+", a):
+                    out.append(place(a[2:], cwd))
+    return list(dict.fromkeys(out))
 
 
 _CDPATH_RX = re.compile(r"\bCDPATH=(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|()<>]*))")
@@ -1386,6 +1690,25 @@ def _cd_targets(cur, head: str, args, cmd: str):
             or (target.startswith("~") and re.match(r"~[-+]\d*(?:/|$)", target)):
         return [UNKNOWN_CWD]
     out = {}
+    if re.search(r"[*?\[]", target):
+        # KISPROGI 6539 Q6: bash expands a glob target first (cd /home/kisss/marvee? goes to the install): the
+        # folders it matches here, or an unknown place when nothing (or too much) matches
+        for c in cur:
+            pat = os.path.expanduser(target)
+            if not os.path.isabs(pat):
+                if c == UNKNOWN_CWD:
+                    out[UNKNOWN_CWD] = None
+                    continue
+                pat = os.path.join(c, pat)
+            try:
+                hits = [h for h in _glob.glob(pat) if os.path.isdir(h)][:MAX_CWDS + 1]
+            except (OSError, ValueError, re.error):
+                hits = []
+            if not hits or len(hits) > MAX_CWDS:
+                out[UNKNOWN_CWD] = None
+            for h in hits[:MAX_CWDS]:
+                out[_resolve(h, c)] = None
+        return list(out)
     for c in cur:
         if c == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(target)):
             out[UNKNOWN_CWD] = None
@@ -1432,6 +1755,12 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
                 _code_text_checks(h, "here-string", cwd, depth)
             elif _is_live_totp_word(h, cwd):
                 _deny("a masodik faktor taranak neve")
+        # env -S / --split-string: the string is split into the command line env runs (KISPROGI 6539 Q4 family); it
+        # takes the command word's place, so it is checked before a command without a word is passed over
+        if depth < 4:
+            for text in _env_split_strings(pipeline[idx]):
+                _code_text_checks(text, "env -S", cwd, depth)
+                check_bash(text, cwd, depth + 1)
         if not head:
             continue
         # KISPROGI 6511 HS3: a code reader (a shell, an interpreter, eval, trap, source) that gets a substitution's
@@ -1556,6 +1885,8 @@ def _check_pipeline(pipeline, cwd: str, depth: int, bodies, sub_text) -> None:
                     _deny(f"a dashboard adatbazis-fajljanak felulirasa a store mappaba masolva ({head})")
         if head in SEARCH_HEADS and _recursive_search_on_store(head, args, cwd):
             _deny(f"rekurziv kereses ({head}) a store mappaban (a rejtett masodik faktor tarat is olvasna)")
+        if head == "git" and _git_clean_on_store(args, cwd):
+            _deny("git clean -x/-X a store mappara (a gitignore-olt store-t, benne a dashboard adatbazisat torolne)")
         if head == "git" and _git_grep_on_store(args, cwd):
             _deny("git grep --no-index/--untracked a store mappaban (a rejtett masodik faktor tarat is olvasna)")
         if head == "find":
@@ -1722,7 +2053,8 @@ def _printer_output(sub: str):
     if re.search(r"[$`]\(|`", sub):
         return None
     try:
-        text, bodies = _strip_heredocs(sub)
+        text, bodies, meta = _strip_heredocs(sub)
+        _resolve_heredoc_refs(bodies, meta)
         pipes, _ends = _pipelines(_tokens(_decode_dollar_quotes(text)))
     except ValueError:
         return None
@@ -2058,6 +2390,78 @@ def _recursive_search_on_store(head: str, args, cwd: str) -> bool:
         if include and not any(_glob_may_match_totp(g, ci) for g, ci in include):
             return False
     return True
+
+
+def _env_split_strings(toks):
+    """The -S / --split-string values of an env wrapper before the command word."""
+    out, i = [], 0
+    words = [_unmark(t) for t in toks]
+    while i < len(words):
+        w = words[i]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w, re.S):
+            i += 1
+            continue
+        if os.path.basename(w) != "env":
+            if os.path.basename(w) in WRAPPERS:
+                i += 1
+                continue
+            break
+        i += 1
+        while i < len(words) and (words[i].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[i], re.S)):
+            o = words[i]
+            if o in ("-S", "--split-string") and i + 1 < len(words):
+                out.append(words[i + 1])
+                i += 2
+                continue
+            if o.startswith("--split-string="):
+                out.append(o.split("=", 1)[1])
+            elif re.fullmatch(r"-[iv0]*S.+", o):
+                out.append(o[o.index("S") + 1:])
+            elif o in ("-u", "--unset", "-C", "--chdir") and i + 1 < len(words):
+                i += 1
+            i += 1
+    return out
+
+
+def _git_clean_on_store(args, cwd: str) -> bool:
+    """git clean -x / -X removes ignored files, and the store folder is git-ignored: from the install root (or with a
+    pathspec reaching the store) it deletes the live DB. A dry run (-n) passes. (KISPROGI 6539 Q4: git -C ROOT clean
+    -fdX store.)"""
+    d, k = cwd, 0
+    while k < len(args) and args[k].startswith("-"):
+        if args[k] == "-C" and k + 1 < len(args):
+            v = _unmark(args[k + 1])
+            d = UNKNOWN_CWD if (_unknown_place(v) or d == UNKNOWN_CWD and not os.path.isabs(v)) else _resolve(v, d)
+            k += 2
+            continue
+        k += 2 if args[k] in ("-c", "--git-dir", "--work-tree", "--namespace") else 1
+    if k >= len(args) or args[k] != "clean":
+        return False
+    rest, specs, after_dd, ignored, dry = args[k + 1:], [], False, False, False
+    for a in rest:
+        a = _unmark(a)
+        if after_dd or not a.startswith("-"):
+            specs.append(a)
+        elif a == "--":
+            after_dd = True
+        elif a == "--dry-run":
+            dry = True
+        elif re.fullmatch(r"-[A-Za-z]+", a):
+            dry = dry or "n" in a
+            ignored = ignored or "x" in a or "X" in a
+    if dry or not ignored:
+        return False
+    for sp in specs or ["."]:
+        sp = re.sub(r"^:\([^)]*\)|^:[!^/]?", "", sp) or "."
+        if d == UNKNOWN_CWD and not os.path.isabs(sp):
+            return True
+        if _vague_word(sp):
+            if _is_store_or_ancestor(".", d) or _is_store_dir(os.path.dirname(sp) or ".", d):
+                return True
+            continue
+        if _is_store_or_ancestor(sp, d) or _is_store_dir(sp, d) or _is_live_db_path(sp, d) or _is_live_totp_word(sp, d):
+            return True
+    return False
 
 
 def _git_grep_on_store(args, cwd: str) -> bool:
