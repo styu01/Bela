@@ -34,7 +34,7 @@ import {
 } from '../agent-package/install.js'
 import { sanitizeAgentName } from '../sanitize.js'
 import {
-  checkDecisions, classifyVersion, computeChangeList, installedFileHashes, readUpdatingTrace, runApplyBlock, shellRepairState,
+  AGENT_RUNNING_MESSAGE, checkDecisions, classifyVersion, computeChangeList, installedFileHashes, readUpdatingTrace, runApplyBlock, shellRepairState,
   updateSkillReport, type ChangeList,
 } from '../agent-package/update.js'
 import { quarantineOn } from '../skill-quarantine.js'
@@ -495,7 +495,9 @@ async function applyUpdate(ctx: RouteContext, deps: PackageDeps, rawName: string
   // This fork (BELA 6438/6444): an update is not applied under a RUNNING agent. Claude Code reads a skill file when
   // the skill is used, so a running agent would take the new, not yet approved files into use. Stop it first; after
   // the apply it waits for a new owner approval anyway (the record changed).
-  if (isAgentRunning(first.name)) { json(res, { error: 'agent_running', message: 'Stop the agent before applying a package update; after the update it waits for a new owner approval.' }, 409); return }
+  // KISPROGI 6464 H1: this early check saves the download; the block checks again once its trace stands (the guards
+  // refuse a start from then on), since the agent may be started while the download and the queue are awaited.
+  if (isAgentRunning(first.name)) { json(res, { error: 'agent_running', message: AGENT_RUNNING_MESSAGE }, 409); return }
   applying.add(first.name)
   try {
     const got = await downloadVerified(first.manifest.payload.slug, deps)
@@ -511,7 +513,7 @@ async function applyUpdate(ctx: RouteContext, deps: PackageDeps, rawName: string
       if (l.list.planId !== body.planId) return { ok: false, answer: { status: 409, body: { error: 'plan_changed', plan: l.list } } }
       const d = checkDecisions(l.list, body.decisions)
       if (!d.ok) return { ok: false, answer: { status: d.status, body: d.body } }
-      const r = runApplyBlock({ name: l.at.name, agentDir: l.at.dir, list: l.list, ops: d.ops, pkg: got.pkg, manifest: l.at.manifest, installedFiles: l.at.installedFiles, driveFolder, lang, now })
+      const r = runApplyBlock({ name: l.at.name, agentDir: l.at.dir, list: l.list, ops: d.ops, pkg: got.pkg, manifest: l.at.manifest, installedFiles: l.at.installedFiles, driveFolder, lang, now, isRunning: () => isAgentRunning(l.at.name) })
       if (!r.ok) {
         if (r.body.error === 'plan_changed') {
           // D2: the disk moved inside the block; the new list goes with the refusal, as for a planId mismatch.

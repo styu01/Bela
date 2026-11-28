@@ -1487,6 +1487,13 @@ function startRemoteAgentProcess(
   }
 }
 
+/** The package start guard: upstream's install/files/shell refusals and this fork's update trace (install.ts), then
+ *  the owner approval (approval.ts). null when the agent may start. The top of startAgentProcess writes the same two
+ *  calls inline (upstream's source pins read that line); the re-checks at the spawns use this. */
+function packageGuardRefusal(name: string, dir: string): string | null {
+  return packageStartRefusal(name, dir) ?? packageApprovalRefusal(name)
+}
+
 export async function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
@@ -1989,6 +1996,15 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
     // Only the launch CWD changes for the EPERM fallback below. The generated
     // environment remains bound to the real agent directories.
     const buildLaunchCmd = (launchCwd: string) => `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}cd "${launchCwd}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${effortFlag}${channelFlag}`.trimEnd()
+    // This fork (KISPROGI 6464 H1): the package guard once more, right before the spawn. The awaits above (3 s after
+    // the kill) leave room for a package update to be applied in between; nothing is awaited from this check to the
+    // spawn, and every in-process starter and the apply run in this one process, so the two cannot interleave. (The
+    // watchdog, a separate process, re-checks after its spawn and withdraws a raced session.)
+    const lateRefusal = packageGuardRefusal(name, dir)
+    if (lateRefusal !== null) {
+      logger.warn({ name, refusal: lateRefusal }, 'agent start refused by the package guard right before the spawn')
+      return { ok: false, error: lateRefusal }
+    }
     runTmux(null, ['new-session', '-d', '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')
@@ -2009,6 +2025,13 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean } 
           epermRestarted = true
           try { runTmux(null, ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 5000 }) } catch { /* already gone */ }
           try {
+            // H1: up to 14 s after the start, so the whole guard again (the approval too: an update applied meanwhile
+            // leaves a record the approval no longer names).
+            const fallbackRefusal = packageGuardRefusal(name, dir)
+            if (fallbackRefusal !== null) {
+              logger.warn({ name, refusal: fallbackRefusal }, 'EPERM fallback relaunch refused by the package guard')
+              return
+            }
             const fallbackCwd = mkdtempSync(join(tmpdir(), `marveen-agent-${name}-`))
             // Upstream 9301a1dd (plan 4.4): a package agent's shell is EXPANDED into a real file (its imports would not
             // load from /tmp); any other agent gets the link as before. 'refused': the package files are missing or the

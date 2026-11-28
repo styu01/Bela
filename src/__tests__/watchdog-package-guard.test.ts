@@ -11,15 +11,17 @@ import { join } from 'node:path'
 const root = mkdtempSync(join(tmpdir(), 'wd-pkg-guard-'))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 const APPR = join(root, 'appr')
+const UPD = join(root, 'updating')
 const HIDDEN = join(root, 'hidden.json')
 const SHA = 'a'.repeat(64)
 const PREFIX = readFileSync(join(process.cwd(), 'scripts', 'lib', 'package-shell-prefix'), 'utf-8')
 mkdirSync(APPR)
+mkdirSync(UPD)
 writeFileSync(HIDDEN, '[]')
 
 function check(dir: string): string {
   const r = spawnSync('bash', ['scripts/watchdog.sh', '--check-package', dir, HIDDEN], {
-    cwd: process.cwd(), encoding: 'utf-8', env: { ...process.env, WATCHDOG_PACKAGE_APPROVALS_DIR: APPR },
+    cwd: process.cwd(), encoding: 'utf-8', env: { ...process.env, WATCHDOG_PACKAGE_APPROVALS_DIR: APPR, WATCHDOG_PACKAGE_UPDATING_DIR: UPD },
   })
   return r.stdout.trim()
 }
@@ -83,6 +85,62 @@ describe('watchdog.sh package start guard', () => {
     writeFileSync(join(d, 'PACKAGE.md'), 'persona\n')
     writeFileSync(join(d, 'CLAUDE.md'), '# no shell\n')
     expect(check(d)).toBe('package=refused:Package shell broken: CLAUDE.md must start with the PACKAGE.md and LOCAL.md import lines')
+  })
+})
+
+// This fork (KISPROGI 6464 H1): while an update trace stands (store/agent-package-updating/<name>.json) the package
+// agent is not started, with the server's text (install.ts REFUSAL_UPDATE_IN_PROGRESS); the same scope as marker.ts
+// hasUpdatingTrace + isPackageAgentDir.
+describe('watchdog.sh: a package update in progress', () => {
+  it('an approved package agent with an update trace is not started; without it, it is', () => {
+    const d = pkgAgent('u1'); approve('u1')
+    writeFileSync(join(UPD, 'u1.json'), '{"from":"1.0.0","to":"1.1.0","startedAt":"x"}')
+    expect(check(d)).toBe('package=refused:Package update in progress')
+    unlinkSync(join(UPD, 'u1.json'))
+    expect(check(d)).toBe('package=ok')
+  })
+  it('a trace that is a dangling link, a folder or unparsable counts (fail closed)', () => {
+    const d = pkgAgent('u2'); approve('u2')
+    symlinkSync(join(root, 'nowhere'), join(UPD, 'u2.json'))
+    expect(check(d)).toBe('package=refused:Package update in progress')
+    unlinkSync(join(UPD, 'u2.json'))
+    mkdirSync(join(UPD, 'u2.json'))
+    expect(check(d)).toBe('package=refused:Package update in progress')
+    rmSync(join(UPD, 'u2.json'), { recursive: true })
+    writeFileSync(join(UPD, 'u2.json'), 'not json')
+    expect(check(d)).toBe('package=refused:Package update in progress')
+    unlinkSync(join(UPD, 'u2.json'))
+  })
+  it('a folder with a manifest but a broken shell is held by the trace too', () => {
+    const d = pkgAgent('u3'); approve('u3')
+    writeFileSync(join(d, 'CLAUDE.md'), '# no shell\n')
+    writeFileSync(join(UPD, 'u3.json'), '{}')
+    expect(check(d)).toBe('package=refused:Package update in progress')
+    unlinkSync(join(UPD, 'u3.json'))
+  })
+  it("a stale trace under a hand-made agent's name does not stop that agent", () => {
+    const d = join(root, 'agents', 'hand2')
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'CLAUDE.md'), '# hand\n')
+    writeFileSync(join(UPD, 'hand2.json'), '{}')
+    expect(check(d)).toBe('package=ok')
+    unlinkSync(join(UPD, 'hand2.json'))
+  })
+})
+
+// The sub-agent loop's order (source pins: the loop needs a live tmux to run, and must never be run by a test: its
+// own PATH export would reach the real systemctl and tmux). H1: after the spawn the guard is asked again and a refusal
+// withdraws the session.
+describe('watchdog.sh: the sub-agent loop order (KISPROGI 6464 H1)', () => {
+  const sh = readFileSync(join(process.cwd(), 'scripts', 'watchdog.sh'), 'utf-8')
+  const loop = sh.slice(sh.indexOf('for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do'))
+  it('right after the spawn: the guard again, and a refusal kills the fresh session and skips the agent', () => {
+    const spawn = loop.indexOf('tmux new-session -d -s "$SESSION_NAME" "$CMD"')
+    const after = loop.slice(spawn).split('\n').slice(1).filter((l) => l.trim() !== '' && !l.trim().startsWith('#'))
+    expect(after[0].trim()).toBe('PKG_REFUSAL="$(package_start_refusal "$AGENT_DIR" "$AGENT_ID" "$PACKAGE_HIDDEN_LIST")"')
+    expect(after[1].trim()).toBe('if [ -n "$PKG_REFUSAL" ]; then')
+    expect(after[2].trim()).toBe('tmux kill-session -t "=$SESSION_NAME:" 2>/dev/null')
+    expect(after.slice(3, 6).map((l) => l.trim())).toContain('continue')
   })
 })
 

@@ -153,6 +153,29 @@ export function hiddenListPath(): string {
 export function markerPathOf(name: string): string {
   return join(installingDir(), `${name}.json`)
 }
+/** store/agent-package-updating: the trace an update apply writes first and removes last (update.ts runApplyBlock). */
+export function updatingDir(): string {
+  return join(STORE_DIR, 'agent-package-updating')
+}
+export function updatingTracePathOf(name: string): string {
+  return join(updatingDir(), `${name}.json`)
+}
+
+/**
+ * This fork (KISPROGI 6464 H1): whether an update trace stands for `name`, any entry (a file, a link, a folder, an
+ * unreadable or unparsable one). The start guards refuse a package agent while it stands: an update is being applied,
+ * or one was interrupted and the folder may hold a mix of two versions. Fail closed: a stat error other than ENOENT
+ * counts as present. The watchdog makes the same test (scripts/watchdog.sh package_update_in_progress).
+ */
+export function hasUpdatingTrace(name: string): boolean {
+  if (!isInstallableName(name)) return false
+  try {
+    lstatSync(updatingTracePathOf(name))
+    return true
+  } catch (err) {
+    return (err as { code?: unknown } | null)?.code !== 'ENOENT'
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The marker (plan 7.2, 7.5)

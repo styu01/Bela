@@ -88,7 +88,7 @@ function install(files = V1, version = '1.0.0'): void {
 }
 
 /** What the route does inside the queue: the record, the list, the decisions, the block. */
-function update(files: Record<string, string>, version: string, decisions: Record<string, string> = {}, quarantine = false, tamper?: () => void) {
+function update(files: Record<string, string>, version: string, decisions: Record<string, string> = {}, quarantine = false, tamper?: () => void, isRunning?: () => boolean) {
   const pkg = pkgOf(files, version)
   const m = I.readPackageManifest(dir)
   if (m.state !== 'ok') throw new Error('no record')
@@ -99,7 +99,7 @@ function update(files: Record<string, string>, version: string, decisions: Recor
   const d = U.checkDecisions(list, decisions)
   if (!d.ok) return { list, decided: d, result: null }
   tamper?.()
-  const result = U.runApplyBlock({ name: NAME, agentDir: dir, list, ops: d.ops, pkg, manifest: m.manifest, installedFiles, driveFolder: '', lang: 'hu', now: LATER })
+  const result = U.runApplyBlock({ name: NAME, agentDir: dir, list, ops: d.ops, pkg, manifest: m.manifest, installedFiles, driveFolder: '', lang: 'hu', now: LATER, isRunning })
   return { list, decided: d, result, pkg }
 }
 
@@ -259,6 +259,8 @@ describe('an interrupted update, and its re-run', () => {
     expect(r).toEqual({ ok: false, status: 500, body: { error: 'update_failed' } })
     expect(read('PACKAGE.md')).toBe(V2['CLAUDE.md'])
     expect(U.readUpdatingTrace(NAME)).toEqual({ from: '1.0.0', to: '1.1.0', startedAt: LATER.toISOString() })
+    // This fork (KISPROGI 6464 H1): files were written, so the trace stays and the agent is not started on the mix.
+    expect(I.packageStartRefusal(NAME, dir)).toBe(I.REFUSAL_UPDATE_IN_PROGRESS)
     // The owner's disk is put back to a folder with the OLD record: the re-run sees current/absent and finishes.
     rmSync(recordPath, { recursive: true })
     writeFileSync(recordPath, keep)
@@ -269,6 +271,7 @@ describe('an interrupted update, and its re-run', () => {
     ])
     expect(again.result?.ok).toBe(true)
     expect(U.readUpdatingTrace(NAME)).toBeNull()
+    expect(I.packageStartRefusal(NAME, dir)).toBeNull()
   })
   it('removeOrphanUpdatingTraces: only the trace of an agent that no longer exists goes', () => {
     mkdirSync(join(STORE, 'agent-package-updating'), { recursive: true })
@@ -340,5 +343,86 @@ describe('repair', () => {
     expect(r.result?.ok).toBe(true)
     expect(read('PACKAGE.md')).toBe(V1['CLAUDE.md'])
     expect(lstatSync(at('PACKAGE.md')).isFile()).toBe(true)
+  })
+})
+
+// This fork (KISPROGI 6464 H1): the start guards refuse a package agent while its update trace stands, and the block
+// asks whether the agent runs once the trace stands. A stop before any agent file was touched leaves the trace as it
+// found it, so a refusal does not lock the agent out; a stop after a write keeps it (the folder may hold a mix).
+describe('the update trace and the start guard (this fork, KISPROGI 6464 H1)', () => {
+  const tracePath = join(STORE, 'agent-package-updating', `${NAME}.json`)
+
+  it('a start that slipped in before the trace: 409 agent_running, the guard refused from the trace on, nothing written, no trace left', () => {
+    const shell = read('CLAUDE.md')
+    const record = readFileSync(join(dir, '.package', 'manifest.json'))
+    const seen: Array<string | null> = []
+    const r = update(V2, '1.1.0', {}, false, undefined, () => { seen.push(I.packageStartRefusal(NAME, dir)); return true })
+    expect(r.result).toMatchObject({ ok: false, status: 409, body: { error: 'agent_running', message: U.AGENT_RUNNING_MESSAGE } })
+    expect(seen).toEqual([I.REFUSAL_UPDATE_IN_PROGRESS])
+    expect(read('PACKAGE.md')).toBe(V1['CLAUDE.md'])
+    expect(read('.claude/skills/old/SKILL.md')).toBe(V1['skills/old/SKILL.md'])
+    expect(existsSync(at('.claude/skills/new'))).toBe(false)
+    expect(read('CLAUDE.md')).toBe(shell)
+    expect(readFileSync(join(dir, '.package', 'manifest.json')).equals(record)).toBe(true)
+    expect(existsSync(tracePath)).toBe(false)
+    expect(I.packageStartRefusal(NAME, dir)).toBeNull()
+  })
+
+  it('a not running agent: the probe is asked exactly once, after the trace, and the apply finishes', () => {
+    let calls = 0
+    const r = update(V2, '1.1.0', {}, false, undefined, () => { calls++; expect(existsSync(tracePath)).toBe(true); return false })
+    expect(r.result?.ok).toBe(true)
+    expect(calls).toBe(1)
+    expect(existsSync(tracePath)).toBe(false)
+  })
+
+  it("an earlier interrupted update's trace survives a stop with no write, byte for byte", () => {
+    mkdirSync(join(STORE, 'agent-package-updating'), { recursive: true })
+    const earlier = JSON.stringify({ from: '0.9.0', to: '1.0.0', startedAt: NOW.toISOString() }) + '\n'
+    writeFileSync(tracePath, earlier, { mode: 0o600 })
+    const r = update(V2, '1.1.0', {}, false, undefined, () => true)
+    expect(r.result).toMatchObject({ status: 409, body: { error: 'agent_running' } })
+    expect(readFileSync(tracePath, 'utf8')).toBe(earlier)
+    expect(I.packageStartRefusal(NAME, dir)).toBe(I.REFUSAL_UPDATE_IN_PROGRESS)
+  })
+
+  it('plan_changed on the first item: nothing written, the trace does not stay', () => {
+    const r = update(V2, '1.1.0', {}, false, () => writeFileSync(at('PACKAGE.md'), 'written meanwhile\n'))
+    expect(r.result).toEqual({ ok: false, status: 409, body: { error: 'plan_changed' } })
+    expect(existsSync(tracePath)).toBe(false)
+    expect(I.packageStartRefusal(NAME, dir)).toBeNull()
+  })
+
+  it('plan_changed after a file was written: the trace stays and the guard refuses', () => {
+    // SOUL.md is unchanged in V2, so the second write is skills/new; make a later item (notes) move instead.
+    const r = update(V2, '1.1.0', {}, false, () => writeFileSync(at('.claude/skills/notes/SKILL.md'), 'mine meanwhile\n'))
+    expect(r.result).toEqual({ ok: false, status: 409, body: { error: 'plan_changed' } })
+    expect(read('PACKAGE.md')).toBe(V2['CLAUDE.md'])
+    expect(existsSync(tracePath)).toBe(true)
+    expect(I.packageStartRefusal(NAME, dir)).toBe(I.REFUSAL_UPDATE_IN_PROGRESS)
+  })
+
+  it('a trace that is a link or a folder counts (fail closed), and is left in place by a stop with no write', () => {
+    mkdirSync(join(STORE, 'agent-package-updating'), { recursive: true })
+    symlinkSync(join(tmpRoot, 'nowhere'), tracePath)
+    expect(M.hasUpdatingTrace(NAME)).toBe(true)
+    expect(I.packageStartRefusal(NAME, dir)).toBe(I.REFUSAL_UPDATE_IN_PROGRESS)
+    unlinkSync(tracePath)
+    mkdirSync(tracePath)
+    expect(M.hasUpdatingTrace(NAME)).toBe(true)
+    expect(I.packageStartRefusal(NAME, dir)).toBe(I.REFUSAL_UPDATE_IN_PROGRESS)
+    rmSync(tracePath, { recursive: true })
+    expect(M.hasUpdatingTrace(NAME)).toBe(false)
+  })
+
+  it("a stale trace under a hand-made agent's name does not keep that agent from starting", () => {
+    const hand = join(AGENTS, 'hand')
+    mkdirSync(hand, { recursive: true })
+    writeFileSync(join(hand, 'CLAUDE.md'), '# Hand-made\n')
+    mkdirSync(join(STORE, 'agent-package-updating'), { recursive: true })
+    writeFileSync(join(STORE, 'agent-package-updating', 'hand.json'), '{}')
+    expect(M.hasUpdatingTrace('hand')).toBe(true)
+    expect(I.packageStartRefusal('hand', hand)).toBeNull()
+    rmSync(hand, { recursive: true })
   })
 })

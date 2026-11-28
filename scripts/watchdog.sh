@@ -80,6 +80,8 @@ PACKAGE_SHELL_PREFIX_FILE="$INSTALL_DIR/scripts/lib/package-shell-prefix"
 PACKAGE_HIDDEN_LIST="$INSTALL_DIR/store/agent-package-hidden.json"
 # The owner approvals (approval.ts); overridable only so the self-test can point at a stand-in folder.
 PACKAGE_APPROVALS_DIR="${WATCHDOG_PACKAGE_APPROVALS_DIR:-$INSTALL_DIR/store/agent-package-approved}"
+# The update traces (update.ts runApplyBlock writes one first and removes it last); overridable for the self-test only.
+PACKAGE_UPDATING_DIR="${WATCHDOG_PACKAGE_UPDATING_DIR:-$INSTALL_DIR/store/agent-package-updating}"
 
 # 0 when $1 is a regular file (not a link) whose first bytes are the prefix. Any
 # failure of the compare (an unreadable file) is "not the shell".
@@ -122,6 +124,12 @@ except Exception:
 sys.exit(0 if isinstance(names, list) and sys.argv[2] in names else 1)' "$2" "$1" 2>/dev/null
 }
 
+# This fork (KISPROGI 6464 H1): 0 while an update trace stands for the name $1, any entry (a file, a link, a folder),
+# like marker.ts hasUpdatingTrace: an update is being applied, or one was interrupted and the folder may hold a mix.
+package_update_in_progress() {
+  [ -e "$PACKAGE_UPDATING_DIR/$1.json" ] || [ -L "$PACKAGE_UPDATING_DIR/$1.json" ]
+}
+
 # This fork (BELA 6438/6444): a package agent starts only when its owner approval names exactly the package that stands
 # in its folder: store/agent-package-approved/<name>.json against agents/<name>/.package/manifest.json, the slug, the
 # version and the sha256 of the signed payload (src/web/agent-package/approval.ts makes the same comparison). Read by
@@ -152,6 +160,10 @@ PY
 package_start_refusal() {
   local d="${1%/}"
   if package_install_hidden "$2" "$3"; then echo "Package install incomplete"; return; fi
+  # H1: only a package agent's folder (the shell or a manifest) is held by the trace (install.ts packageStartRefusal).
+  if package_update_in_progress "$2" && { starts_with_package_shell "$d/CLAUDE.md" || package_manifest_present "$d/.package/manifest.json"; }; then
+    echo "Package update in progress"; return
+  fi
   local is_pkg=0
   if starts_with_package_shell "$d/CLAUDE.md"; then
     package_layer_present "$d/PACKAGE.md" || { echo "Package files missing: run a package repair"; return; }
@@ -450,6 +462,15 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && ${SAFETY_ENV}export ${STATE_ENV_VAR}=\"$CHAN_DIR\" && cd \"$AGENT_DIR\" && ${CLAUDE_BIN} --dangerously-skip-permissions --model '$MODEL' --channels plugin:${AGENT_PROVIDER}@claude-plugins-official"
 
   tmux new-session -d -s "$SESSION_NAME" "$CMD" 2>/dev/null
+  # H1: the dashboard may have begun a package update between the guard above and the spawn (it writes its trace,
+  # then checks that the agent is not running). Ask the guard again; a refusal now withdraws the fresh session before
+  # Claude Code has read a file.
+  PKG_REFUSAL="$(package_start_refusal "$AGENT_DIR" "$AGENT_ID" "$PACKAGE_HIDDEN_LIST")"
+  if [ -n "$PKG_REFUSAL" ]; then
+    tmux kill-session -t "=$SESSION_NAME:" 2>/dev/null
+    echo "$(timestamp) [watchdog] $AGENT_ID: start withdrawn: $PKG_REFUSAL" >> "$LOG"
+    continue
+  fi
   sleep 2
 
   if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then

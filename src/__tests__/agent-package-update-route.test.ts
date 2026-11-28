@@ -258,4 +258,51 @@ describe('the update and the owner approval (this fork)', () => {
     expect(A.approvePackage(NAME, 'owner', NOW, { version: '1.3.0' }).ok).toBe(true)
     expect(A.packageApprovalRefusal(NAME)).toBeNull()
   })
+
+  // KISPROGI 6464 H1, its PoC (6461) turned around: the agent is started while the download is awaited. The block sees
+  // it once its trace stands and answers 409 agent_running; nothing lands under the running agent.
+  it('an approved agent started while the download is in flight: 409 agent_running, the disk unchanged, no trace left', async () => {
+    const A = await import('../web/agent-package/approval.js')
+    const I = await import('../web/agent-package/install.js')
+    expect(A.approvePackage(NAME, 'owner', NOW).ok).toBe(true)
+    serveVersion('1.3.0', { files: V2 })
+    const c = await check()
+    const before = snapshot()
+    let guardDuringDownload: string | null | undefined
+    const racing: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/agent-package-download')) {
+        guardDuringDownload = I.packageStartRefusal(NAME, dirOf()) ?? A.packageApprovalRefusal(NAME)
+        h.running.add(NAME)
+      }
+      return withCatalog(fake.fetchImpl)(input, init)
+    }) as typeof fetch
+    notified.length = 0
+    const out = await apply({ planId: c.body.planId, decisions: {} }, SESSION, { ...deps, fetchImpl: racing })
+    expect(guardDuringDownload).toBeNull()
+    expect(out).toMatchObject({ status: 409, body: { error: 'agent_running' } })
+    expect(snapshot()).toEqual(before)
+    expect(readFileSync(dirOf('PACKAGE.md'), 'utf8')).not.toContain('Version two.')
+    expect(existsSync(join(STORE, 'agent-package-updating', `${NAME}.json`))).toBe(false)
+    expect(A.packageApprovalRefusal(NAME)).toBeNull()
+    expect(notified.filter((t) => t.includes('UJRA JOVAHAGYASRA VAR'))).toHaveLength(0)
+  })
+
+  it('while the block runs the start guard says Package update in progress', async () => {
+    const I = await import('../web/agent-package/install.js')
+    serveVersion('1.3.0', { files: V2 })
+    const c = await check()
+    const seen: Array<string | null> = []
+    const probe = { has: (n: string) => { seen.push(I.packageStartRefusal(n, dirOf())); return false } }
+    const realHas = h.running.has.bind(h.running)
+    h.running.has = probe.has as typeof h.running.has
+    try {
+      expect((await apply({ planId: c.body.planId, decisions: {} })).status).toBe(200)
+    } finally {
+      h.running.has = realHas
+    }
+    // The route's early check (no trace yet), then the block's check after the trace.
+    expect(seen).toEqual([null, I.REFUSAL_UPDATE_IN_PROGRESS])
+    expect(I.packageStartRefusal(NAME, dirOf())).toBeNull()
+  })
 })

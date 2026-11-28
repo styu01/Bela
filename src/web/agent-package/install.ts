@@ -24,7 +24,7 @@ import {
 } from './verify.js'
 import {
   PACKAGE_SHELL_PREFIX_TEXT, agentsBaseDir, dirIdentityOf, hasLaunchTrace, hasPackageManifestFile, installMarkerState,
-  installingDir, isBlankBytes, isInstallableName, leftoversDir, manifestPathOf, markerPathOf, parseMarker,
+  hasUpdatingTrace, installingDir, isBlankBytes, isInstallableName, isPackageAgentDir, leftoversDir, manifestPathOf, markerPathOf, parseMarker,
   startsWithPackageShell, writeHiddenList, type MarkerContent,
 } from './marker.js'
 
@@ -664,6 +664,8 @@ function reapEntry(entry: string, now: Date, sum: ReapSummary): void {
 export const REFUSAL_INSTALL_INCOMPLETE = 'Package install incomplete'
 export const REFUSAL_FILES_MISSING = 'Package files missing: run a package repair'
 export const REFUSAL_SHELL_BROKEN = 'Package shell broken: CLAUDE.md must start with the PACKAGE.md and LOCAL.md import lines'
+/** This fork (KISPROGI 6464 H1): an update is being applied, or one was interrupted; the watchdog says the same. */
+export const REFUSAL_UPDATE_IN_PROGRESS = 'Package update in progress'
 
 /** The CLAUDE.md bytes when it is a regular file that can be read, else null. */
 function regularFileBytes(p: string): Buffer | null {
@@ -683,6 +685,9 @@ function regularFileBytes(p: string): Buffer | null {
  */
 export function packageStartRefusal(name: string, dir: string): string | null {
   if (installMarkerState(name).kind === 'valid') return REFUSAL_INSTALL_INCOMPLETE
+  // H1: only a package agent's folder (a manifest, or the shell) is held by the trace: a stale trace under a name a
+  // hand-made agent took later does not keep that agent from starting.
+  if (hasUpdatingTrace(name) && isPackageAgentDir(dir)) return REFUSAL_UPDATE_IN_PROGRESS
   const claude = regularFileBytes(join(dir, 'CLAUDE.md'))
   const shell = claude !== null && startsWithPackageShell(claude)
   if (shell) {

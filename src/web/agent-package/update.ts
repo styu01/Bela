@@ -7,13 +7,12 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
-import { STORE_DIR } from '../../config.js'
 import { logger } from '../../logger.js'
 import { canonicalJson } from '../../skill-cli-core.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { fleetRosterBlock } from '../agent-scaffold.js'
 import { SKILL_SCAN_PATTERNS, globalSkillsRoot } from '../skill-quarantine.js'
-import { hasLaunchTrace, isBlankBytes, isInstallableName, manifestPathOf, startsWithPackageShell } from './marker.js'
+import { hasLaunchTrace, isBlankBytes, isInstallableName, manifestPathOf, startsWithPackageShell, updatingDir, updatingTracePathOf } from './marker.js'
 import { TEXT_PATH_RE, compareVersions, type VerifiedPackage } from './verify.js'
 import {
   manifestRecordText, mkdirInsideAgentDir, packageShellText, payloadPathToDisk, writeLocalIfAbsent, type PackageManifest,
@@ -360,9 +359,7 @@ export function checkDecisions(list: ChangeList, decisions: unknown): DecisionCh
 // 8.4 The interrupted-update trace (D11)
 // ---------------------------------------------------------------------------
 
-export function updatingDir(): string {
-  return join(STORE_DIR, 'agent-package-updating')
-}
+export { updatingDir }
 
 export interface UpdatingTrace { from: string; to: string; startedAt: string }
 
@@ -423,6 +420,9 @@ export function shellRepairState(agentDir: string): ShellRepair {
 // 8.4 The apply block
 // ---------------------------------------------------------------------------
 
+/** The 409 agent_running text, shared by the route's early check and the block's check after the trace (H1). */
+export const AGENT_RUNNING_MESSAGE = 'Stop the agent before applying a package update; after the update it waits for a new owner approval.'
+
 export interface ApplyInput {
   name: string
   agentDir: string
@@ -434,12 +434,19 @@ export interface ApplyInput {
   driveFolder: string
   lang: 'hu' | 'en'
   now: Date
+  /**
+   * This fork (KISPROGI 6464 H1): asked once the trace stands, before anything else is touched. From the trace on, the
+   * start guards refuse the agent, so a start that slipped in before it is seen here and the block stops with 409
+   * agent_running, nothing written. Optional only for the unit tests that drive the block without a process table.
+   */
+  isRunning?: () => boolean
 }
 
 export type ApplyResult =
   | { ok: true; applied: { write: number; delete: number; keep: number } }
   | { ok: false; status: 409; body: { error: 'path_blocked'; paths: string[] } }
   | { ok: false; status: 409; body: { error: 'plan_changed' } }
+  | { ok: false; status: 409; body: { error: 'agent_running'; message: string } }
   | { ok: false; status: 500; body: { error: 'update_failed' } }
 
 class Stop extends Error {
@@ -564,18 +571,46 @@ export function runApplyBlock(c: ApplyInput): ApplyResult {
   } catch {
     return { ok: false, status: 500, body: { error: 'update_failed' } }
   }
-  const tracePath = join(updatingDir(), `${c.name}.json`)
+  const tracePath = updatingTracePathOf(c.name)
   const backupRoot = join(c.agentDir, '.package', 'backup')
   const backupKey = c.pkg.payloadSha256.slice(0, 16)
   // Plan 8.3: the shell, LOCAL.md and the record are never items; checked on the mapper's OUTPUT, whatever it gave.
   const forbidden = c.ops.find((o) => o.op !== 'keep' && (o.item.disk === 'CLAUDE.md' || o.item.disk === 'LOCAL.md'
     || o.item.disk === '.package' || o.item.disk.startsWith('.package' + sep)))
   if (forbidden !== undefined) return { ok: false, status: 500, body: { error: 'update_failed' } }
+  // This fork (KISPROGI 6464 H1): the trace makes the start guards refuse the agent. A block that stops before it
+  // touched any agent file leaves the trace as it found it, so a refusal (plan_changed on the first item, a running
+  // agent) does not lock the agent out; once a file was touched the trace stays, the folder may hold a mix of two
+  // versions, and only a finished apply removes it.
+  let mutated = false
+  let traceWritten = false
+  let prior: 'absent' | 'other' | Buffer = 'absent'
+  try {
+    const st = lstatSync(tracePath)
+    prior = st.isFile() ? readFileSync(tracePath) : 'other'
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') prior = 'other'
+  }
+  const settleTrace = (): void => {
+    if (mutated || !traceWritten) return
+    try {
+      if (prior === 'absent') unlinkSync(tracePath)
+      else if (prior !== 'other') atomicWriteFileSync(tracePath, prior, { mode: 0o600 })
+      // 'other' (a link or a folder stood there): the new trace stays; the guard keeps refusing, as it did.
+    } catch (err) {
+      logger.warn({ err, name: c.name }, 'agent package update: the trace was not put back after a stop with no write')
+    }
+  }
   try {
     // The backup folders must be real folders before anything there is deleted (a link would send the delete out).
     if (!isRealDirOrAbsent(join(c.agentDir, '.package')) || !isRealDirOrAbsent(backupRoot)) throw blockedAt('.package/backup')
     mkdirSync(updatingDir(), { recursive: true, mode: 0o700 })
     atomicWriteFileSync(tracePath, JSON.stringify({ from: c.manifest.payload.version, to: c.pkg.version, startedAt: c.now.toISOString() }) + '\n', { mode: 0o600 })
+    traceWritten = true
+    // H1: a start that passed its guard before the trace stood is seen here; from now on every start is refused.
+    if (c.isRunning?.() === true) {
+      throw new Stop({ ok: false, status: 409, body: { error: 'agent_running', message: AGENT_RUNNING_MESSAGE } })
+    }
     // IR11: the backups of OTHER targets go; this target's stay (an interrupted run's only copy of a replaced file).
     dropOtherBackups(agentReal, c.agentDir, backupKey)
 
@@ -619,6 +654,7 @@ export function runApplyBlock(c: ApplyInput): ApplyResult {
       if (o.backup) backup(o.item)
       else unchanged(o.item)
       if (!insideAgent(agentReal, dirname(target))) throw blockedAt(o.item.path)
+      mutated = true
       mkdirInsideAgentDir(c.agentDir, dirname(target))
       if (!insideAgent(agentReal, dirname(target))) throw blockedAt(o.item.path)
       atomicWriteFileSync(target, Buffer.from(texts.get(o.item.path) as string, 'utf8'), { mode: 0o644 })
@@ -628,6 +664,7 @@ export function runApplyBlock(c: ApplyInput): ApplyResult {
       if (o.backup) backup(o.item)
       else unchanged(o.item)
       if (!insideAgent(agentReal, dirname(target))) throw blockedAt(o.item.path)
+      mutated = true
       try { unlinkSync(target) } catch (err) {
         if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
       }
@@ -636,9 +673,11 @@ export function runApplyBlock(c: ApplyInput): ApplyResult {
     const newSkills = new Set(c.pkg.files.map((f) => folderKeyOf(f.path)).filter((k): k is string => k !== null))
     const oldSkills = new Set([...c.installedFiles.keys()].map(folderKeyOf).filter((k): k is string => k !== null))
     for (const k of [...oldSkills].filter((x) => !newSkills.has(x)).sort()) {
+      mutated = true
       removeEmptyFolders(agentReal, join(c.agentDir, '.claude', k), k)
     }
     if (c.list.kind === 'repair') {
+      mutated = true
       const state = shellRepairState(c.agentDir)
       if (state.shell === 'missing') {
         // v1.2.4: the shell WITH the roster block, in ONE exclusive write (the roster body is built without reading a file).
@@ -656,11 +695,13 @@ export function runApplyBlock(c: ApplyInput): ApplyResult {
       if (state.local === 'missing') writeLocalIfAbsent(c.agentDir, c.lang)
     }
     const recordPath = manifestPathOf(c.agentDir)
+    mutated = true
     mkdirInsideAgentDir(c.agentDir, dirname(recordPath))
     if (!insideAgent(agentReal, dirname(recordPath))) throw blockedAt('.package/manifest.json')
     atomicWriteFileSync(recordPath, manifestRecordText(c.pkg, c.now.toISOString(), c.manifest.installedAt), { mode: 0o644 })
     try { unlinkSync(tracePath) } catch { /* the next successful apply removes it */ }
   } catch (err) {
+    settleTrace()
     if (err instanceof Stop) return err.result
     logger.warn({ err, name: c.name }, 'agent package update failed in the apply block')
     return { ok: false, status: 500, body: { error: 'update_failed' } }
