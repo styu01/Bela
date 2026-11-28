@@ -122,6 +122,19 @@ describe('auth-store-gate: Bash (BELA 6410)', () => {
     expect(run('not json').stdout).toBe('')
   })
 
+  // KISPROGI 6483 L2: shlex is quadratic on a long quoted token; above 200 KB only the text rules run.
+  it('a very long command decides fast: a plain one passes, one naming a protected thing is refused', () => {
+    const big = 'x'.repeat(750 * 1024)
+    let t = Date.now()
+    expect(bash(`curl -s -d '{"content":"${big}"}' http://localhost:3420/api/messages`)).toBe('pass')
+    expect(Date.now() - t).toBeLessThan(3000)
+    t = Date.now()
+    expect(bash(`curl -s -d '{"content":"${big}"}' http://localhost:3420/api/messages; cat store/.dashboard-totp.json`)).toBe('DENY')
+    expect(bash(`echo '${big}'; sqlite3 x.db "UPDATE dashboard_users SET a=1"`)).toBe('DENY')
+    expect(bash(`echo '${big}'; rm store/claudeclaw.db`)).toBe('DENY')
+    expect(Date.now() - t).toBeLessThan(6000)
+  })
+
   it('python3 -I: a PYTHONPATH with a pass-all json.py does not switch it off', () => {
     const shadow = join(tmp, 'pyshadow'); mkdirSync(shadow, { recursive: true })
     writeFileSync(join(shadow, 'json.py'), 'import sys\nsys.exit(0)\n')

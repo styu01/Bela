@@ -125,6 +125,7 @@ def _deny(why: str) -> None:
 # --------------------------------------------------------------------------------------------------------------
 
 UNKNOWN_CWD = "\0unknown-cwd"
+BIG_TEXT = 200 * 1024
 
 
 def _resolve(path: str, cwd: str) -> str:
@@ -588,6 +589,13 @@ def _unparsable_hits(cmd: str) -> bool:
 def check_bash(cmd: str, cwd: str, depth: int = 0, best_effort: bool = False) -> None:
     """best_effort: a nested try on text that may not be shell at all (an interpreter's code); a parse failure there
     is not a refusal, the text rules already ran on it."""
+    if len(cmd) > BIG_TEXT:
+        # KISPROGI 6483 L2: shlex is quadratic on one long quoted token (365 KB: 4 s, 750 KB: 16.5 s, past the hook's
+        # deadline, which fails the main agent's Bash closed). Above the threshold only the text rules run, the same set
+        # as for unparsable Bash. Real commands peak far below it (measured max 41 KB, p99.9 15 KB).
+        if not best_effort and _unparsable_hits(cmd):
+            _deny("nagyon hosszu parancs a vedett nevekkel (csak szoveges ellenorzes)")
+        return
     text, bodies = _strip_heredocs(cmd)
     text, subs = _strip_substitutions(text)
     for s in subs:
