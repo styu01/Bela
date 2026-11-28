@@ -91,7 +91,11 @@ describe('the released build and the credential (PR-I2)', () => {
   it('the credential file name appears in remote.ts and, as a name only, in the store watcher\'s two lists', () => {
     const NAME = 'agent-package-credential'
     const holders = ALL_SRC.filter(([, t]) => t.includes(NAME)).map(([f]) => f).sort()
-    expect(holders).toEqual(['store-watcher.ts', 'web/agent-package/remote.ts'])
+    // LOCAL ADAPTATION (KISPROGI 6454 K, BELA 6468): the sub-agents' Read deny names the file too, as a name only.
+    expect(holders).toEqual(['store-watcher.ts', 'web/agent-package/remote.ts', 'web/agent-scaffold.ts'])
+    const scaffold = ALL_SRC.find(([f]) => f === 'web/agent-scaffold.ts')![1]
+    expect(scaffold.split(NAME).length - 1).toBe(1)
+    expect(scaffold).toContain(`export const SUBAGENT_PACKAGE_CREDENTIAL_DENY = 'Read(//**/store/${NAME}.json)'`)
     const watcher = ALL_SRC.find(([f]) => f === 'store-watcher.ts')![1]
     const sets = ['SYSTEM_FILES', 'SENSITIVE_NAMES'].map((n) => watcher.match(new RegExp(`const ${n} = new Set\\(\\[[\\s\\S]*?\\]\\)`))?.[0] ?? '')
     for (const set of sets) expect(set).toContain(`'${NAME}.json'`)

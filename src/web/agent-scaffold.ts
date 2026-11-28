@@ -508,6 +508,11 @@ export function ensureAgentStalenessHook(name: string): boolean {
 // user. The `//**/` form is upstream's MEASURED one (Claude Code 2.1.326, 2026-11-19): `Read(**/store/...)` let the
 // Read tool read the file from a sub-agent cwd two levels below, this form and an absolute `//` path refused.
 export const SUBAGENT_TOTP_STORE_DENY = 'Read(//**/store/.dashboard-totp.json)'
+// This fork (KISPROGI 6454 K, BELA 6468): the agent package device credential (src/web/agent-package/remote.ts, 0600,
+// its token never leaves that module). No sub-agent reads it either; the same measured rule shape, the same fence
+// (the Read tool only, not an OS boundary). Today the file cannot exist (no publishing origin); this is in place
+// before one is set.
+export const SUBAGENT_PACKAGE_CREDENTIAL_DENY = 'Read(//**/store/agent-package-credential.json)'
 
 export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemplate): void {
   const agentRoot = agentDir(name)
@@ -528,6 +533,8 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsGovernanceGates(name)) denyList.push(...SELF_PACE_TOOL_DENY)
   // DOCKERHTTPS1119 (upstream 8a96be49): no sub-agent reads the dashboard login's second-factor store.
   if (agentGetsGovernanceGates(name) && !denyList.includes(SUBAGENT_TOTP_STORE_DENY)) denyList.push(SUBAGENT_TOTP_STORE_DENY)
+  // KISPROGI 6454 K: nor the agent package device credential.
+  if (agentGetsGovernanceGates(name) && !denyList.includes(SUBAGENT_PACKAGE_CREDENTIAL_DENY)) denyList.push(SUBAGENT_PACKAGE_CREDENTIAL_DENY)
   existing.permissions = {
     allow: profile.filesystem.allow.map(p => resolveProfilePlaceholders(p, ctx)),
     deny: denyList,
